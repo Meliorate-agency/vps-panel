@@ -1,0 +1,304 @@
+.bar {
+  height: 48px;
+  border-bottom: 1px solid var(--border);
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 0 20px;
+  background: var(--bg-elev-solid);
+  flex-shrink: 0;
+}
+
+.hamburger {
+  display: none;
+  width: 36px;
+  height: 36px;
+  align-items: center;
+  justify-content: center;
+  background: var(--bg-elev-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  color: var(--text);
+  cursor: pointer;
+  padding: 0;
+  flex-shrink: 0;
+  transition: border-color 0.1s, color 0.1s;
+}
+
+.hamburger:hover {
+  border-color: var(--border-strong);
+  color: var(--accent-glow);
+}
+
+.spacer {
+  flex: 1;
+}
+
+/* Top-left server clock. Muted lavender — visible but never competes with
+   the page title underneath. Mono digits so the seconds ticking doesn't
+   reflow the text. Minimum width reserves the line's footprint to avoid
+   layout shift on the initial hydration frame. */
+.serverClock {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+  color: rgba(var(--text-dim-rgb), 0.82);
+  letter-spacing: 0.02em;
+  min-width: 200px;
+  min-height: 1em;
+}
+
+.serverClockDate {
+  opacity: 0.75;
+}
+
+.serverClockTime {
+  font-family: var(--mono);
+  font-variant-numeric: tabular-nums;
+  font-weight: 600;
+  color: var(--text-dim);
+}
+
+.serverClockZone {
+  font-size: 10px;
+  font-weight: 600;
+  color: rgba(var(--text-dim-rgb), 0.58);
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.user {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  font-size: 13px;
+}
+
+.email {
+  color: var(--text-dim);
+}
+
+.signOut {
+  background: var(--bg-elev-2);
+  border: 1px solid var(--border);
+  color: var(--text);
+  padding: 6px 10px;
+  border-radius: var(--radius);
+  font-size: 12px;
+  transition: border-color 0.1s, background 0.1s;
+}
+
+.signOut:hover {
+  background: var(--bg-elev-2);
+  border-color: var(--border-strong);
+}
+
+.updateWrap {
+  position: relative;
+}
+
+.updateBtn {
+  background: var(--bg-elev-2);
+  border: 1px solid var(--border);
+  color: var(--text);
+  padding: 6px 10px;
+  border-radius: var(--radius);
+  font-size: 12px;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  transition: border-color 0.1s, background 0.1s;
+}
+
+.updateBtn:hover {
+  border-color: var(--border-strong);
+}
+
+.updateDot {
+  width: 8px;
+  height: 8px;
+  border-radius: 999px;
+  flex-shrink: 0;
+}
+
+.dotOk {
+  background: var(--ok);
+  box-shadow: 0 0 6px rgba(74, 222, 128, 0.55);
+}
+
+.dotWarn {
+  background: #f0b432;
+  box-shadow: 0 0 6px rgba(240, 180, 50, 0.55);
+}
+
+.dotBad {
+  background: var(--danger);
+}
+
+.dotMuted {
+  background: var(--text-dim);
+  opacity: 0.5;
+}
+
+.updatePop {
+  position: absolute;
+  right: 0;
+  top: calc(100% + 6px);
+  min-width: 280px;
+  /* Use the SOLID elevated-bg variable. `--bg-elev` used to be
+   * `rgba(20,14,36)` (no alpha), which most browsers normalise to
+   * transparent → the panel sections behind bled through. It is now
+   * opaque too, but the portaled popover (GitStatusBadge on /apps)
+   * sits on top of other folder cards on mobile, so keep asking for
+   * the surface that is opaque by contract. */
+  background: var(--bg-elev-solid);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius);
+  padding: 12px;
+  box-shadow: 0 12px 32px rgba(0, 0, 0, 0.55);
+  /* z-index applies inside the popover's stacking context. The git
+   * status popover on /apps is portaled to <body> so this also wins
+   * against any sibling card. The topbar update popover (non-portaled)
+   * is in the topbar's stacking context which is already above the
+   * scrollable content area. */
+  z-index: 9999;
+  font-size: 12px;
+}
+
+.popTitle {
+  font-weight: 600;
+  font-size: 13px;
+  margin-bottom: 8px;
+  color: var(--text);
+}
+
+.popLine {
+  margin: 4px 0;
+}
+
+.popMuted {
+  color: var(--text-dim);
+}
+
+.popOk {
+  color: var(--ok);
+  font-weight: 600;
+}
+
+.popBad {
+  color: var(--danger);
+}
+
+.popCode {
+  font-family: var(--mono);
+  background: var(--bg);
+  padding: 1px 5px;
+  border-radius: var(--radius);
+  font-size: 11px;
+  color: var(--accent-glow);
+}
+
+/* Raw command output (a failed git fetch): wraps inside the popover and
+   scrolls past a few lines instead of growing it. */
+.popError {
+  margin: 4px 0 0;
+  padding: 6px 8px;
+  max-height: 140px;
+  overflow: auto;
+  background: var(--bg);
+  border-radius: var(--radius);
+  font-family: var(--mono);
+  font-size: 11px;
+  line-height: 1.45;
+  color: var(--text-dim);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.popActions {
+  display: flex;
+  gap: 6px;
+  justify-content: flex-end;
+  margin-top: 10px;
+  padding-top: 10px;
+  border-top: 1px solid var(--border);
+}
+
+.popGhost {
+  background: var(--bg-elev-2);
+  border: 1px solid var(--border);
+  color: var(--text);
+  padding: 5px 10px;
+  border-radius: var(--radius);
+  font-size: 11px;
+  transition: border-color 0.1s;
+}
+
+.popGhost:hover:not(:disabled) {
+  border-color: var(--border-strong);
+}
+
+.popGhost:disabled,
+.popPrimary:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.popPrimary {
+  background: var(--gradient-accent);
+  color: var(--accent-fg);
+  border: 0;
+  padding: 5px 12px;
+  border-radius: var(--radius);
+  font-size: 11px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: box-shadow 0.1s;
+}
+
+.popPrimary:hover:not(:disabled) {
+  box-shadow: var(--shadow-glow);
+}
+
+.spinner {
+  animation: vps-panel-spin 0.8s linear infinite;
+  flex-shrink: 0;
+  vertical-align: -2px;
+  margin-right: 4px;
+}
+
+@keyframes vps-panel-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+@media (max-width: 768px) {
+  .bar {
+    padding: 0 12px;
+    gap: 8px;
+  }
+
+  .hamburger {
+    display: inline-flex;
+  }
+
+  .serverClock {
+    min-width: 0;
+    font-size: 11px;
+    gap: 6px;
+  }
+
+  .serverClockDate {
+    display: none;
+  }
+
+  .user {
+    gap: 8px;
+  }
+
+  .email {
+    display: none;
+  }
+}

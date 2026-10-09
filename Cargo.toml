@@ -1,0 +1,47 @@
+[workspace]
+resolver = "2"
+members = ["agent"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+authors = ["VPS Panel"]
+license = "AGPL-3.0-only"
+
+[workspace.dependencies]
+tokio = { version = "1", features = ["full"] }
+axum = { version = "0.8", features = ["macros"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+anyhow = "1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
+rusqlite = { version = "0.32", features = ["bundled", "chrono"] }
+mysql_async = { version = "0.34" }
+askama = "0.12"
+nix = { version = "0.29", features = ["fs", "user", "process", "signal"] }
+uuid = { version = "1", features = ["v4", "serde"] }
+chrono = { version = "0.4", features = ["serde"] }
+rand = "0.8"
+sha2 = "0.10"
+sha-crypt = "0.5"
+hex = "0.4"
+subtle = "2"
+base64 = "0.22"
+argon2 = "0.5"
+instant-acme = "0.7"
+rcgen = "0.13"
+rustls-pemfile = "2"
+async-stream = "0.3"
+tower-http = { version = "0.6", features = ["trace"] }
+url = "2"
+regex = "1"
+futures = "0.3"
+tempfile = "3"
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+strip = "symbols"

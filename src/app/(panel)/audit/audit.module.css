@@ -1,0 +1,17 @@
+/* A message can be a whole command line or a git error. Three lines, then
+   ellipsis; the cell's title has the rest. Without this one entry pushed the
+   row (and the page) far past the card. */
+.msg {
+  display: -webkit-box;
+  -webkit-line-clamp: 3;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+  overflow-wrap: anywhere;
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.target {
+  display: block;
+  overflow-wrap: anywhere;
+}

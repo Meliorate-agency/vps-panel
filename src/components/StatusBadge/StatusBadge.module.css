@@ -1,0 +1,42 @@
+.badge {
+  display: inline-block;
+  padding: 2px 8px;
+  border-radius: var(--radius);
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  border: 1px solid;
+}
+
+.ok {
+  color: var(--ok);
+  background: rgba(84, 209, 140, 0.12);
+  border-color: rgba(84, 209, 140, 0.4);
+}
+
+.warn {
+  color: var(--warn);
+  background: rgba(255, 182, 72, 0.12);
+  border-color: rgba(255, 182, 72, 0.4);
+}
+
+.danger {
+  color: var(--danger);
+  background: rgba(255, 77, 109, 0.12);
+  border-color: rgba(255, 77, 109, 0.4);
+}
+
+.muted {
+  color: var(--text-dim);
+  background: rgba(var(--text-dim-rgb), 0.1);
+  border-color: rgba(var(--text-dim-rgb), 0.25);
+}
+
+/* Light-blue tone for in-flight states (e.g. task RUNNING). Distinguishes
+   "work in progress" from "finished successfully" (green ok). */
+.info {
+  color: #7cc4ff;
+  background: rgba(124, 196, 255, 0.12);
+  border-color: rgba(124, 196, 255, 0.4);
+}

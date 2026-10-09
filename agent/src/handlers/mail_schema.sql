@@ -1,0 +1,21 @@
+CREATE TABLE IF NOT EXISTS virtual_domains (
+  id INT AUTO_INCREMENT PRIMARY KEY,
+  name VARCHAR(255) NOT NULL UNIQUE
+) Engine=InnoDB;
+
+CREATE TABLE IF NOT EXISTS virtual_users (
+  id INT AUTO_INCREMENT PRIMARY KEY,
+  domain_id INT NOT NULL,
+  email VARCHAR(255) NOT NULL UNIQUE,
+  password VARCHAR(255) NOT NULL,
+  quota_mb BIGINT NOT NULL DEFAULT 1024,
+  FOREIGN KEY (domain_id) REFERENCES virtual_domains(id) ON DELETE CASCADE
+) Engine=InnoDB;
+
+CREATE TABLE IF NOT EXISTS virtual_aliases (
+  id INT AUTO_INCREMENT PRIMARY KEY,
+  domain_id INT NOT NULL,
+  source VARCHAR(255) NOT NULL,
+  destination VARCHAR(255) NOT NULL,
+  FOREIGN KEY (domain_id) REFERENCES virtual_domains(id) ON DELETE CASCADE
+) Engine=InnoDB;

@@ -1,0 +1,76 @@
+# vps-panel-host:__PANEL_HOST__
+server {
+    __LISTEN__
+    server_name __PANEL_HOST__;
+    # Settings > Panel access. Empty file = no restriction.
+    include /etc/nginx/vps-panel-access.conf;
+
+    # nginx defaults to 1m, which silently caps every panel POST. 25m is
+    # generous for forms and config edits; /api/files/upload overrides it.
+    client_max_body_size 25m;
+
+    location ^~ /.well-known/acme-challenge/ {
+        root __ACME_WEBROOT__;
+        default_type "text/plain";
+        allow all;
+        try_files $uri =404;
+    }
+
+    # My Networks: the other servers in a network reach this panel here
+    # from any address, whatever Settings > Panel access allows. The panel
+    # checks each request's signature. Only plain /api/peer/<name> paths
+    # pass, so nothing else can be made to normalize into this location.
+    location ^~ /api/peer/ {
+        allow all;
+        if ($request_uri !~ "^/api/peer/[a-z]+(\?[A-Za-z0-9=&_-]*)?$") {
+            return 404;
+        }
+        client_max_body_size 64k;
+        proxy_pass http://127.0.0.1:10000;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_http_version 1.1;
+        proxy_read_timeout 60s;
+    }
+
+    # Drive/Files uploads. Two things differ from the rest of the panel:
+    #
+    #   client_max_body_size    matches the agent's 5 GiB per-file ceiling.
+    #                           Without it nginx answers 413 and then STOPS
+    #                           READING the request, so the browser stalls
+    #                           pushing bytes at a socket nobody drains — the
+    #                           upload appears to hang rather than fail.
+    #   proxy_request_buffering nginx otherwise spools the whole body to disk
+    #                           before the panel sees a byte, which defeats the
+    #                           streaming path (browser → panel → agent → disk)
+    #                           and needs 5 GiB of scratch space to do it.
+    location = /api/files/upload {
+        proxy_pass http://127.0.0.1:10000;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_http_version 1.1;
+        proxy_buffering off;
+        proxy_request_buffering off;
+        client_max_body_size 5g;
+        proxy_read_timeout 3600s;
+        proxy_send_timeout 3600s;
+    }
+
+    location / {
+        proxy_pass http://127.0.0.1:10000;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_http_version 1.1;
+        proxy_buffering off;
+        proxy_read_timeout 300s;
+    }
+}
+
+# Once you issue a cert from Settings -> Issue cert, the agent
+# rewrites this file to add the 443 server block + redirect.

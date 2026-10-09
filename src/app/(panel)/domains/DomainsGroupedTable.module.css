@@ -1,0 +1,57 @@
+.apexCell {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.apexFlat {
+  display: inline-flex;
+  align-items: center;
+  padding-left: 24px;
+}
+
+.chevron {
+  background: transparent;
+  border: 1px solid transparent;
+  color: var(--text-dim);
+  padding: 0;
+  width: 18px;
+  height: 18px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  border-radius: 4px;
+  transition: background 0.1s, border-color 0.1s, color 0.1s;
+  font-size: 11px;
+}
+
+.chevron:hover {
+  background: var(--bg-elev-2);
+  border-color: var(--border);
+  color: var(--text);
+}
+
+.chevronOpen {
+  display: inline-block;
+  transform: rotate(90deg);
+  transition: transform 0.15s;
+}
+
+.chevronClosed {
+  display: inline-block;
+  transition: transform 0.15s;
+}
+
+.childCell {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding-left: 28px;
+}
+
+.connector {
+  color: var(--text-dim);
+  font-family: monospace;
+  font-size: 12px;
+}

@@ -1,0 +1,244 @@
+/* /ai-agent — MCP preview UI. Reuses the panel's common page.module.css
+ * for buttons / inputs / .section / .code; this file only adds the bits
+ * specific to the connection-info card and the per-page tool tree. */
+
+.statusRow {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  flex-wrap: wrap;
+  margin-bottom: 12px;
+}
+
+.pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 10px;
+  border-radius: 999px;
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: 0.03em;
+  border: 1px solid var(--border);
+}
+
+.pillOk {
+  background: rgba(84, 209, 140, 0.12);
+  border-color: rgba(84, 209, 140, 0.45);
+  color: var(--ok);
+}
+
+.pillOff {
+  background: var(--danger-bg);
+  border-color: var(--danger-border);
+  color: var(--danger);
+}
+
+.pillDot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+}
+
+.pillDotOk { background: var(--ok); box-shadow: 0 0 6px rgba(84, 209, 140, 0.55); }
+.pillDotOff { background: var(--danger); }
+
+.kvRow {
+  display: grid;
+  grid-template-columns: minmax(90px, max-content) 1fr;
+  gap: 6px 14px;
+  font-size: 13px;
+  align-items: center;
+}
+
+.kvLabel {
+  color: var(--text-dim);
+  font-size: 12px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  font-weight: 600;
+}
+
+.kvValue {
+  font-family: var(--mono);
+  font-size: 12px;
+  color: var(--text);
+  word-break: break-all;
+}
+
+.copyRow {
+  display: flex;
+  gap: 8px;
+  margin-top: 14px;
+  flex-wrap: wrap;
+}
+
+.snippet {
+  margin-top: 14px;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 12px 14px;
+  font-family: var(--mono);
+  font-size: 11.5px;
+  line-height: 1.5;
+  white-space: pre;
+  overflow-x: auto;
+  color: var(--text);
+  margin: 14px 0 0 0;
+}
+
+/* ─── Tool catalog ─────────────────────────────────────────────────── */
+
+.toolsSummary {
+  color: var(--text-dim);
+  font-size: 12px;
+  margin: 4px 0 14px 0;
+}
+
+.pageSection {
+  margin-bottom: 8px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--bg-elev);
+  overflow: hidden;
+}
+
+.pageSection > summary {
+  list-style: none;
+  cursor: pointer;
+  user-select: none;
+  padding: 10px 14px;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  background: var(--bg-elev-2);
+  font-weight: 600;
+  font-size: 13px;
+  transition: background 0.1s;
+}
+
+.pageSection > summary::-webkit-details-marker { display: none; }
+.pageSection[open] > summary { border-bottom: 1px solid var(--border); }
+.pageSection > summary:hover { background: rgba(var(--accent-rgb), 0.06); }
+
+.summaryCaret {
+  width: 12px;
+  height: 12px;
+  transition: transform 0.15s;
+}
+
+.pageSection[open] > summary .summaryCaret {
+  transform: rotate(90deg);
+}
+
+.summaryCount {
+  color: var(--text-dim);
+  font-weight: 400;
+  font-size: 12px;
+  margin-left: auto;
+}
+
+.toolList {
+  display: flex;
+  flex-direction: column;
+}
+
+.tool {
+  padding: 12px 14px;
+  border-top: 1px solid var(--border);
+}
+
+.tool:first-child { border-top: none; }
+
+.toolHead {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  flex-wrap: wrap;
+  margin-bottom: 4px;
+}
+
+.toolName {
+  font-family: var(--mono);
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--accent-glow);
+}
+
+.toolDesc {
+  font-size: 13px;
+  color: var(--text);
+  line-height: 1.55;
+  margin: 4px 0 8px 0;
+}
+
+.argTable {
+  width: 100%;
+  border-collapse: separate;
+  border-spacing: 0;
+  font-size: 12px;
+  margin-top: 6px;
+}
+
+.argTable th {
+  text-align: left;
+  font-weight: 600;
+  padding: 6px 8px;
+  background: var(--bg-elev-2);
+  color: var(--text-dim);
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  border-bottom: 1px solid var(--border);
+}
+
+.argTable td {
+  padding: 6px 8px;
+  border-bottom: 1px solid var(--border);
+  vertical-align: top;
+}
+
+.argTable tr:last-child td { border-bottom: none; }
+
+.argName {
+  font-family: var(--mono);
+  color: var(--text);
+}
+
+.argType {
+  font-family: var(--mono);
+  color: var(--accent-glow);
+  font-size: 11px;
+}
+
+.argReq {
+  color: var(--warn);
+  font-weight: 600;
+  font-size: 11px;
+}
+
+.argOpt {
+  color: var(--text-dim);
+  font-size: 11px;
+}
+
+.argSensitive {
+  display: inline-block;
+  background: var(--danger-bg);
+  color: var(--danger);
+  border: 1px solid var(--danger-border);
+  border-radius: 4px;
+  padding: 1px 6px;
+  font-size: 10px;
+  margin-left: 6px;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  font-weight: 600;
+}
+
+.noArgs {
+  color: var(--text-dim);
+  font-size: 12px;
+  font-style: italic;
+}

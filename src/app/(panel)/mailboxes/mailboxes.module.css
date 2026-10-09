@@ -1,0 +1,323 @@
+.serverInfo {
+  background: var(--bg-elev);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 14px 18px;
+  margin-bottom: 24px;
+}
+
+.serverInfoTitle {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-dim);
+  margin: 0 0 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+
+.serverInfoTable {
+  border-collapse: collapse;
+  font-size: 13px;
+}
+
+.serverInfoTable td {
+  padding: 3px 16px 3px 0;
+  vertical-align: middle;
+}
+
+.serverInfoTable td:first-child {
+  color: var(--text-dim);
+  white-space: nowrap;
+  min-width: 70px;
+}
+
+.proto {
+  color: var(--text-dim);
+  font-size: 11px;
+  margin-left: 6px;
+}
+
+.muted {
+  color: var(--text-dim);
+  font-size: 12px;
+}
+
+.diskHint {
+  color: var(--text-dim);
+  font-size: 11px;
+  margin-top: 3px;
+}
+
+.editDetails {
+  position: relative;
+}
+
+.editSummary {
+  background: var(--bg-elev-2);
+  border: 1px solid var(--border);
+  color: var(--text);
+  border-radius: var(--radius);
+  padding: 6px 10px;
+  font-size: 12px;
+  cursor: pointer;
+  list-style: none;
+  user-select: none;
+  transition: border-color 0.1s, background 0.1s;
+}
+
+.editSummary::-webkit-details-marker {
+  display: none;
+}
+
+.editSummary:hover {
+  border-color: var(--border-strong);
+}
+
+.editPanel {
+  position: absolute;
+  top: calc(100% + 6px);
+  right: 0;
+  z-index: 5;
+  width: 380px;
+  background: var(--bg-elev-solid);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius);
+  padding: 14px 16px;
+  box-shadow: 0 12px 32px rgba(0, 0, 0, 0.5);
+}
+
+.editTitle {
+  font-size: 13px;
+  color: var(--text-dim);
+  margin-bottom: 10px;
+}
+
+.hint {
+  color: var(--text-dim);
+  font-size: 11px;
+  margin-top: 3px;
+}
+
+/* ─── Mobile responsive ──────────────────────────────────────────────
+ * Above 768px the table renders 4 columns (Email · Quota · Copy · Actions)
+ * exactly like before. Below 768px the Quota + Copy columns disappear,
+ * the inline desktop action buttons hide, and the email cell grows a
+ * stacked quota line. A single 3-dot kebab in the actions cell opens a
+ * centered modal with the four actions. */
+
+.desktopActions {
+  display: flex;
+  gap: 8px;
+  align-items: flex-start;
+}
+
+.mobileQuota {
+  display: none;
+}
+
+.mobileKebab {
+  display: none;
+}
+
+.kebab {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 32px;
+  height: 32px;
+  background: var(--bg-elev-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  color: var(--text-dim);
+  cursor: pointer;
+  padding: 0;
+  transition: border-color 0.1s, color 0.1s;
+}
+
+.kebab:hover {
+  border-color: var(--border-strong);
+  color: var(--text);
+}
+
+.menuList {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.menuBtn {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 2px;
+  background: var(--bg-elev-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 10px 12px;
+  color: var(--text);
+  text-align: left;
+  cursor: pointer;
+  width: 100%;
+  transition: border-color 0.1s, background 0.1s;
+}
+
+.menuBtn:hover:not(:disabled) {
+  border-color: var(--accent);
+  background: rgba(var(--accent-rgb), 0.06);
+}
+
+.menuBtn:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
+.menuLabel {
+  font-size: 14px;
+  font-weight: 600;
+}
+
+.menuHint {
+  font-size: 12px;
+  color: var(--text-dim);
+  font-weight: 400;
+}
+
+.menuDanger .menuLabel {
+  color: var(--danger);
+}
+
+.menuDanger:hover:not(:disabled) {
+  border-color: var(--danger);
+  background: var(--danger-bg);
+}
+
+.menuFoot {
+  display: flex;
+  gap: 8px;
+  justify-content: flex-end;
+  margin-top: 16px;
+  padding-top: 14px;
+  border-top: 1px solid var(--border);
+}
+
+.deleteTarget {
+  margin-bottom: 10px;
+}
+
+/* The Table cells need column-hiding on mobile. The `.mailboxTable` class
+ * is applied to a wrapper around the Table component so we can reach
+ * its rendered <th>/<td> by index. Columns: 1=Email, 2=Quota, 3=Copy,
+ * 4=Actions. */
+.mailboxTable th:nth-child(2),
+.mailboxTable td:nth-child(2),
+.mailboxTable th:nth-child(3),
+.mailboxTable td:nth-child(3) {
+  /* visible by default */
+}
+
+@media (max-width: 768px) {
+  .desktopActions {
+    display: none;
+  }
+
+  .mobileKebab {
+    display: flex;
+    justify-content: flex-end;
+  }
+
+  .mobileQuota {
+    display: block;
+    margin-top: 6px;
+  }
+
+  .mailboxTable th:nth-child(2),
+  .mailboxTable td:nth-child(2),
+  .mailboxTable th:nth-child(3),
+  .mailboxTable td:nth-child(3) {
+    display: none;
+  }
+
+  /* Override the 200px inline width on the actions <th> so the email
+   * column gets the full remaining row width and the kebab sits flush
+   * at the right edge. */
+  .mailboxTable th:nth-child(4),
+  .mailboxTable td:nth-child(4) {
+    width: 48px !important;
+    text-align: right;
+  }
+
+  /* Pop the editPanel out of the per-row absolute positioning on phones
+   * so the existing desktop `<details>` Edit popover doesn't accidentally
+   * surface — desktop-only inline buttons are hidden by `.desktopActions`,
+   * but we belt-and-brace it here. */
+  .editPanel {
+    display: none;
+  }
+}
+
+/* ─── Domain filter chips ────────────────────────────────────────────
+ * Sits between the "Add mailbox" form and the table. Hidden entirely by
+ * MailboxTable when only one domain has mailboxes (nothing to filter). */
+
+.domainFilter {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  margin-bottom: 12px;
+}
+
+.domainChip {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  background: var(--bg-elev-2);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  color: var(--text-dim);
+  font-size: 12px;
+  padding: 5px 10px 5px 12px;
+  cursor: pointer;
+  transition: border-color 0.1s, color 0.1s, background 0.1s;
+}
+
+.domainChip:hover {
+  border-color: var(--border-strong);
+  color: var(--text);
+}
+
+.domainChipActive {
+  border-color: var(--accent);
+  background: rgba(var(--accent-rgb), 0.1);
+  color: var(--text);
+}
+
+.domainChipCount {
+  background: var(--bg-elev);
+  border-radius: 999px;
+  padding: 1px 7px;
+  font-size: 11px;
+  color: var(--text-dim);
+}
+
+.domainChipActive .domainChipCount {
+  color: var(--accent);
+}
+
+/* Password field + Generate button on one line (Edit popover, mobile
+ * edit view). The input takes the remaining width; the button never wraps. */
+.pwRow {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+}
+
+.pwRow input {
+  flex: 1;
+  min-width: 0;
+}
+
+.pwRow button {
+  flex: none;
+  white-space: nowrap;
+}

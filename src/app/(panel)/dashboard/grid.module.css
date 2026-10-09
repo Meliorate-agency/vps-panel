@@ -1,0 +1,117 @@
+.statRow {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: 14px;
+  margin-bottom: 18px;
+}
+
+.stat {
+  background: var(--bg-elev);
+  backdrop-filter: blur(20px) saturate(140%);
+  -webkit-backdrop-filter: blur(20px) saturate(140%);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 14px 16px;
+  position: relative;
+  overflow: hidden;
+}
+
+.stat::before {
+  content: "";
+  position: absolute;
+  inset: 0 0 auto 0;
+  height: 1px;
+  background: var(--gradient-stripe);
+  pointer-events: none;
+}
+
+.statLabel {
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--text-dim);
+  font-weight: 600;
+}
+
+.statValue {
+  font-size: 22px;
+  font-weight: 700;
+  margin-top: 4px;
+  letter-spacing: -0.01em;
+}
+
+.statSub {
+  font-size: 12px;
+  color: var(--text-dim);
+  margin-top: 2px;
+}
+
+.tone_ok { border-color: rgba(84, 209, 140, 0.45); }
+.tone_ok::before { background: linear-gradient(90deg, transparent 0%, var(--ok) 50%, transparent 100%); }
+
+.tone_warn { border-color: rgba(255, 182, 72, 0.45); }
+.tone_warn::before { background: linear-gradient(90deg, transparent 0%, var(--warn) 50%, transparent 100%); }
+
+.tone_danger { border-color: rgba(255, 77, 109, 0.45); }
+.tone_danger::before { background: linear-gradient(90deg, transparent 0%, var(--danger) 50%, transparent 100%); }
+
+.chartRow {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+  gap: 14px;
+  margin-bottom: 18px;
+}
+
+/* Disks + Network side-by-side. `minmax(0, 1fr)` lets tables shrink below
+   their intrinsic content width (defaults to auto, which would otherwise
+   keep both tracks at content-width and overflow on narrow viewports).
+   Direct-child sections get margin-bottom zeroed so the row owns vertical
+   rhythm instead of double-spacing via the inner `.section` rule. */
+.infoRow {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 14px;
+  margin-bottom: 18px;
+}
+
+.infoRow > * {
+  margin-bottom: 0;
+}
+
+@media (max-width: 760px) {
+  .infoRow {
+    grid-template-columns: 1fr;
+  }
+}
+
+.serverLabel {
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--text-dim);
+}
+
+.serverDomain {
+  font-family: var(--mono);
+  font-weight: 600;
+  background: var(--gradient-accent);
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+}
+
+.serverIp {
+  font-family: var(--mono);
+  color: var(--text);
+}
+
+.serverHint {
+  font-size: 12px;
+  color: var(--text-dim);
+}
+
+.serverDot {
+  margin: 0 8px;
+  color: var(--text-dim);
+}

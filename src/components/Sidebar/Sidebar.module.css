@@ -1,0 +1,194 @@
+.nav {
+  width: 232px;
+  background: var(--bg-elev-solid);
+  border-right: 1px solid var(--border);
+  /* Extra room below the last link so it never sits on the bottom edge when
+   * the list scrolls. */
+  padding: 16px 12px 50px;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  overflow-y: auto;
+  flex-shrink: 0;
+}
+
+.brand {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 8px 16px 8px;
+  border-bottom: 1px solid var(--border);
+  margin-bottom: 4px;
+}
+
+.brandText {
+  font-weight: 700;
+  font-size: 15px;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  background: var(--gradient-accent);
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+}
+
+.closeBtn {
+  display: none;
+  margin-left: auto;
+  width: 28px;
+  height: 28px;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--bg-elev-2);
+  color: var(--text-dim);
+  cursor: pointer;
+  padding: 0;
+  transition: border-color 0.1s, color 0.1s;
+}
+
+.closeBtn:hover {
+  border-color: var(--border-strong);
+  color: var(--text);
+}
+
+.group {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.groupTitle {
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--text-dim);
+  padding: 4px 8px;
+}
+
+.list {
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+
+.link {
+  display: block;
+  padding: 6px 8px;
+  color: var(--text);
+  border-radius: var(--radius);
+  font-size: 13px;
+  transition: background 0.1s, color 0.1s, box-shadow 0.1s;
+}
+
+.link:hover {
+  background: var(--bg-elev-2);
+  color: var(--text);
+}
+
+.link.active {
+  background: rgba(var(--accent-rgb), 0.08);
+  color: var(--accent);
+  font-weight: 600;
+  box-shadow: inset 2px 0 0 var(--accent);
+}
+
+.linkRow {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+}
+
+/* Icons inherit colour from the row, so hover/active recolour them for free.
+ * They sit one step dimmer than the label at rest: the label is what you read,
+ * the icon is what you aim at. */
+.linkIcon {
+  flex-shrink: 0;
+  width: 16px;
+  height: 16px;
+  color: var(--text-dim);
+  transition: color 0.1s;
+}
+
+.link:hover .linkIcon {
+  color: var(--text);
+}
+
+.link.active .linkIcon {
+  color: var(--accent);
+}
+
+.linkText {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.linkSpinner {
+  flex-shrink: 0;
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  border: 1.5px solid var(--accent);
+  border-top-color: transparent;
+  animation: vps-spin 0.7s linear infinite;
+}
+
+@keyframes vps-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+.backdrop {
+  display: none;
+}
+
+@media (max-width: 768px) {
+  .nav {
+    position: fixed;
+    top: 0;
+    left: 0;
+    bottom: 0;
+    height: 100vh;
+    height: 100dvh;
+    width: min(280px, 82vw);
+    z-index: 60;
+    transform: translateX(-100%);
+    transition: transform 0.25s ease;
+    box-shadow: 8px 0 32px rgba(0, 0, 0, 0.5);
+  }
+
+  .nav.navOpen {
+    transform: translateX(0);
+  }
+
+  .closeBtn {
+    display: inline-flex;
+  }
+
+  .backdrop {
+    display: block;
+    position: fixed;
+    inset: 0;
+    background: rgba(0, 0, 0, 0.55);
+    opacity: 0;
+    pointer-events: none;
+    transition: opacity 0.25s ease;
+    z-index: 50;
+  }
+
+  .backdrop.backdropOpen {
+    opacity: 1;
+    pointer-events: auto;
+  }
+
+  .bodyLock {
+    overflow: hidden;
+  }
+}

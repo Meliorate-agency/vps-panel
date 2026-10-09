@@ -1,0 +1,142 @@
+/* Palette.
+ *
+ * Everything from --bg down to --shadow-glow is DERIVED from a single accent
+ * colour and is overridden per-install by an inline style on <html> (see
+ * src/lib/theme.ts + src/app/layout.tsx). The values below are the shipped
+ * "Bolt Purple" default; `deriveTheme("#b537f2")` reproduces every one of them
+ * byte-for-byte, so this block and the theme module cannot drift.
+ *
+ * Keep it here anyway: it is what renders if the inline style is ever absent
+ * (a global error boundary, a build-time snapshot), and it documents the
+ * default without a lookup.
+ *
+ * The tokens below the divider are NOT themed - danger / warn / ok carry
+ * meaning, not identity, and must stay red / amber / green whatever the
+ * operator picks. */
+:root {
+  --bg: #07060c;
+  --bg-rgb: 7, 6, 12;
+  --bg-elev-solid: #140e24;
+  /* Opaque, and equal to --bg-elev-solid on purpose. This used to be
+   * `rgba(20, 14, 36)` with no alpha channel, which browsers drop entirely -
+   * surfaces that asked for it rendered transparent. */
+  --bg-elev: #140e24;
+  --bg-elev-2: #1d1432;
+  --border: #2a1f48;
+  --border-strong: #3d2a66;
+  --text: #f5f3ff;
+  --text-dim: #a99cc8;
+  --text-dim-rgb: 169, 156, 200;
+  --accent: #b537f2;
+  --accent-2: #7a1fd9;
+  --accent-glow: #e040fb;
+  --accent-hover: #c64dff;
+  --accent-rgb: 181, 55, 242;
+  --accent-2-rgb: 122, 31, 217;
+  --accent-glow-rgb: 224, 64, 251;
+  /* Legible foreground for text sitting ON an accent fill. White for the dark
+   * accents, near-black for pale ones - chosen per accent in theme.ts. */
+  --accent-fg: #ffffff;
+  --gradient-accent: linear-gradient(135deg, var(--accent-glow) 0%, var(--accent) 50%, var(--accent-2) 100%);
+  --gradient-stripe: linear-gradient(90deg, transparent 0%, var(--accent) 50%, transparent 100%);
+  --shadow-glow: 0 0 24px rgba(var(--accent-rgb), 0.35);
+  /* Backdrop behind modals and portaled popovers. */
+  --scrim: rgba(var(--bg-rgb), 0.62);
+  /* Strength of the two ambient washes on <body>. Their own tokens because
+   * the wash is the biggest single source of ambient chroma in the panel -
+   * saturated colour spread across the whole viewport - so turning it down is
+   * most of what the theme's "glow" dial does. */
+  --wash-1: 0.22;
+  --wash-2: 0.14;
+
+  /* --- not themed --- */
+  --danger: #ff4d6d;
+  --danger-bg: #2a0a18;
+  --danger-border: #5a1a2e;
+  --warn: #ffb648;
+  --ok: #54d18c;
+  --radius: 2px;
+  --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, "Liberation Mono", monospace;
+  --sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Oxygen, Ubuntu, Cantarell, sans-serif;
+  color-scheme: dark;
+}
+
+* {
+  box-sizing: border-box;
+  padding: 0;
+  margin: 0;
+}
+
+html, body {
+  height: 100%;
+}
+
+body {
+  font-family: var(--sans);
+  font-size: 14px;
+  line-height: 1.5;
+  color: var(--text);
+  background:
+    radial-gradient(ellipse at top left, rgba(var(--accent-2-rgb), var(--wash-1)), transparent 55%),
+    radial-gradient(ellipse at bottom right, rgba(var(--accent-rgb), var(--wash-2)), transparent 55%),
+    var(--bg);
+  background-attachment: fixed;
+  -webkit-font-smoothing: antialiased;
+}
+
+a { color: var(--accent); text-decoration: none; }
+a:hover { color: var(--accent-hover); }
+
+input, textarea, select, button {
+  font: inherit;
+  color: inherit;
+}
+
+button {
+  cursor: pointer;
+  background: none;
+  border: none;
+}
+
+code, pre {
+  font-family: var(--mono);
+}
+
+::selection {
+  background: rgba(var(--accent-rgb), 0.35);
+  color: var(--text);
+}
+
+* {
+  scrollbar-width: thin;
+  scrollbar-color: rgba(var(--accent-rgb), 0.35) transparent;
+}
+
+*::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+
+*::-webkit-scrollbar-track,
+*::-webkit-scrollbar-corner {
+  background: transparent;
+}
+
+*::-webkit-scrollbar-thumb {
+  background: rgba(var(--accent-rgb), 0.35);
+  border-radius: 999px;
+  transition: background 0.2s;
+}
+
+*::-webkit-scrollbar-thumb:hover {
+  background: rgba(var(--accent-glow-rgb), 0.65);
+}
+
+/* Backdrop fade for portaled mobile modals (currently GitStatusBadge
+ * on /apps). Inline-styled there to avoid threading another CSS module
+ * through the portal — the keyframe is global so referencing it as a
+ * value works. */
+@keyframes vps-gsb-fadein {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}

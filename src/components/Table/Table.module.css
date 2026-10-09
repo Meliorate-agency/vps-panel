@@ -1,0 +1,102 @@
+.wrap {
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--bg-elev);
+  backdrop-filter: blur(20px) saturate(140%);
+  -webkit-backdrop-filter: blur(20px) saturate(140%);
+}
+
+/* Mobile-only inner horizontal scroll. Opt-in via the Table `scrollX`
+ * prop. Keeps the card's purple background pinned to the viewport width
+ * while the table inside scrolls — vs the page-level scroll the table
+ * would otherwise force. Backdrop-filter already makes this .wrap a
+ * containing block for fixed descendants, so popovers in this table
+ * MUST be portaled to document.body to escape. */
+@media (max-width: 768px) {
+  .wrapScrollX {
+    overflow-x: auto;
+    -webkit-overflow-scrolling: touch;
+  }
+}
+
+/* `scrollX="always"`: tables whose columns need more room than the content
+   area at any width (open ports, the audit log's message) scroll inside
+   their card instead of squeezing every column. */
+.wrapScrollXAlways {
+  overflow-x: auto;
+}
+
+/* Table `maxRows`: the card is the scroll port and the header stays put,
+   so a long list (open ports) does not run down the whole page. */
+.wrapScrollY {
+  overflow-y: auto;
+}
+
+.wrapScrollY .table thead th {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+}
+
+.table {
+  width: 100%;
+  border-collapse: separate;
+  border-spacing: 0;
+  font-size: 13px;
+}
+
+.table thead tr:first-child th:first-child {
+  border-top-left-radius: var(--radius);
+}
+
+.table thead tr:first-child th:last-child {
+  border-top-right-radius: var(--radius);
+}
+
+.table tbody tr:last-child td:first-child {
+  border-bottom-left-radius: var(--radius);
+}
+
+.table tbody tr:last-child td:last-child {
+  border-bottom-right-radius: var(--radius);
+}
+
+.table th {
+  text-align: left;
+  font-weight: 600;
+  padding: 10px 12px;
+  color: var(--text-dim);
+  background: var(--bg-elev-2);
+  border-bottom: 1px solid var(--border);
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+}
+
+.table td {
+  padding: 10px 12px;
+  border-bottom: 1px solid var(--border);
+  vertical-align: middle;
+}
+
+.table tr:last-child td {
+  border-bottom: none;
+}
+
+.table tr:hover td {
+  background: rgba(var(--accent-rgb), 0.04);
+}
+
+.dim {
+  color: var(--text-dim);
+}
+
+.empty {
+  color: var(--text-dim);
+  font-size: 13px;
+  padding: 24px;
+  text-align: center;
+  border: 1px dashed var(--border);
+  border-radius: var(--radius);
+  background: var(--bg-elev);
+}

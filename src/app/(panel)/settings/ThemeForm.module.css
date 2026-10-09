@@ -1,0 +1,389 @@
+.swatches {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(104px, 1fr));
+  gap: 8px;
+  margin-bottom: 16px;
+}
+
+.swatch {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 8px;
+  background: var(--bg-elev-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  text-align: left;
+  transition: border-color 0.1s, box-shadow 0.1s;
+}
+
+.swatch:hover {
+  border-color: var(--border-strong);
+}
+
+.swatch[aria-pressed="true"] {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 1px var(--accent);
+}
+
+/* A miniature of the panel rather than a plain colour block: the accent
+   gradient sitting on that theme's own card surface, over that theme's own
+   border. The chrome is most of what a preset changes, so a bare accent
+   swatch would hide the difference between the loud and the calm variants. */
+.chip {
+  position: relative;
+  height: 34px;
+  border-radius: var(--radius);
+  overflow: hidden;
+}
+
+.chipDot {
+  position: absolute;
+  left: 6px;
+  top: 6px;
+  width: 22px;
+  height: 10px;
+  border-radius: 999px;
+}
+
+.chipLine {
+  position: absolute;
+  left: 6px;
+  right: 6px;
+  bottom: 8px;
+  height: 6px;
+  border-radius: 2px;
+  opacity: 0.9;
+}
+
+.swatchName {
+  font-size: 11px;
+  color: var(--text-dim);
+  letter-spacing: 0.01em;
+}
+
+.swatch[aria-pressed="true"] .swatchName {
+  color: var(--text);
+}
+
+.custom {
+  margin-bottom: 16px;
+}
+
+.pickerRow {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+/* The native picker is styled down to a plain square: browsers render the
+   default control at wildly different sizes and with a chrome border. */
+.picker {
+  width: 42px;
+  height: 34px;
+  padding: 0;
+  background: none;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  cursor: pointer;
+  flex-shrink: 0;
+}
+
+.picker::-webkit-color-swatch-wrapper {
+  padding: 3px;
+}
+
+.picker::-webkit-color-swatch {
+  border: none;
+  border-radius: 1px;
+}
+
+.picker::-moz-color-swatch {
+  border: none;
+  border-radius: 1px;
+}
+
+.hexInput {
+  width: 120px;
+  font-family: var(--mono);
+  text-transform: lowercase;
+}
+
+.dials {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: 16px;
+  margin-bottom: 16px;
+}
+
+.dial {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.dialHead {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.dialLabel {
+  font-size: 12px;
+  color: var(--text);
+}
+
+.dialValue {
+  font-family: var(--mono);
+  font-size: 12px;
+  color: var(--accent-glow);
+}
+
+.dialHint {
+  font-size: 11px;
+  line-height: 1.4;
+  color: var(--text-dim);
+}
+
+.range {
+  width: 100%;
+  accent-color: var(--accent);
+  cursor: pointer;
+}
+
+.preview {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 14px;
+  padding: 14px;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  margin-bottom: 16px;
+}
+
+.previewBtn {
+  background: var(--gradient-accent);
+  color: var(--accent-fg);
+  border-radius: var(--radius);
+  padding: 6px 12px;
+  font-weight: 600;
+  font-size: 12px;
+  cursor: default;
+}
+
+.previewLink {
+  color: var(--accent);
+  font-size: 13px;
+  text-decoration: underline;
+}
+
+.previewCode {
+  font-family: var(--mono);
+  font-size: 12px;
+  color: var(--accent-glow);
+}
+
+.previewCard {
+  display: inline-flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 8px 12px;
+  background: var(--bg-elev-solid);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+}
+
+.previewCardText {
+  font-size: 12px;
+  color: var(--text);
+}
+
+.previewCardDim {
+  font-size: 11px;
+  color: var(--text-dim);
+}
+
+.fine {
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 10px 12px;
+  margin-bottom: 4px;
+}
+
+.fineSummary {
+  cursor: pointer;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text);
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.pinnedCount {
+  font-size: 11px;
+  font-weight: 500;
+  color: var(--accent-glow);
+  border: 1px solid var(--border-strong);
+  border-radius: 999px;
+  padding: 1px 7px;
+}
+
+.shadeGroup {
+  margin-bottom: 14px;
+}
+
+.shadeGroupName {
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--text-dim);
+  margin-bottom: 6px;
+}
+
+.shadeRow {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 5px 0;
+  border-top: 1px solid var(--border);
+}
+
+.shadePicker {
+  width: 30px;
+  height: 26px;
+  padding: 0;
+  background: none;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  cursor: pointer;
+  flex-shrink: 0;
+}
+
+.shadePicker::-webkit-color-swatch-wrapper {
+  padding: 2px;
+}
+
+.shadePicker::-webkit-color-swatch {
+  border: none;
+  border-radius: 1px;
+}
+
+.shadePicker::-moz-color-swatch {
+  border: none;
+  border-radius: 1px;
+}
+
+.shadeText {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  min-width: 0;
+  flex: 1;
+}
+
+.shadeLabel {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  color: var(--text);
+}
+
+.pin {
+  font-size: 10px;
+  color: var(--accent-glow);
+  border: 1px solid var(--border-strong);
+  border-radius: 999px;
+  padding: 0 6px;
+}
+
+.shadeHint {
+  font-size: 11px;
+  color: var(--text-dim);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.shadeHex {
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--text-dim);
+  flex-shrink: 0;
+}
+
+.shadeReset {
+  font-size: 11px;
+  color: var(--text-dim);
+  background: transparent;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 3px 8px;
+  flex-shrink: 0;
+  transition: border-color 0.1s, color 0.1s;
+}
+
+.shadeReset:hover:not(:disabled) {
+  border-color: var(--border-strong);
+  color: var(--text);
+}
+
+.shadeReset:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+@media (max-width: 560px) {
+  .shadeHint {
+    display: none;
+  }
+}
+
+.actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+}
+
+.swatchGroupName {
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--text-dim);
+  margin: 4px 0 6px;
+}
+
+/* Saved themes share the built-in chip so the two grids read as one control;
+   the left rail is the only thing marking them as yours. */
+.swatchSaved {
+  border-left: 2px solid var(--border-strong);
+}
+
+.swatchSaved[aria-pressed="true"] {
+  border-left-color: var(--accent);
+}
+
+.library {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  gap: 10px;
+  margin-bottom: 8px;
+}
+
+.nameInput {
+  width: 180px;
+}
+
+.libraryActions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  padding-bottom: 1px;
+}

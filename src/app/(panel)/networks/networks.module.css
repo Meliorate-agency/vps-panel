@@ -1,0 +1,219 @@
+/* This server: address + fingerprint beside the name field, one under the
+   other when the card is too narrow for both (by the card's width, not the
+   window's: the sidebar takes its share). */
+.serverCard {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+  gap: 12px 28px;
+  align-items: start;
+}
+
+.serverCard .facts {
+  margin: 0;
+}
+
+.nameField {
+  min-width: 0;
+}
+
+.nameLabel {
+  display: flex;
+  gap: 8px;
+  align-items: baseline;
+}
+
+.savedNote {
+  color: var(--ok);
+}
+
+/* Create / Join: two buttons above the networks, the open one's form in a
+   panel under them. */
+.setup {
+  margin-bottom: 18px;
+}
+
+.setupButtons {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+/* Same height as the primary button next to it. */
+.setupGhost {
+  padding: 8px 14px;
+  font-size: 13px;
+}
+
+.setupGhost[aria-expanded="true"] {
+  border-color: var(--accent);
+}
+
+.setupPanel {
+  margin: 12px 0 0;
+}
+
+.panelHead {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 12px;
+}
+
+.panelClose {
+  width: 28px;
+  height: 28px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  margin: -6px -6px 0 0;
+  padding: 0;
+  background: var(--bg-elev-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  color: var(--text-dim);
+  cursor: pointer;
+  transition: border-color 0.1s, color 0.1s;
+}
+
+.panelClose:hover {
+  border-color: var(--border-strong);
+  color: var(--text);
+}
+
+.panelIntro {
+  margin: -4px 0 12px;
+  font-size: 12px;
+  color: var(--text-dim);
+}
+
+/* The confirm popup's own Close row after an action reported something. */
+.dialogActions {
+  display: flex;
+  justify-content: flex-end;
+  margin-top: 16px;
+  padding-top: 14px;
+  border-top: 1px solid var(--border);
+}
+
+.facts {
+  display: grid;
+  grid-template-columns: max-content 1fr;
+  gap: 6px 14px;
+  margin: 0 0 14px 0;
+  font-size: 13px;
+  align-items: baseline;
+}
+
+.facts dt {
+  color: var(--text-dim);
+}
+
+.facts dd {
+  margin: 0;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.code {
+  min-height: 72px;
+  font-size: 11px;
+  word-break: break-all;
+}
+
+.preview {
+  margin-top: 12px;
+  padding-top: 12px;
+  border-top: 1px solid var(--border);
+}
+
+.netHead {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 12px;
+  flex-wrap: wrap;
+  margin-bottom: 12px;
+}
+
+.netHead .sub {
+  font-size: 12px;
+  color: var(--text-dim);
+  margin-top: -6px;
+}
+
+.inline {
+  display: inline-flex;
+  gap: 8px;
+  align-items: center;
+  flex-wrap: wrap;
+}
+
+.invite {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  width: min(560px, 100%);
+}
+
+.server {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 170px;
+}
+
+.nowrap {
+  white-space: nowrap;
+}
+
+.addr {
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--text-dim);
+  overflow-wrap: anywhere;
+}
+
+.tag {
+  font-size: 10px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--text-dim);
+  margin-left: 6px;
+}
+
+.problem {
+  font-size: 11px;
+  color: var(--danger);
+  overflow-wrap: anywhere;
+}
+
+.hint {
+  font-size: 11px;
+  color: var(--warn);
+  overflow-wrap: anywhere;
+}
+
+.warnBox {
+  color: var(--warn);
+  background: rgba(255, 182, 72, 0.1);
+  border: 1px solid rgba(255, 182, 72, 0.35);
+  padding: 8px 10px;
+  border-radius: var(--radius);
+  font-size: 13px;
+  margin-bottom: 12px;
+}
+
+.invites {
+  margin-top: 12px;
+  font-size: 12px;
+  color: var(--text-dim);
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.invites form {
+  display: inline;
+}

@@ -1,0 +1,14 @@
+/* Card header: what the table is, with its "add" button on the right. */
+.cardHead {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 12px;
+  flex-wrap: wrap;
+  margin-bottom: 12px;
+}
+
+.cardHead p {
+  margin: 0;
+  max-width: 70ch;
+}

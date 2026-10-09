@@ -1,0 +1,380 @@
+.wrap {
+  margin-bottom: 20px;
+}
+
+.head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 10px;
+}
+
+.heading {
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--text-dim);
+}
+
+.hint {
+  font-size: 12px;
+  color: var(--text-dim);
+}
+
+.scroll {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
+  gap: 12px;
+}
+
+.card {
+  background: var(--bg-elev);
+  backdrop-filter: blur(20px) saturate(140%);
+  -webkit-backdrop-filter: blur(20px) saturate(140%);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 12px 14px;
+  position: relative;
+  overflow: hidden;
+  display: grid;
+  grid-template-columns: 44px 1fr;
+  grid-template-areas:
+    "icon body"
+    "action action";
+  gap: 10px 12px;
+  transition: border-color 0.15s, transform 0.05s;
+}
+
+.icon {
+  grid-area: icon;
+}
+
+.body {
+  grid-area: body;
+}
+
+.installBtn,
+.installedBadge,
+.action {
+  grid-area: action;
+  justify-self: stretch;
+}
+
+.action {
+  display: flex;
+  gap: 6px;
+  align-items: stretch;
+}
+
+.fullRow {
+  flex: 1;
+  display: flex;
+}
+
+.fullRow .installBtn {
+  flex: 1;
+}
+
+.bindForm {
+  flex: 1 1 auto;
+  display: flex;
+  min-width: 0;
+}
+
+.bindSelect {
+  flex: 1;
+  width: 100%;
+  background: var(--bg-elev-2);
+  border: 1px solid var(--border);
+  color: var(--text);
+  border-radius: var(--radius);
+  padding: 6px 8px;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  outline: none;
+  cursor: pointer;
+  text-transform: uppercase;
+  transition: border-color 0.15s, box-shadow 0.15s;
+}
+
+.bindSelect:focus {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 1px var(--accent);
+}
+
+.bindSelect:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.openBtn {
+  flex-shrink: 0;
+  display: inline-flex;
+  align-items: center;
+  background: var(--gradient-accent);
+  color: var(--accent-fg);
+  border-radius: var(--radius);
+  padding: 6px 12px;
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  text-decoration: none;
+  transition: box-shadow 0.15s, transform 0.05s;
+}
+
+.openBtn:hover {
+  box-shadow: var(--shadow-glow);
+}
+
+.localBadge {
+  flex-shrink: 0;
+  display: inline-flex;
+  align-items: center;
+  background: transparent;
+  border: 1px solid var(--border);
+  color: var(--text-dim);
+  border-radius: var(--radius);
+  padding: 6px 10px;
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.card::before {
+  content: "";
+  position: absolute;
+  inset: 0 0 auto 0;
+  height: 1px;
+  background: var(--gradient-stripe);
+  pointer-events: none;
+}
+
+.card:hover {
+  border-color: var(--border-strong);
+}
+
+.icon {
+  flex-shrink: 0;
+  display: grid;
+  place-items: center;
+  width: 44px;
+  height: 44px;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+}
+
+.body {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  flex: 1;
+  min-width: 0;
+}
+
+.name {
+  font-size: 14px;
+  font-weight: 700;
+  letter-spacing: 0.01em;
+}
+
+.port {
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--accent-glow);
+}
+
+.installBtn {
+  flex-shrink: 0;
+  background: var(--bg-elev-2);
+  border: 1px solid var(--border);
+  color: var(--text);
+  border-radius: var(--radius);
+  padding: 6px 10px;
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  transition: background 0.15s, border-color 0.15s, box-shadow 0.15s, color 0.15s;
+}
+
+.installBtn:hover:not(:disabled) {
+  background: var(--gradient-accent);
+  border-color: transparent;
+  color: var(--accent-fg);
+  box-shadow: var(--shadow-glow);
+}
+
+.installBtn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.installedBadge {
+  flex-shrink: 0;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  background: transparent;
+  border: 1px solid var(--border);
+  color: var(--text-dim);
+  border-radius: var(--radius);
+  padding: 6px 10px;
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.installedBadge::before {
+  content: "";
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: #4ade80;
+  box-shadow: 0 0 6px rgba(74, 222, 128, 0.5);
+  flex-shrink: 0;
+}
+
+/* Cog button next to the bind/Open/Installed control on cards that have
+   editable per-app settings (currently Roundcube). Square 24px icon button
+   that blends with the card surface. */
+.settingsBtn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  height: 26px;
+  background: var(--bg-elev-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  color: var(--text-dim);
+  cursor: pointer;
+  transition: border-color 0.1s, color 0.1s;
+  padding: 0;
+  flex-shrink: 0;
+}
+
+.settingsBtn:hover {
+  border-color: var(--border-strong);
+  color: var(--text);
+}
+
+/* "Update available" pill, top-right of a quick-install card (currently n8n).
+   Only rendered when the agent reports the registry has a newer image than
+   the running container. Accent-filled to draw the eye; overlays the card via
+   absolute positioning (the card is position: relative, overflow: hidden). */
+.updateBadge {
+  position: absolute;
+  top: 8px;
+  right: 8px;
+  z-index: 2;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  background: var(--gradient-accent);
+  color: var(--accent-fg);
+  border: none;
+  border-radius: 999px;
+  padding: 3px 9px 3px 7px;
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  cursor: pointer;
+  box-shadow: var(--shadow-glow);
+  transition: transform 0.05s, box-shadow 0.15s, filter 0.15s;
+}
+
+.updateBadge:hover {
+  transform: translateY(-1px);
+  filter: brightness(1.08);
+}
+
+.updateBadge svg {
+  display: block;
+}
+
+/* Tiny "update check on/off" note in a card's body (currently n8n only).
+   Tells the operator at a glance whether the page-load registry probe is
+   enabled - the actual toggle lives in the card's settings popup. */
+.autoCheckNote {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  margin-top: 2px;
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  color: var(--text-dim);
+  cursor: default;
+}
+
+.autoCheckDot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: #4ade80;
+  box-shadow: 0 0 6px rgba(74, 222, 128, 0.5);
+  flex-shrink: 0;
+}
+
+.autoCheckDotOff {
+  background: var(--text-dim);
+  box-shadow: none;
+  opacity: 0.6;
+}
+
+/* Tailscale card: needs a hand (not logged in, waiting for approval). */
+.dotWarn {
+  background: var(--warn);
+  box-shadow: none;
+}
+
+/* Switch for the per-app auto-check toggle inside a settings popup.
+   Same look as the /apps AutoUpdateCheckToggle switch (kept as a local
+   copy - that module is page-scoped and this one is component-scoped). */
+.switch {
+  position: relative;
+  flex-shrink: 0;
+  width: 34px;
+  height: 19px;
+  padding: 0;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: var(--bg-elev-2);
+  cursor: pointer;
+  transition: background 0.15s ease, border-color 0.15s ease;
+}
+
+.switch:disabled {
+  cursor: not-allowed;
+  opacity: 0.6;
+}
+
+.switchOn {
+  background: var(--gradient-accent);
+  border-color: transparent;
+}
+
+.knob {
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 13px;
+  height: 13px;
+  border-radius: 50%;
+  background: var(--text-dim);
+  transition: transform 0.15s ease, background 0.15s ease;
+}
+
+.switchOn .knob {
+  transform: translateX(15px);
+  background: var(--accent-fg);
+}

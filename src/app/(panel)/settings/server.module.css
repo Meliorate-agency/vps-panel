@@ -1,0 +1,39 @@
+.facts {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  list-style: none;
+  margin-bottom: 14px;
+  font-size: 13px;
+  overflow-wrap: anywhere;
+}
+
+.warn {
+  margin-bottom: 12px;
+  padding: 10px 12px;
+  background: rgba(255, 196, 0, 0.08);
+  border: 1px solid rgba(255, 196, 0, 0.28);
+  border-radius: 6px;
+  font-size: 13px;
+}
+
+.hint {
+  font-size: 12px;
+  margin-bottom: 12px;
+}
+
+.actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+
+.changes {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin: 0 0 12px 18px;
+  font-size: 13px;
+  overflow-wrap: anywhere;
+}

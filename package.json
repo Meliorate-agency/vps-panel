@@ -1,0 +1,32 @@
+{
+  "name": "vps-panel",
+  "version": "0.1.0",
+  "private": true,
+  "license": "AGPL-3.0-only",
+  "scripts": {
+    "dev": "next dev -p 10000",
+    "build": "next build",
+    "start": "next start -H 127.0.0.1 -p 10000",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.29.0",
+    "@node-rs/argon2": "^2.0.2",
+    "better-sqlite3": "^11.7.0",
+    "jose": "^5.9.6",
+    "next": "16.2.6",
+    "otpauth": "^9.3.6",
+    "qrcode": "^1.5.4",
+    "react": "19.2.4",
+    "react-dom": "19.2.4",
+    "tsx": "^4.21.0"
+  },
+  "devDependencies": {
+    "@types/better-sqlite3": "^7.6.12",
+    "@types/node": "^20",
+    "@types/qrcode": "^1.5.5",
+    "@types/react": "^19",
+    "@types/react-dom": "^19",
+    "typescript": "^5"
+  }
+}

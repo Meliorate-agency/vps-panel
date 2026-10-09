@@ -1,0 +1,56 @@
+.wrap {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.head {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-bottom: 20px;
+}
+
+.bar {
+  background: linear-gradient(
+    90deg,
+    var(--bg-elev-2) 0%,
+    var(--bg-elev) 50%,
+    var(--bg-elev-2) 100%
+  );
+  background-size: 200% 100%;
+  border-radius: var(--radius);
+  animation: skel-shimmer 1.4s ease-in-out infinite;
+}
+
+.title {
+  height: 22px;
+  width: 180px;
+}
+
+.subtitle {
+  height: 13px;
+  width: 320px;
+  max-width: 60%;
+}
+
+.row {
+  height: 38px;
+  width: 100%;
+  border-radius: var(--radius);
+}
+
+.rows {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+@keyframes skel-shimmer {
+  0% {
+    background-position: 200% 0;
+  }
+  100% {
+    background-position: -200% 0;
+  }
+}

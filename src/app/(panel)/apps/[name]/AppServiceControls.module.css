@@ -1,0 +1,99 @@
+.pill {
+  display: inline-block;
+  align-self: center;
+  padding: 5px 10px;
+  border-radius: var(--radius);
+  font-size: 12px;
+  line-height: 1.4;
+}
+
+/* The pill is a permanently mounted live region (see the component): when
+   idle it must stay in the accessibility tree - display:none would drop it
+   and screen readers would skip the next outcome announcement - but it must
+   not take layout space or an .actions flex gap. */
+.pill:empty {
+  position: absolute;
+  padding: 0;
+  border: none;
+}
+
+/* Buttons must not stretch to a multi-line error pill's height. */
+.ctrl {
+  align-self: center;
+}
+
+.ok {
+  color: var(--ok);
+  background: rgba(84, 209, 140, 0.1);
+  border: 1px solid rgba(84, 209, 140, 0.35);
+  white-space: nowrap;
+}
+
+/* Errors persist and must be fully readable on any device (a title tooltip
+   doesn't exist on touch), so they wrap instead of truncating. */
+.err {
+  color: var(--danger);
+  background: var(--danger-bg);
+  border: 1px solid var(--danger-border);
+  overflow-wrap: anywhere;
+  max-width: 480px;
+}
+
+@media (max-width: 768px) {
+  /* Below 768px .head wraps and .actions becomes left-anchored, so a
+     leading pill would push the buttons sideways on mount and snap them
+     back on dismissal (mis-tap hazard). Render it after the buttons there;
+     on desktop the row is right-anchored and grows leftward, so the
+     leading pill never moves the buttons. */
+  .pill {
+    order: 1;
+  }
+
+  .err {
+    max-width: 100%;
+  }
+}
+
+/* Fades are enhancement only - with reduced motion the pill must stay fully
+   visible (an always-on animation would jump to its final opacity:0 frame
+   and the confirmation would never be seen). JS removal after
+   SUCCESS_DISMISS_MS is the source of truth for dismissal. */
+@media (prefers-reduced-motion: no-preference) {
+  .ok {
+    /* Duration must match SUCCESS_DISMISS_MS in AppServiceControls.tsx -
+       `forwards` holds opacity 0 until React empties the pill. */
+    animation: fadeInOut 4s ease forwards;
+  }
+
+  .err {
+    animation: fadeIn 0.15s ease;
+  }
+}
+
+@keyframes fadeIn {
+  from {
+    opacity: 0;
+    transform: translateY(-2px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+@keyframes fadeInOut {
+  0% {
+    opacity: 0;
+    transform: translateY(-2px);
+  }
+  6% {
+    opacity: 1;
+    transform: none;
+  }
+  85% {
+    opacity: 1;
+  }
+  100% {
+    opacity: 0;
+  }
+}

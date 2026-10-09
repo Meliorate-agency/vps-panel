@@ -1,0 +1,32 @@
+[Unit]
+Description=VPS Panel app: {{ name }}
+After=network.target
+
+[Service]
+Type=simple
+User={{ user }}
+Group={{ user }}
+WorkingDirectory={{ working_dir }}
+EnvironmentFile={{ env_file }}
+Environment=PORT={{ port }}
+ExecStart={{ exec_start }}
+# Crash loops end after 5 starts in 5 minutes: StartLimit* come from
+# /etc/systemd/system/vps-app-.service.d/10-vps-panel-start-limit.conf.
+Restart=on-failure
+RestartSec=2s
+LimitNOFILE=65536
+TimeoutStopSec=20
+
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictRealtime=true
+LockPersonality=true
+ReadWritePaths={{ working_dir }}
+
+[Install]
+WantedBy=multi-user.target

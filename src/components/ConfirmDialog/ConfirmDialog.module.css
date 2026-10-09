@@ -1,0 +1,199 @@
+.backdrop {
+  position: fixed;
+  inset: 0;
+  background: var(--scrim);
+  backdrop-filter: blur(6px) saturate(120%);
+  -webkit-backdrop-filter: blur(6px) saturate(120%);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 1000;
+  padding: 24px;
+  /* 100vh on iOS Safari includes the collapsible address bar height,
+   * so it can be bigger than the actually-visible area. 100dvh tracks
+   * the real visible viewport. Browsers that don't support dvh fall
+   * back to the vh value above. */
+  height: 100vh;
+  height: 100dvh;
+  animation: fadeIn 0.12s ease-out;
+  /* Allow the backdrop itself to scroll if the dialog is taller than
+   * the viewport (defensive — the dialog also has its own overflow,
+   * this is the outer safety). */
+  overflow-y: auto;
+}
+
+.dialog {
+  background: var(--bg-elev);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 20px 22px 18px;
+  width: 100%;
+  max-width: 560px;
+  max-height: calc(100vh - 64px);
+  max-height: calc(100dvh - 48px);
+  overflow-y: auto;
+  box-shadow: 0 24px 64px rgba(0, 0, 0, 0.55);
+  position: relative;
+  animation: slideIn 0.16s cubic-bezier(0.2, 0.8, 0.2, 1);
+}
+
+.wide {
+  max-width: 760px;
+}
+
+/* Top-right ✕ that's always reachable, regardless of how tall the
+ * dialog grows. Sits over the title row; the title's own padding
+ * ensures it doesn't overlap text. */
+.closeBtn {
+  position: absolute;
+  top: 10px;
+  right: 10px;
+  width: 28px;
+  height: 28px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--bg-elev-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  color: var(--text-dim);
+  cursor: pointer;
+  padding: 0;
+  transition: border-color 0.1s, color 0.1s, background 0.1s;
+  z-index: 1;
+}
+
+.closeBtn:hover:not(:disabled) {
+  border-color: var(--border-strong);
+  color: var(--text);
+  background: var(--bg-elev);
+}
+
+.closeBtn:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+.dialog::before {
+  content: "";
+  position: absolute;
+  inset: 0 0 auto 0;
+  height: 1px;
+  background: var(--gradient-stripe);
+  pointer-events: none;
+  border-radius: var(--radius) var(--radius) 0 0;
+}
+
+.title {
+  font-size: 16px;
+  font-weight: 600;
+  margin: 0 0 12px 0;
+  color: var(--text);
+  letter-spacing: -0.005em;
+}
+
+.body {
+  font-size: 13px;
+  line-height: 1.55;
+  color: var(--text);
+}
+
+.body p {
+  margin: 0 0 8px 0;
+}
+
+.body ul {
+  margin: 0 0 12px 0;
+  padding-left: 18px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.body li {
+  color: var(--text-dim);
+}
+
+.warning {
+  margin-top: 12px;
+  padding: 8px 10px;
+  background: rgba(255, 196, 0, 0.08);
+  border: 1px solid rgba(255, 196, 0, 0.28);
+  border-radius: var(--radius);
+  color: var(--text);
+  font-size: 12px;
+}
+
+.actions {
+  display: flex;
+  gap: 8px;
+  justify-content: flex-end;
+  margin-top: 16px;
+  padding-top: 14px;
+  border-top: 1px solid var(--border);
+}
+
+@media (max-width: 768px) {
+  .backdrop {
+    /* On phones the BACKDROP owns the scroll, not the dialog. iOS
+     * Safari's 100vh includes the collapsible address bar, and `dvh`
+     * isn't supported on iOS < 16.4 — so any `max-height: calc(100vh
+     * - X)` on the dialog can let it grow past the actually-visible
+     * viewport, hiding the bottom with no way to reach it. Letting
+     * the dialog be its natural height + having the backdrop scroll
+     * via its `position: fixed; inset: 0` + `overflow-y: auto`
+     * sidesteps the whole viewport-unit mess.
+     *
+     * `align-items: flex-start` (instead of center) is critical: with
+     * `align-items: center` the dialog stays centered and any overflow
+     * cuts off the top edge (which the user can never reach because
+     * flex centering doesn't scroll up). flex-start anchors to the
+     * top so all overflow lands at the bottom — reachable by
+     * scrolling. */
+    padding: 8px;
+    align-items: flex-start;
+    -webkit-overflow-scrolling: touch;
+  }
+
+  .dialog {
+    padding: 16px 16px 14px;
+    /* Drop the desktop max-height / overflow. The backdrop above is the
+     * scroll surface now; the dialog just grows to its content. */
+    max-height: none;
+    overflow: visible;
+    /* Tiny gap from the top of the viewport so the iOS dynamic island
+     * / status bar doesn't kiss the close button. */
+    margin-top: 6px;
+    /* Reserve a bit of bottom margin so when content overflows and the
+     * user scrolls to the bottom of the dialog, the last button isn't
+     * flush against the safe-area / home indicator. */
+    margin-bottom: 24px;
+  }
+
+  .title {
+    font-size: 15px;
+    /* Title sits to the LEFT of the ✕ — reserve space so they never
+     * overlap on narrow viewports. */
+    padding-right: 36px;
+  }
+}
+
+@keyframes fadeIn {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+@keyframes slideIn {
+  from {
+    opacity: 0;
+    transform: translateY(-8px) scale(0.98);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+}

@@ -1,0 +1,89 @@
+.wrap {
+  margin-bottom: 14px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--bg-elev);
+}
+
+.header {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 14px;
+  background: var(--bg-elev-2);
+  border-bottom: 1px solid var(--border);
+  flex-wrap: wrap;
+}
+
+.toggle {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  background: transparent;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  color: var(--text-dim);
+  cursor: pointer;
+  transition: border-color 0.1s, color 0.1s;
+  padding: 0;
+  flex-shrink: 0;
+}
+
+.toggle:hover {
+  border-color: var(--border-strong);
+  color: var(--text);
+}
+
+.title {
+  background: transparent;
+  border: 0;
+  padding: 0;
+  color: var(--text);
+  font-size: 14px;
+  font-weight: 600;
+  cursor: pointer;
+  text-align: left;
+}
+
+.title:hover {
+  color: var(--accent-glow);
+}
+
+.count {
+  color: var(--text-dim);
+  font-size: 12px;
+}
+
+.actions {
+  display: flex;
+  gap: 6px;
+  margin-left: auto;
+}
+
+.body {
+  /* Table component carries its own padding; only need a thin gap so the
+     first row isn't flush against the header divider. */
+  padding: 6px 0 0 0;
+}
+
+@media (max-width: 768px) {
+  .header {
+    padding: 8px 10px;
+    gap: 8px;
+  }
+
+  .title {
+    font-size: 13px;
+  }
+
+  .count {
+    font-size: 11px;
+  }
+
+  .actions {
+    flex-wrap: wrap;
+    gap: 4px;
+  }
+}

@@ -1,0 +1,41 @@
+[Unit]
+Description=VPS Panel Next.js UI
+After=network-online.target vps-panel-agent.service
+Wants=network-online.target
+Requires=vps-panel-agent.service
+
+[Service]
+Type=simple
+User=vps-panel
+Group=vps-panel
+EnvironmentFile=/etc/vps-panel/.env
+WorkingDirectory=/opt/vps-panel/app
+ExecStart=/usr/bin/npm run start
+Restart=on-failure
+RestartSec=2s
+LimitNOFILE=65536
+Environment=PORT=10000
+# Only nginx talks to the panel. `next start` ignores HOSTNAME, so the bind
+# address is the -H flag in package.json's start script; without it the
+# panel listened on every interface, where a direct request skips nginx
+# (TLS, the access allowlist) and can set its own X-Real-IP.
+# UMask: panel.db sidecars (-wal/-shm) and other files it creates are not
+# world-readable.
+UMask=0007
+
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+LockPersonality=true
+RestrictRealtime=true
+RestrictSUIDSGID=true
+SystemCallArchitectures=native
+ReadWritePaths=/var/lib/vps-panel /var/log/vps-panel /opt/vps-panel/app/.next
+SupplementaryGroups=vps-panel
+
+[Install]
+WantedBy=multi-user.target
