@@ -73,6 +73,8 @@ async fn serve() -> Result<()> {
     // Backfills /srv/drive on boxes installed before the Drive root existed.
     handlers::files::ensure_drive_dir().await;
     handlers::apps::ensure_app_unit_defaults().await;
+    // Server names longer than 46 characters fail nginx -t without it.
+    handlers::nginx::ensure_http_defaults().await;
     // The panel vhost includes the access allowlist; nginx -t fails without it.
     if let Err(e) = handlers::panel_access::ensure_file().await {
         tracing::warn!(error = %e, "could not create the panel access file");
