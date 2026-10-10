@@ -1,3 +1,4 @@
+import Link from "next/link";
 import { agent } from "@/lib/agent";
 import { db } from "@/lib/db";
 import TypedConfirmButton from "@/components/TypedConfirmButton/TypedConfirmButton";
@@ -11,7 +12,7 @@ import MailboxForm from "./MailboxForm";
 import MailServerInfo from "./MailServerInfo";
 import CopyMailboxConfig from "./CopyMailboxConfig";
 import EditMailboxRow from "./EditMailboxRow";
-import MailboxActions from "./MailboxActions";
+import MailboxActions, { type WebmailOff } from "./MailboxActions";
 import MailboxTable, { type MailboxRow } from "./MailboxTable";
 import local from "./mailboxes.module.css";
 
@@ -33,7 +34,7 @@ export default async function MailboxesPage() {
       .all() as { name: string }[]
   ).map((r) => r.name);
 
-  const [mailboxResp, sysinfo] = await Promise.all([
+  const [mailboxResp, sysinfo, recipes] = await Promise.all([
     agent.mail
       .listMailboxes()
       .then<MailboxListShape>((r: unknown) => {
@@ -49,6 +50,7 @@ export default async function MailboxesPage() {
       })
       .catch<MailboxListShape>(() => ({ server: "", mailboxes: [] })),
     agent.sysinfo().catch(() => null),
+    agent.quickInstall.list().catch(() => null),
   ]);
 
   const { server, mailboxes } = mailboxResp;
@@ -66,15 +68,29 @@ export default async function MailboxesPage() {
   );
   const bytesByEmail = new Map(usageEntries);
 
-  // Roundcube runs on 127.0.0.1:8082 and is reached publicly through whatever
-  // site the operator mapped to it (e.g. webmail.<panel-host>). If no such
-  // site exists we hide the icon — the user has no public URL to send them to.
+  // Roundcube runs on 127.0.0.1:<port> and is reached publicly through whatever
+  // site the operator mapped to that port (e.g. webmail.<panel-host>). Without
+  // one the per-row icon stays visible but off, and a notice above the table
+  // says what is missing.
+  const roundcube = recipes?.find((r) => r.slug === "roundcube");
+  const roundcubePort = roundcube?.default_port ?? 8082;
   const webmailSite = db()
     .prepare(
-      `SELECT domain FROM sites WHERE mode = 'port' AND upstream_port = 8082 LIMIT 1`,
+      `SELECT domain FROM sites WHERE mode = 'port' AND upstream_port = ? LIMIT 1`,
     )
-    .get() as { domain: string } | undefined;
+    .get(roundcubePort) as { domain: string } | undefined;
   const webmailUrl = webmailSite ? `https://${webmailSite.domain}` : null;
+  // An unreachable agent leaves `roundcube` unknown: ask for the domain then,
+  // the one missing piece the panel can see for itself.
+  const webmailOff: WebmailOff = webmailUrl
+    ? null
+    : roundcube && !roundcube.installed
+      ? "install"
+      : "domain";
+  const webmailOffTitle =
+    webmailOff === "install"
+      ? "Webmail is off: Roundcube is not installed"
+      : "Webmail is off: Roundcube has no public domain yet";
 
   const rootDisk =
     sysinfo?.disk.find((d) => d.mount === "/var/mail") ??
@@ -104,6 +120,30 @@ export default async function MailboxesPage() {
         />
       </div>
 
+      {webmailOff && mailboxes.length > 0 && (
+        <div className={local.webmailNotice}>
+          <span>
+            {webmailOff === "install" ? (
+              <>
+                Webmail is off. Install Roundcube under Apps, then give it a public
+                domain to open these mailboxes in the browser.
+              </>
+            ) : (
+              <>
+                Webmail is off. Roundcube has no public domain yet: add a domain that
+                proxies to port {roundcubePort} to open these mailboxes in the browser.
+              </>
+            )}
+          </span>
+          <Link
+            href={webmailOff === "install" ? "/apps" : `/domains?port=${roundcubePort}`}
+            className={styles.btnGhost}
+          >
+            {webmailOff === "install" ? "Go to Apps" : `Add domain for port ${roundcubePort}`}
+          </Link>
+        </div>
+      )}
+
       <MailboxTable
         rows={mailboxes.map((m): MailboxRow => {
           const usedBytes = bytesByEmail.get(m.email) ?? 0;
@@ -128,7 +168,7 @@ export default async function MailboxesPage() {
               actions: (
                 <>
                   <div className={local.desktopActions}>
-                    {webmailUrl && (
+                    {webmailUrl ? (
                       <a
                         href={`${webmailUrl}/?_user=${encodeURIComponent(m.email)}`}
                         target="_blank"
@@ -145,6 +185,15 @@ export default async function MailboxesPage() {
                       >
                         <EmailIcon />
                       </a>
+                    ) : (
+                      <span
+                        className={local.webmailOff}
+                        role="img"
+                        title={webmailOffTitle}
+                        aria-label={webmailOffTitle}
+                      >
+                        <EmailIcon />
+                      </span>
                     )}
                     <EditMailboxRow
                       email={m.email}
@@ -171,6 +220,7 @@ export default async function MailboxesPage() {
                     email={m.email}
                     server={server}
                     webmailUrl={webmailUrl}
+                    webmailOff={webmailOff}
                     currentQuotaMb={m.quota_mb}
                     currentUsageMb={usedMbCeil}
                     updateAction={updateMailboxAction.bind(null, m.email)}

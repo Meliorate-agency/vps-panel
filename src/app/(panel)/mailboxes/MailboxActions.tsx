@@ -12,10 +12,15 @@ type UpdateResult =
   | { ok: true; data?: { password?: string } }
   | { ok: false; error: string };
 
+/** Why webmail can't open yet: Roundcube is not installed, or it has no
+ *  public domain. null when a domain proxies to it. */
+export type WebmailOff = "install" | "domain" | null;
+
 type Props = {
   email: string;
   server: string;
   webmailUrl: string | null;
+  webmailOff: WebmailOff;
   currentQuotaMb: number;
   currentUsageMb: number;
   updateAction: (prev: UpdateResult | null, fd: FormData) => Promise<UpdateResult>;
@@ -41,6 +46,7 @@ export default function MailboxActions({
   email,
   server,
   webmailUrl,
+  webmailOff,
   currentQuotaMb,
   currentUsageMb,
   updateAction,
@@ -163,11 +169,14 @@ export default function MailboxActions({
               className={local.menuBtn}
               onClick={openMailbox}
               disabled={!webmailUrl}
-              title={webmailUrl ? "" : "No webmail site bound to Roundcube yet"}
             >
               <span className={local.menuLabel}>Open mailbox</span>
               <span className={local.menuHint}>
-                {webmailUrl ? "Roundcube webmail" : "Install Roundcube + bind a site first"}
+                {webmailUrl
+                  ? "Roundcube webmail"
+                  : webmailOff === "install"
+                    ? "Off: install Roundcube under Apps first"
+                    : "Off: give Roundcube a public domain first"}
               </span>
             </button>
             <button

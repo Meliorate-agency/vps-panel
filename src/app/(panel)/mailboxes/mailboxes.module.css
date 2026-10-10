@@ -98,6 +98,43 @@
   margin-top: 3px;
 }
 
+/* Shown above the table while Roundcube can't be opened: what is missing,
+ * plus a link to the page that fixes it. Same colours as networks' .warnBox. */
+.webmailNotice {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px 12px;
+  color: var(--warn);
+  background: rgba(255, 182, 72, 0.1);
+  border: 1px solid rgba(255, 182, 72, 0.35);
+  padding: 8px 10px;
+  border-radius: var(--radius);
+  font-size: 13px;
+  margin-bottom: 12px;
+}
+
+.webmailNotice a {
+  white-space: nowrap;
+  text-decoration: none;
+}
+
+/* The per-row webmail icon while it can't open: the same box as the
+ * btnGhost link it stands in for, dimmed and not a link. */
+.webmailOff {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 6px 8px;
+  background: var(--bg-elev-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  color: var(--text);
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
 /* ─── Mobile responsive ──────────────────────────────────────────────
  * Above 768px the table renders 4 columns (Email · Quota · Copy · Actions)
  * exactly like before. Below 768px the Quota + Copy columns disappear,
