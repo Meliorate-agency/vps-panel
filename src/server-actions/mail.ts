@@ -6,6 +6,7 @@ import { requireAdmin } from "@/lib/auth";
 import { writeAudit } from "@/lib/audit";
 import { agentErrorMessage } from "@/lib/redirects";
 import type { SslTaskResult } from "@/lib/sslTaskResult";
+import type { MailTrackResp } from "@/lib/agent";
 
 export type ActionResult<T = undefined> =
   | { ok: true; data?: T }
@@ -121,6 +122,63 @@ export async function deleteMailboxAction(email: string): Promise<void> {
     message: resp?.maildir_trash_id ? `maildir moved to trash ${resp.maildir_trash_id}` : undefined,
   });
   revalidatePath("/mailboxes");
+}
+
+/**
+ * Add a forwarder: mail to `source` (an address, or `@domain` for the domain's
+ * catch-all) also goes to each destination. Destinations come one per line or
+ * comma-separated.
+ */
+export async function createAliasAction(
+  _prev: ActionResult<{ added: number }> | null,
+  fd: FormData,
+): Promise<ActionResult<{ added: number }>> {
+  const s = await requireAdmin();
+  const source = String(fd.get("source") ?? "").trim().toLowerCase();
+  const destinations = String(fd.get("destinations") ?? "")
+    .split(/[\s,;]+/)
+    .map((d) => d.trim())
+    .filter(Boolean);
+  if (!source.includes("@")) return { ok: false, error: "enter the address to forward" };
+  if (destinations.length === 0) return { ok: false, error: "enter an address to forward to" };
+  try {
+    const resp = await agent.mail.createAlias(source, destinations);
+    writeAudit({
+      actorId: s.userId,
+      action: "mail.aliases.create",
+      target: source,
+      result: "ok",
+      message: destinations.join(", "),
+    });
+    revalidatePath("/mailboxes");
+    return { ok: true, data: { added: resp.added } };
+  } catch (e: unknown) {
+    return { ok: false, error: agentErrorMessage(e).replace(/^(conflict|invalid input): /, "") };
+  }
+}
+
+export async function deleteAliasAction(id: number, label: string): Promise<void> {
+  const s = await requireAdmin();
+  await agent.mail.deleteAlias(id);
+  writeAudit({ actorId: s.userId, action: "mail.aliases.delete", target: label, result: "ok" });
+  revalidatePath("/mailboxes");
+}
+
+/** Track delivery: what Postfix did with mail to or from one address. */
+export async function trackDeliveryAction(
+  _prev: ActionResult<MailTrackResp> | null,
+  fd: FormData,
+): Promise<ActionResult<MailTrackResp>> {
+  await requireAdmin();
+  const address = String(fd.get("address") ?? "").trim().toLowerCase();
+  const days = Number(fd.get("days") ?? 3);
+  if (!address.includes("@")) return { ok: false, error: "enter a full email address" };
+  try {
+    const resp = await agent.mail.trackDelivery(address, Number.isFinite(days) ? days : 3);
+    return { ok: true, data: resp };
+  } catch (e: unknown) {
+    return { ok: false, error: agentErrorMessage(e).replace(/^invalid input: /, "") };
+  }
 }
 
 /**

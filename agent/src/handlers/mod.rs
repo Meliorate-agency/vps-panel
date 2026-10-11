@@ -11,6 +11,8 @@ pub mod health;
 pub mod hostname;
 pub mod logs;
 pub mod mail;
+pub mod mail_aliases;
+pub mod mail_log;
 pub mod nginx;
 pub mod panel_access;
 pub mod postgres;
@@ -113,6 +115,11 @@ pub fn router(state: AppState) -> Router {
             patch(mail::update_mailbox).delete(mail::delete_mailbox),
         )
         .route("/mail/mailboxes/{email}/usage", get(mail::mailbox_usage))
+        // Forwarders and catch-alls (rows Postfix's virtual_alias_maps reads).
+        .route("/mail/aliases", post(mail_aliases::create).get(mail_aliases::list))
+        .route("/mail/aliases/{id}", delete(mail_aliases::delete))
+        // Track delivery: Postfix's journal for one address.
+        .route("/mail/track", get(mail_log::track))
         // Make sure a valid cert covers mail.<tenant> (re-issue site cert with
         // the SAN, or a standalone mail.<tenant> cert). Returns a task id.
         .route("/mail/domains/{name}/ssl", post(mail::ensure_ssl))

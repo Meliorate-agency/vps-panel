@@ -1,6 +1,6 @@
 import "server-only";
 import { agent } from "@/lib/agent";
-import { optionalNumber, optionalString, requireString, type Tool } from "../types";
+import { optionalNumber, optionalString, requireNumber, requireString, type Tool } from "../types";
 
 export const TOOLS: Tool[] = [
   {
@@ -108,5 +108,63 @@ export const TOOLS: Tool[] = [
         quota_mb: optionalNumber(args, "quota_mb"),
       });
     },
+  },
+  {
+    page: "Mailboxes",
+    name: "mail.list_aliases",
+    description:
+      "List forwarders, one row per (source, destination) with its id. A source of @domain is that domain's catch-all.",
+    inputSchema: { type: "object", properties: {}, additionalProperties: false },
+    call: async () => agent.mail.listAliases(),
+  },
+  {
+    page: "Mailboxes",
+    name: "mail.create_alias",
+    description:
+      "Add a forwarder: mail to `source` also goes to each destination. `source` is an address on a mail domain of this server, or @domain for a catch-all (any address there without a mailbox or forwarder). A forwarder on a mailbox's own address keeps a copy in the mailbox. Returns how many destinations were added.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        source: { type: "string", description: "Address to forward (e.g. sales@example.com), or @example.com for the catch-all." },
+        destinations: { type: "array", items: { type: "string" }, description: "Addresses to forward to (1-20)." },
+      },
+      required: ["source", "destinations"],
+      additionalProperties: false,
+    },
+    call: async (args) => {
+      const destinations = Array.isArray(args.destinations)
+        ? args.destinations.filter((d): d is string => typeof d === "string")
+        : [];
+      return agent.mail.createAlias(requireString(args, "source"), destinations);
+    },
+  },
+  {
+    page: "Mailboxes",
+    name: "mail.delete_alias",
+    description: "Remove one forwarder row by the id mail.list_aliases returns.",
+    inputSchema: {
+      type: "object",
+      properties: { id: { type: "integer", description: "Forwarder row id.", minimum: 1 } },
+      required: ["id"],
+      additionalProperties: false,
+    },
+    call: async (args) => agent.mail.deleteAlias(requireNumber(args, "id")),
+  },
+  {
+    page: "Mailboxes",
+    name: "mail.track_delivery",
+    description:
+      "What the mail server did with mail to or from one address over the last 1-14 days, from Postfix's log, newest first: one row per recipient with status delivered (to a mailbox here), sent (handed to another server), deferred (retrying), bounced, expired, rejected or queued, plus the receiving server's answer.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        address: { type: "string", description: "Full email address, local or external." },
+        days: { type: "integer", description: "How far back (1-14).", minimum: 1, maximum: 14, default: 3 },
+      },
+      required: ["address"],
+      additionalProperties: false,
+    },
+    call: async (args) =>
+      agent.mail.trackDelivery(requireString(args, "address"), optionalNumber(args, "days") ?? 3),
   },
 ];

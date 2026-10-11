@@ -431,6 +431,120 @@ harden_mail() {
 }
 harden_mail || true
 
+# Forwarders (Mailboxes > Forwarders) on boxes installed before them. Postfix
+# must find a mailbox's own address first, or a catch-all (@domain) row would
+# take its mail and a forwarder on a mailbox would stop it keeping a copy. The
+# same query install.sh writes. Checked with postfix check and lookups against
+# the map; restored on failure. Idempotent, and never fails the update.
+enable_forwarders() {
+  local map=/etc/postfix/mysql-virtual-alias-maps.cf
+  local query="query = SELECT destination FROM virtual_aliases WHERE source='%s' UNION SELECT email FROM virtual_users WHERE email='%s'"
+  [[ -f "$map" ]] && command -v postmap >/dev/null 2>&1 || return 0
+  grep -qxF "$query" "$map" && return 0
+  local backup_dir=/var/backups/vps-panel-config stamp
+  stamp="$(date +%Y%m%d%H%M%S)"
+  install -d -m 0700 "$backup_dir"
+  cp -a "$map" "$backup_dir/mysql-virtual-alias-maps.cf.bak-$stamp"
+  sed -i "s|^query[[:space:]]*=.*|$query|" "$map"
+
+  local ok=1 rc probe
+  # Exit 0 = found, 1 = not found; anything else is a broken query.
+  postmap -q "nobody@vps-panel.invalid" "mysql:$map" >/dev/null 2>&1; rc=$?
+  [[ $rc -le 1 ]] || ok=0
+  probe="$(mariadb -N -e "SELECT email FROM mail.virtual_users LIMIT 1" 2>/dev/null || true)"
+  if [[ -n "$probe" && "$(postmap -q "$probe" "mysql:$map" 2>/dev/null)" != *"$probe"* ]]; then ok=0; fi
+  postfix check >/dev/null 2>&1 || ok=0
+  if [[ $ok -eq 1 ]]; then
+    systemctl reload postfix || true
+    echo "postfix: forwarders and catch-alls leave mailboxes their own mail"
+  else
+    echo "the forwarder lookup failed its checks - restoring it" >&2
+    cp -a "$backup_dir/mysql-virtual-alias-maps.cf.bak-$stamp" "$map"
+    systemctl reload postfix || true
+  fi
+  return 0
+}
+enable_forwarders || true
+
+# Filters and Out of Office in webmail on boxes installed before them: Dovecot
+# runs each mailbox's Sieve script on delivery (LMTP), and Roundcube edits it
+# over ManageSieve (port 4190, opened in ufw to Docker's networks only). The
+# agent adds Roundcube's side when it starts.
+# A mailbox's Dovecot home moves from its maildir root to a plain `home` dir
+# inside it: in the root, Sieve's files and Out of Office's reply log
+# (.dovecot.sieve, .dovecot.lda-dupes.locks) show up as folders and break
+# filing into folders. Mail itself does not move (mail_location is absolute).
+# The new user_query is run against MariaDB and the config through doveconf
+# (LMTP must still load quota) before Dovecot restarts; put back on failure.
+# Idempotent, never fails the update.
+enable_sieve() {
+  local conf=/etc/dovecot/conf.d/91-vps-panel-sieve.conf
+  local sql=/etc/dovecot/dovecot-sql.conf.ext
+  [[ -d /etc/dovecot/conf.d && -f "$sql" ]] && command -v doveconf >/dev/null 2>&1 || return 0
+  if ! dpkg -s dovecot-sieve dovecot-managesieved >/dev/null 2>&1; then
+    if ! DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+         dovecot-sieve dovecot-managesieved >/dev/null 2>&1; then
+      echo "could not install dovecot-sieve; webmail filters stay off until the next update" >&2
+      return 0
+    fi
+  fi
+
+  local want
+  want="$(cat <<'EOF'
+# Managed by vps-panel: Sieve filters and Out of Office for every mailbox,
+# edited in webmail (Roundcube's managesieve plugin, port 4190).
+protocol lmtp {
+  mail_plugins = $mail_plugins sieve
+}
+plugin {
+  sieve = file:~/sieve;active=~/.dovecot.sieve
+}
+EOF
+)"
+  local old_home="'/var/vmail/%d/%n' AS home" new_home="'/var/vmail/%d/%n/home' AS home"
+  if [[ "$(cat "$conf" 2>/dev/null)" != "$want" ]] || grep -qF "$old_home" "$sql"; then
+    local backup_dir=/var/backups/vps-panel-config stamp conf_backup=""
+    stamp="$(date +%Y%m%d%H%M%S)"
+    install -d -m 0700 "$backup_dir"
+    cp -a "$sql" "$backup_dir/dovecot-sql.conf.ext.bak-$stamp"
+    if [[ -f "$conf" ]]; then
+      conf_backup="$backup_dir/91-vps-panel-sieve.conf.bak-$stamp"
+      cp -a "$conf" "$conf_backup"
+    fi
+    printf '%s\n' "$want" > "$conf"
+    chmod 0644 "$conf"
+    sed -i "s|$old_home|$new_home|" "$sql"
+
+    local ok=1 plugins probe query home
+    plugins=" $(doveconf -f protocol=lmtp -h mail_plugins 2>/dev/null || true) "
+    doveconf -n >/dev/null 2>&1 || ok=0
+    [[ "$plugins" == *" sieve "* && "$plugins" == *" quota "* ]] || ok=0
+    probe="$(mariadb -N -e "SELECT email FROM mail.virtual_users LIMIT 1" 2>/dev/null || true)"
+    if [[ -n "$probe" ]]; then
+      query="$(sed -n 's/^user_query[[:space:]]*=[[:space:]]*//p' "$sql")"
+      query="${query//%u/$probe}"; query="${query//%d/${probe#*@}}"; query="${query//%n/${probe%@*}}"
+      home="$(mariadb -N mail -e "$query" 2>/dev/null | awk '{print $3}')"
+      [[ "$home" == "/var/vmail/${probe#*@}/${probe%@*}/home" ]] || ok=0
+    fi
+    if [[ $ok -eq 1 ]]; then
+      # A restart, not a reload: a reload does not open the new 4190 listener.
+      systemctl restart dovecot || true
+      echo "dovecot: filters and out of office on"
+    else
+      echo "the sieve config or the new mailbox home failed its checks - putting both back" >&2
+      cp -a "$backup_dir/dovecot-sql.conf.ext.bak-$stamp" "$sql"
+      if [[ -n "$conf_backup" ]]; then cp -a "$conf_backup" "$conf"; else rm -f "$conf"; fi
+    fi
+  fi
+
+  if command -v ufw >/dev/null 2>&1 && ufw status 2>/dev/null | grep -q "Status: active" \
+     && ! ufw status 2>/dev/null | grep -q '^4190/tcp'; then
+    ufw allow from 172.16.0.0/12 to any port 4190 proto tcp comment 'managesieve (webmail)' >/dev/null || true
+  fi
+  return 0
+}
+enable_sieve || true
+
 # Retire the nginx fail2ban jails: nothing in the panel's nginx uses basic
 # auth or limit_req, and nginx logs to files the systemd backend never reads,
 # so they could never ban anyone while showing up as protection. Dropping

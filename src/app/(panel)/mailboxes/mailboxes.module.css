@@ -135,6 +135,27 @@
   cursor: not-allowed;
 }
 
+/* Track delivery: address + period + button on one row, wrapping on phones. */
+.trackForm {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  gap: 8px 12px;
+  margin-bottom: 12px;
+}
+
+.trackTime {
+  font-size: 12px;
+  white-space: nowrap;
+  color: var(--text-dim);
+}
+
+.trackDetail {
+  font-size: 12px;
+  color: var(--text-dim);
+  overflow-wrap: anywhere;
+}
+
 /* ─── Mobile responsive ──────────────────────────────────────────────
  * Above 768px the table renders 4 columns (Email · Quota · Copy · Actions)
  * exactly like before. Below 768px the Quota + Copy columns disappear,

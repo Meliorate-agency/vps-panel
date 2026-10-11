@@ -1,13 +1,21 @@
 import Link from "next/link";
-import { agent } from "@/lib/agent";
+import { agent, type MailAliasRow, type MailDomainRow } from "@/lib/agent";
 import { db } from "@/lib/db";
+import ConfirmDeleteButton from "@/components/ConfirmDeleteButton/ConfirmDeleteButton";
+import StatusBadge from "@/components/StatusBadge/StatusBadge";
+import Table from "@/components/Table/Table";
 import TypedConfirmButton from "@/components/TypedConfirmButton/TypedConfirmButton";
 import styles from "@/components/page.module.css";
 import {
+  createAliasAction,
   createMailboxAction,
+  deleteAliasAction,
   deleteMailboxAction,
+  trackDeliveryAction,
   updateMailboxAction,
 } from "@/server-actions/mail";
+import ForwarderForm from "./ForwarderForm";
+import TrackDelivery from "./TrackDelivery";
 import MailboxForm from "./MailboxForm";
 import MailServerInfo from "./MailServerInfo";
 import CopyMailboxConfig from "./CopyMailboxConfig";
@@ -34,7 +42,7 @@ export default async function MailboxesPage() {
       .all() as { name: string }[]
   ).map((r) => r.name);
 
-  const [mailboxResp, sysinfo, recipes] = await Promise.all([
+  const [mailboxResp, sysinfo, recipes, aliases, mailDomains] = await Promise.all([
     agent.mail
       .listMailboxes()
       .then<MailboxListShape>((r: unknown) => {
@@ -51,9 +59,12 @@ export default async function MailboxesPage() {
       .catch<MailboxListShape>(() => ({ server: "", mailboxes: [] })),
     agent.sysinfo().catch(() => null),
     agent.quickInstall.list().catch(() => null),
+    agent.mail.listAliases().catch((): MailAliasRow[] => []),
+    agent.mail.listDomains().catch((): MailDomainRow[] => []),
   ]);
 
   const { server, mailboxes } = mailboxResp;
+  const mailboxEmails = new Set(mailboxes.map((m) => m.email.toLowerCase()));
 
   // Probe per-mailbox usage in parallel. We keep raw bytes so the UI can
   // render sub-MB precision (otherwise small mailboxes always show "0 MB"
@@ -232,6 +243,73 @@ export default async function MailboxesPage() {
           };
         })}
       />
+
+      {webmailUrl && mailboxes.length > 0 && (
+        <p className={local.muted} style={{ marginTop: 8 }}>
+          Out of Office replies and mail filters: each person sets their own in{" "}
+          <a href={webmailUrl} target="_blank" rel="noopener noreferrer">
+            webmail
+          </a>
+          , under Settings.
+        </p>
+      )}
+
+      <div className={styles.section}>
+        <h2 className={styles.sectionTitle}>Forwarders</h2>
+        <ForwarderForm action={createAliasAction} domains={mailDomains.map((d) => d.name)} />
+        {aliases.length > 0 && (
+          <div style={{ marginTop: 16 }}>
+            <Table
+              columns={[
+                { key: "source", label: "Address" },
+                { key: "destination", label: "Forwards to" },
+                { key: "actions", label: "", width: "100px" },
+              ]}
+              rowKey={(_, i) => aliases[i].id}
+              rows={aliases.map((a) => ({
+                source: a.source.startsWith("@") ? (
+                  <span style={{ display: "inline-flex", alignItems: "center", gap: 6 }}>
+                    <span className={styles.code}>*{a.source}</span>
+                    <StatusBadge text="catch-all" tone="info" />
+                  </span>
+                ) : (
+                  <div>
+                    <span className={styles.code}>{a.source}</span>
+                    {mailboxEmails.has(a.source) && (
+                      <div className={local.hint}>mailbox, keeps a copy</div>
+                    )}
+                  </div>
+                ),
+                destination: <span className={styles.code}>{a.destination}</span>,
+                actions: (
+                  <ConfirmDeleteButton
+                    action={deleteAliasAction.bind(null, a.id, `${a.source} -> ${a.destination}`)}
+                    title="Remove forwarder?"
+                    body={
+                      <>
+                        Mail to <strong>{a.source.startsWith("@") ? `any other address ${a.source}` : a.source}</strong>{" "}
+                        stops going to <strong>{a.destination}</strong>.
+                      </>
+                    }
+                    confirmLabel="Remove"
+                    buttonLabel="Remove"
+                    buttonClassName={styles.btnGhost}
+                  />
+                ),
+              }))}
+            />
+          </div>
+        )}
+      </div>
+
+      <div className={styles.section}>
+        <h2 className={styles.sectionTitle}>Track delivery</h2>
+        <p className={local.muted} style={{ marginTop: 0 }}>
+          What the mail server did with mail to or from an address: delivered, sent on,
+          retrying, bounced or rejected, with the receiving server&apos;s answer.
+        </p>
+        <TrackDelivery action={trackDeliveryAction} />
+      </div>
     </div>
   );
 }

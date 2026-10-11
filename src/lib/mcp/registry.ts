@@ -19,8 +19,8 @@ import { TOOLS as TASKS } from "./tools/tasks";
  * Tools a read-only token may call: they read state and return no secrets.
  * Anything not listed needs a full-access token, so a new tool is
  * write-level until someone decides otherwise. Left out on purpose:
- * apps.list_env_files (returns .env contents) and tasks.get (task logs can
- * hold build output and env values).
+ * apps.list_env_files (returns .env contents), tasks.get (task logs can
+ * hold build output and env values) and mail.track_delivery (who mails whom).
  */
 const READ_ONLY_TOOLS = new Set([
   "sysinfo",
@@ -40,6 +40,7 @@ const READ_ONLY_TOOLS = new Set([
   "mail.list_domains",
   "mail.list_mailboxes",
   "mail.mailbox_usage",
+  "mail.list_aliases",
   "services.list",
   "system.services",
   "firewall.status",

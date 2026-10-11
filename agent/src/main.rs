@@ -75,6 +75,9 @@ async fn serve() -> Result<()> {
     handlers::apps::ensure_app_unit_defaults().await;
     // Server names longer than 46 characters fail nginx -t without it.
     handlers::nginx::ensure_http_defaults().await;
+    // Webmail filters and Out of Office; spawned so a slow docker can't hold
+    // up the socket.
+    tokio::spawn(handlers::quick_install::ensure_roundcube_managesieve());
     // The panel vhost includes the access allowlist; nginx -t fails without it.
     if let Err(e) = handlers::panel_access::ensure_file().await {
         tracing::warn!(error = %e, "could not create the panel access file");

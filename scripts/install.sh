@@ -139,6 +139,7 @@ DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
   pdns-server pdns-backend-mysql \
   postfix postfix-mysql \
   dovecot-core dovecot-imapd dovecot-pop3d dovecot-lmtpd dovecot-mysql \
+  dovecot-sieve dovecot-managesieved \
   ufw fail2ban \
   unattended-upgrades apt-listchanges \
   chrony \
@@ -479,12 +480,15 @@ hosts = 127.0.0.1
 dbname = mail
 query = SELECT 1 FROM virtual_users WHERE email='%s'
 EOF
+# Forwarders (Mailboxes > Forwarders). A mailbox's own address resolves to
+# itself too, so a forwarder on a mailbox keeps a copy there and a catch-all
+# (@domain) never takes a real mailbox's mail.
 cat > /etc/postfix/mysql-virtual-alias-maps.cf <<EOF
 user = mail
 password = $MAIL_PASS
 hosts = 127.0.0.1
 dbname = mail
-query = SELECT destination FROM virtual_aliases WHERE source='%s'
+query = SELECT destination FROM virtual_aliases WHERE source='%s' UNION SELECT email FROM virtual_users WHERE email='%s'
 EOF
 cat > /etc/postfix/mysql-sender-login-maps.cf <<EOF
 user = mail
@@ -512,12 +516,15 @@ systemctl restart postfix
 
 #-------------------------------------------------- Dovecot
 log "configuring Dovecot"
+# home is a plain `home` dir inside the maildir, not the maildir itself: there,
+# Sieve's files and Out of Office's reply log (.dovecot.sieve,
+# .dovecot.lda-dupes.locks) showed up as folders and broke filing into folders.
 cat > /etc/dovecot/dovecot-sql.conf.ext <<EOF
 driver = mysql
 connect = host=127.0.0.1 dbname=mail user=mail password=$MAIL_PASS
 default_pass_scheme = SHA512-CRYPT
 password_query = SELECT email as user, password FROM virtual_users WHERE email='%u';
-user_query = SELECT 5000 AS uid, 5000 AS gid, '/var/vmail/%d/%n' AS home, concat('*:bytes=', quota_mb, 'M') AS quota_rule FROM virtual_users WHERE email='%u';
+user_query = SELECT 5000 AS uid, 5000 AS gid, '/var/vmail/%d/%n/home' AS home, concat('*:bytes=', quota_mb, 'M') AS quota_rule FROM virtual_users WHERE email='%u';
 EOF
 chmod 0640 /etc/dovecot/dovecot-sql.conf.ext
 chown root:dovecot /etc/dovecot/dovecot-sql.conf.ext
@@ -605,6 +612,21 @@ EOF
 chmod 0644 /etc/dovecot/conf.d/90-vps-panel-quota.conf
 chown root:root /etc/dovecot/conf.d/90-vps-panel-quota.conf
 
+# Filters and Out of Office: LMTP runs each mailbox's Sieve script on delivery,
+# and webmail edits it over ManageSieve (dovecot-managesieved, port 4190; ufw
+# opens it to Docker's networks only, for the Roundcube container).
+cat > /etc/dovecot/conf.d/91-vps-panel-sieve.conf <<'EOF'
+# Managed by vps-panel: Sieve filters and Out of Office for every mailbox,
+# edited in webmail (Roundcube's managesieve plugin, port 4190).
+protocol lmtp {
+  mail_plugins = $mail_plugins sieve
+}
+plugin {
+  sieve = file:~/sieve;active=~/.dovecot.sieve
+}
+EOF
+chmod 0644 /etc/dovecot/conf.d/91-vps-panel-sieve.conf
+
 # Warning delivery script. Invoked by Dovecot's quota plugin with two args:
 # the percentage threshold that was crossed (80 or 90) and the mailbox.
 # `noenforcing` on the dovecot-lda quota lets the warning itself be delivered
@@ -668,6 +690,8 @@ ufw allow 465/tcp comment 'smtps'
 ufw allow 587/tcp comment 'submission'
 ufw allow 993/tcp comment 'imaps'
 ufw allow 995/tcp comment 'pop3s'
+# ManageSieve for the Roundcube container only (Docker's 172.16.0.0/12).
+ufw allow from 172.16.0.0/12 to any port 4190 proto tcp comment 'managesieve (webmail)'
 ufw allow 53/tcp comment 'dns tcp'
 ufw allow 53/udp comment 'dns udp'
 ufw --force enable

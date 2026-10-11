@@ -343,6 +343,25 @@ export const agent = {
         method: "DELETE",
         path: `/mail/mailboxes/${encodeURIComponent(email)}`,
       }),
+    /** Forwarders: one row per (source, destination). source `@domain` is
+     *  the domain's catch-all. */
+    listAliases: () => agentRequest<MailAliasRow[]>({ method: "GET", path: "/mail/aliases" }),
+    createAlias: (source: string, destinations: string[]) =>
+      agentRequest<{ added: number }>({
+        method: "POST",
+        path: "/mail/aliases",
+        body: { source, destinations },
+      }),
+    deleteAlias: (id: number) =>
+      agentRequest<Ok>({ method: "DELETE", path: `/mail/aliases/${id}` }),
+    /** What Postfix did with mail to or from `address` over the last `days`
+     *  (1-14), newest first. */
+    trackDelivery: (address: string, days: number) =>
+      agentRequest<MailTrackResp>({
+        method: "GET",
+        path: "/mail/track",
+        query: { address, days },
+      }),
   },
 
   databases: {
@@ -1225,6 +1244,34 @@ export type MailSslResp = {
 export type MailboxRow = { id: number; email: string; quota_mb: number };
 export type MailboxListResp = { server: string; mailboxes: MailboxRow[] };
 export type MailboxUsage = { usage_bytes: number; usage_mb: number };
+export type MailAliasRow = { id: number; source: string; destination: string };
+export type MailTrackStatus =
+  | "delivered"
+  | "sent"
+  | "deferred"
+  | "bounced"
+  | "expired"
+  | "rejected"
+  | "queued";
+export type MailTrackRow = {
+  /** journalctl short-iso, e.g. 2026-10-11T14:11:03+0200 */
+  time: string;
+  queue_id: string | null;
+  /** "" for bounce notices and Out of Office replies (null sender) */
+  from: string;
+  /** "" while nothing has been tried yet (status queued) */
+  to: string;
+  /** The address the mail was sent to, when a forwarder rewrote it. */
+  orig_to: string | null;
+  status: MailTrackStatus;
+  detail: string;
+};
+export type MailTrackResp = {
+  address: string;
+  days: number;
+  rows: MailTrackRow[];
+  truncated: boolean;
+};
 
 export type DbUser = { user: string; host: string };
 /** A user@host pair holding db-level grants on a database. Global `ON *.*`

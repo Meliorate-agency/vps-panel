@@ -117,7 +117,7 @@ pub struct MailSslResp {
     pub already_covered: bool,
 }
 
-async fn mail_conn(state: &AppState) -> AgentResult<mysql_async::Conn> {
+pub(crate) async fn mail_conn(state: &AppState) -> AgentResult<mysql_async::Conn> {
     let mut conn = state.mariadb.pool().get_conn().await?;
     match conn.query_drop(format!("USE `{MAIL_DB}`")).await {
         Ok(()) => Ok(conn),
@@ -571,7 +571,7 @@ pub async fn list_mailboxes(State(state): State<AppState>) -> AgentResult<Json<M
 /// (`/var/vmail/<domain>/<local>`, Dovecot's `%d/%n`), so anything that could
 /// step outside that directory is refused. Returns (email, local, domain),
 /// lowercased.
-fn mailbox_parts(email: &str) -> AgentResult<(String, String, String)> {
+pub(crate) fn mailbox_parts(email: &str) -> AgentResult<(String, String, String)> {
     let email = email.trim().to_lowercase();
     let Some((local, domain)) = email.split_once('@') else {
         return Err(AgentError::Invalid("email must contain @".into()));

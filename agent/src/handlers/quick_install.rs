@@ -1006,6 +1006,9 @@ async fn install_roundcube_dynamic(task: crate::ipc::tasks::TaskHandle) {
         }
     };
 
+    // Before the first start, so the entrypoint includes it right away.
+    write_roundcube_sieve_conf().await;
+
     let default_host = format!("ROUNDCUBEMAIL_DEFAULT_HOST=ssl://{mail_host}");
     let smtp_server = format!("ROUNDCUBEMAIL_SMTP_SERVER=tls://{mail_host}");
     // Map the mail FQDN(s) to the docker bridge gateway inside the container.
@@ -1141,6 +1144,65 @@ async fn install_pgvector_dynamic(task: crate::ipc::tasks::TaskHandle) {
             .to_string(),
     );
     task.finish(true);
+}
+
+// ─── Roundcube filters and Out of Office (managesieve plugin) ─────────
+//
+// Settings > Filters and Out of Office in webmail, saved as Sieve scripts that
+// Dovecot runs on delivery (install.sh / update.sh::enable_sieve). The image's
+// entrypoint includes every /var/roundcube/config/*.php when the container
+// starts. `%h` is the IMAP host the user logged in to, so the file stays right
+// when PANEL_HOST changes.
+
+const ROUNDCUBE_SIEVE_CONF_NAME: &str = "vps-panel-managesieve.php";
+const ROUNDCUBE_SIEVE_CONF: &str = "<?php\n\
+// Managed by vps-panel (agent/src/handlers/quick_install.rs).\n\
+$config['plugins'] = array_values(array_unique(array_merge($config['plugins'] ?? [], ['managesieve'])));\n\
+$config['managesieve_host'] = 'tls://%h:4190';\n\
+$config['managesieve_vacation'] = 1;\n";
+
+/// Write the plugin config into the roundcube_config volume once Dovecot speaks
+/// ManageSieve (before that the plugin only shows a connection error). True
+/// when the file changed.
+async fn write_roundcube_sieve_conf() -> bool {
+    let speaks_sieve = exec::run("doveconf", ["-h", "protocols"])
+        .await
+        .is_ok_and(|o| o.stdout.split_whitespace().any(|p| p == "sieve"));
+    if !speaks_sieve {
+        return false;
+    }
+    let Ok(out) = exec::run(
+        "docker",
+        ["volume", "inspect", "roundcube_config", "--format", "{{.Mountpoint}}"],
+    )
+    .await
+    else {
+        return false;
+    };
+    let dir = out.stdout.trim();
+    if dir.is_empty() {
+        return false;
+    }
+    let path = std::path::Path::new(dir).join(ROUNDCUBE_SIEVE_CONF_NAME);
+    if tokio::fs::read_to_string(&path).await.ok().as_deref() == Some(ROUNDCUBE_SIEVE_CONF) {
+        return false;
+    }
+    match crate::fs_atomic::write(&path, ROUNDCUBE_SIEVE_CONF.as_bytes(), 0o644).await {
+        Ok(()) => true,
+        Err(e) => {
+            tracing::warn!(error = %e, "could not write {}", path.display());
+            false
+        }
+    }
+}
+
+/// Agent start: a Roundcube installed before the filters gets them on the next
+/// update. The container restarts once so its entrypoint includes the file.
+pub async fn ensure_roundcube_managesieve() {
+    if write_roundcube_sieve_conf().await {
+        let _ = exec::run("docker", ["restart", "roundcube"]).await;
+        tracing::info!("roundcube: filters and out of office on");
+    }
 }
 
 // ─── Roundcube settings (editable from the panel UI) ──────────────────
@@ -1298,6 +1360,8 @@ pub async fn update_roundcube_settings(
             |l| task.log(l.to_string()),
         )
         .await;
+        // The wiped volume took the filters config with it.
+        write_roundcube_sieve_conf().await;
 
         let default_host = format!("ROUNDCUBEMAIL_DEFAULT_HOST=ssl://{mail_host}");
         let imap_port_env = format!("ROUNDCUBEMAIL_DEFAULT_PORT={imap_port}");
