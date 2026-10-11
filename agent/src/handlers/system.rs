@@ -866,7 +866,8 @@ fn publickey_hint(dir: &str, origin: &str, ssh_config: &str, output: &str) -> Op
         ),
         (None, []) => format!(
             "No Host block in {ROOT_SSH_CONFIG} leads to {host}. Add one for the panel's deploy \
-             key, /root/.ssh/{PANEL_DEPLOY_KEY} (FIRST_INSTALL.md steps 2 and 3), and point \
+             key, /root/.ssh/{PANEL_DEPLOY_KEY} (FIRST_INSTALL.md, Installing from a private \
+             fork), and point \
              origin at it, then try again:\n\n\
              printf '%s\\n' 'Host {PANEL_DEPLOY_KEY}' '  HostName {host}' '  User git' \
              '  IdentityFile ~/.ssh/{PANEL_DEPLOY_KEY}' '  IdentitiesOnly yes' \

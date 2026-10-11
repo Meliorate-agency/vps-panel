@@ -1,10 +1,6 @@
 # Bolt Panel - first install
 
-You need:
-
-- A fresh **Ubuntu 24.04** server you can reach as root over SSH (install.sh refuses any other release).
-- Your own SSH keypair, private and public half, **without a passphrase** (the panel runs git without prompts and cannot type one).
-- That public key on GitHub with read access to `Meliorate-agency/vps-panel`: the repo's Settings > Deploy keys (read-only is enough), or SSH keys on a GitHub account that can read the repo. GitHub takes a deploy key on one repository only.
+You need a fresh **Ubuntu 24.04** server you can reach as root over SSH (install.sh refuses any other release). The code comes from the public repo [Meliorate-agency/vps-panel](https://github.com/Meliorate-agency/vps-panel), so no GitHub key is needed.
 
 Log in from your PC:
 
@@ -28,94 +24,17 @@ There is no Node.js step: install.sh installs Node 22 itself.
 
 ---
 
-# 2. Put your keypair on the server
-
-On the server the files are always named `github_vps_panel` and `github_vps_panel.pub`, whatever the key is called on your PC. The alias in step 3 and the clone URL in step 6 use that name.
+# 2. Clone Bolt Panel
 
 ```bash
-mkdir -p -m 700 ~/.ssh
+git clone https://github.com/Meliorate-agency/vps-panel.git /root/vps-panel-src
 ```
 
-Private key: run this, paste the whole key (from the `-----BEGIN` line to the `-----END` line), press Enter, then Ctrl+D.
-
-```bash
-cat > ~/.ssh/github_vps_panel
-```
-
-Public key: the same, with the single `ssh-ed25519 AAAA...` (or `ssh-rsa AAAA...`) line.
-
-```bash
-cat > ~/.ssh/github_vps_panel.pub
-```
-
-Or copy both files from your PC instead of pasting. In PowerShell on the PC, replacing `YOUR_KEY` and `SERVER_IP`:
-
-```powershell
-scp $HOME\.ssh\YOUR_KEY root@SERVER_IP:/root/.ssh/github_vps_panel
-scp $HOME\.ssh\YOUR_KEY.pub root@SERVER_IP:/root/.ssh/github_vps_panel.pub
-```
-
-Back on the server, set the permissions and check that the two halves belong together:
-
-```bash
-chmod 600 ~/.ssh/github_vps_panel && chmod 644 ~/.ssh/github_vps_panel.pub && [ "$(ssh-keygen -y -f ~/.ssh/github_vps_panel | cut -d' ' -f2)" = "$(cut -d' ' -f2 ~/.ssh/github_vps_panel.pub)" ] && echo "pair OK" || echo "MISMATCH"
-```
-
-- `pair OK`: go on.
-- `Load key ... error in libcrypto` or `invalid format`: the private key paste was cut short or mangled. Paste it again.
-- `MISMATCH` alone: that public key does not belong to this private key.
-- It asks for a passphrase: remove it with `ssh-keygen -p -f ~/.ssh/github_vps_panel` (old passphrase, then Enter twice).
+Keep it at `/root/vps-panel-src`: the panel updates itself from this clone.
 
 ---
 
-# 3. GitHub alias
-
-ssh uses this key only for remotes written as `git@github_vps_panel:...`. This Host block is what makes that work.
-
-```bash
-printf '%s\n' 'Host github_vps_panel' '  HostName github.com' '  User git' '  IdentityFile ~/.ssh/github_vps_panel' '  IdentitiesOnly yes' >> ~/.ssh/config
-chmod 600 ~/.ssh/config
-```
-
----
-
-# 4. Optional: log in to this server with the same key
-
-Appends, so a key your provider already put there keeps working.
-
-```bash
-cat ~/.ssh/github_vps_panel.pub >> ~/.ssh/authorized_keys
-chmod 600 ~/.ssh/authorized_keys
-```
-
----
-
-# 5. Test GitHub access
-
-Type `yes` when it asks about GitHub's host key.
-
-```bash
-ssh -T git@github_vps_panel
-```
-
-- `Hi Meliorate-agency/vps-panel! You've successfully authenticated...`: good (deploy key).
-- `Hi <your GitHub user>! You've successfully authenticated...`: good (account key).
-- Any other repo name: the key is that repo's deploy key and cannot read vps-panel.
-- `Permission denied (publickey)`: the public key is not on GitHub yet.
-
----
-
-# 6. Clone Bolt Panel
-
-Always through the alias. Never `git@github.com:...` and never `git clone -c core.sshCommand=...`: the panel runs git with its own `GIT_SSH_COMMAND`, which overrides `core.sshCommand`, so such a clone installs fine and then every self-update fails with `Permission denied (publickey)`.
-
-```bash
-git clone git@github_vps_panel:Meliorate-agency/vps-panel.git /root/vps-panel-src
-```
-
----
-
-# 7. Install and run Bolt Panel
+# 3. Install and run Bolt Panel
 
 ```bash
 bash /root/vps-panel-src/scripts/install.sh
@@ -136,22 +55,40 @@ Open the panel at `http://SERVER_IP/`, with plain `http`, even if you gave a dom
 
 ---
 
-# 8. Check self-update
+# 4. Check self-update
 
-This runs git the way the panel does. No output means the Update button will work.
-
-```bash
-GIT_SSH_COMMAND="ssh -o BatchMode=yes" git -C /root/vps-panel-src fetch
-```
-
-If self-update ever fails with `Permission denied (publickey)`, look at the remote:
+The Update button in the panel pulls from this clone's GitHub remote and rebuilds. No output here means it can reach GitHub:
 
 ```bash
-git -C /root/vps-panel-src remote -v
+git -C /root/vps-panel-src fetch
 ```
 
-It must say `git@github_vps_panel:...`. If it says `git@github.com:...`, switch it:
+---
 
-```bash
-git -C /root/vps-panel-src remote set-url origin git@github_vps_panel:Meliorate-agency/vps-panel.git
-```
+# Installing from a private fork
+
+Only for your own private copy of the repo: GitHub then needs a key before the server can clone it.
+
+1. Put a keypair **without a passphrase** on the server as `/root/.ssh/github_vps_panel` and `/root/.ssh/github_vps_panel.pub` (the panel runs git without prompts), and add the public key to the fork's Settings > Deploy keys (read-only is enough).
+
+   ```bash
+   chmod 600 ~/.ssh/github_vps_panel && chmod 644 ~/.ssh/github_vps_panel.pub
+   ```
+
+2. Add an ssh alias so git uses that key, then test it (`Hi YOUR_ORG/YOUR_FORK! You've successfully authenticated...` is good):
+
+   ```bash
+   printf '%s\n' 'Host github_vps_panel' '  HostName github.com' '  User git' '  IdentityFile ~/.ssh/github_vps_panel' '  IdentitiesOnly yes' >> ~/.ssh/config
+   chmod 600 ~/.ssh/config
+   ssh -T git@github_vps_panel
+   ```
+
+3. Clone through the alias, then continue with step 3 above:
+
+   ```bash
+   git clone git@github_vps_panel:YOUR_ORG/YOUR_FORK.git /root/vps-panel-src
+   ```
+
+   Always the alias. Never `git@github.com:...` and never `git clone -c core.sshCommand=...`: the panel runs git with its own `GIT_SSH_COMMAND`, which overrides `core.sshCommand`, so such a clone installs fine and then every self-update fails with `Permission denied (publickey)`. If that happens, point the remote back at the alias with `git -C /root/vps-panel-src remote set-url origin git@github_vps_panel:YOUR_ORG/YOUR_FORK.git`.
+
+Do not add a deploy key to `authorized_keys`: anyone who ever gets the key file could then log in to the server as root.

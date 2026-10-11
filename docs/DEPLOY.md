@@ -14,14 +14,15 @@ The panel is designed to install onto a fresh Ubuntu 24.04 LTS server and bring 
 
 ```bash
 ssh root@your-server
-git clone https://github.com/you/vps-panel /opt/vps-panel
-cd /opt/vps-panel
-./scripts/install.sh --domain panel.example.com --email you@example.com
+git clone https://github.com/Meliorate-agency/vps-panel.git /root/vps-panel-src
+bash /root/vps-panel-src/scripts/install.sh --domain panel.example.com --email you@example.com
 ```
+
+Step by step, including IP-only installs and private forks: [FIRST_INSTALL.md](../FIRST_INSTALL.md). The clone stays at `/root/vps-panel-src`: updates pull into it.
 
 The script will:
 
-1. Update apt and install all packages listed in [ARCHITECTURE.md](../ARCHITECTURE.md) and [SECURITY.md](SECURITY.md).
+1. Update apt and install all packages (see [SECURITY.md](SECURITY.md) for what each is hardened to).
 2. Create system users `vps-panel`, `apps`, `vmail`.
 3. Install rustup as `vps-panel`, build the agent in release mode, install it to `/usr/local/bin/vps-panel-agent`.
 4. Install Node 20 LTS from NodeSource, run `npm ci && npm run build`, install the standalone output to `/opt/vps-panel/.next/standalone`.
@@ -37,9 +38,10 @@ After it exits, point your DNS so `panel.example.com` resolves to the server, op
 
 ## Update
 
+The Update button in the panel's top bar, or by hand:
+
 ```bash
-cd /opt/vps-panel
-./scripts/update.sh
+bash /root/vps-panel-src/scripts/update.sh
 ```
 
 Pulls, builds the agent and the panel, and only then installs them and restarts both services. If a build fails, the previous panel install is restored and nothing else changes (the previous install stays in `/opt/vps-panel/app.prev` until the next update). SQLite migrations run on panel start.
@@ -47,14 +49,14 @@ Pulls, builds the agent and the panel, and only then installs them and restarts 
 ## Uninstall
 
 ```bash
-./scripts/uninstall.sh
+bash /root/vps-panel-src/scripts/uninstall.sh
 ```
 
 Stops both services, removes systemd units, removes the nginx vhost, leaves `/var/lib/vps-panel` and MariaDB databases alone. Pass `--purge` to wipe state too.
 
 ## Backups
 
-Configure in Settings -> Backups. Default repository is `/var/backups/vps-panel`. Add an off-host repo (S3 / B2 / SFTP) in the same screen.
+On the Backups page. The restic repository is `/var/backups/vps-panel`, on the same server: copy it somewhere else yourself until off-server destinations are supported.
 
 ## Manual recovery
 
