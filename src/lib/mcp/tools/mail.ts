@@ -1,6 +1,6 @@
 import "server-only";
 import { agent } from "@/lib/agent";
-import { optionalNumber, optionalString, requireNumber, requireString, type Tool } from "../types";
+import { optionalNumber, optionalString, requireString, type Tool } from "../types";
 
 export const TOOLS: Tool[] = [
   {
@@ -137,18 +137,6 @@ export const TOOLS: Tool[] = [
         : [];
       return agent.mail.createAlias(requireString(args, "source"), destinations);
     },
-  },
-  {
-    page: "Mailboxes",
-    name: "mail.delete_alias",
-    description: "Remove one forwarder row by the id mail.list_aliases returns.",
-    inputSchema: {
-      type: "object",
-      properties: { id: { type: "integer", description: "Forwarder row id.", minimum: 1 } },
-      required: ["id"],
-      additionalProperties: false,
-    },
-    call: async (args) => agent.mail.deleteAlias(requireNumber(args, "id")),
   },
   {
     page: "Mailboxes",

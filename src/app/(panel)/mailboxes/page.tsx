@@ -245,7 +245,7 @@ export default async function MailboxesPage() {
       />
 
       {webmailUrl && mailboxes.length > 0 && (
-        <p className={local.muted} style={{ marginTop: 8 }}>
+        <p className={local.muted} style={{ margin: "10px 0 16px" }}>
           Out of Office replies and mail filters: each person sets their own in{" "}
           <a href={webmailUrl} target="_blank" rel="noopener noreferrer">
             webmail

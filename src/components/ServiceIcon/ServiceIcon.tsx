@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 
 type Props = { slug: string; size?: number };
 
@@ -14,11 +14,20 @@ type Props = { slug: string; size?: number };
 
 export default function ServiceIcon({ slug, size = 36 }: Props) {
   const [staticFailed, setStaticFailed] = useState(false);
+  const imgRef = useRef<HTMLImageElement>(null);
+
+  // A 404 that lands before hydration never reaches onError (React attaches it
+  // too late), which left a broken-image box: check the image once mounted.
+  useEffect(() => {
+    const img = imgRef.current;
+    if (img?.complete && img.naturalWidth === 0) setStaticFailed(true);
+  }, []);
 
   if (!staticFailed) {
     return (
       // eslint-disable-next-line @next/next/no-img-element
       <img
+        ref={imgRef}
         src={`/icons/${slug}.svg`}
         alt=""
         width={size}
