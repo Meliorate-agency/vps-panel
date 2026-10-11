@@ -1,4 +1,4 @@
-# Bolt Panel
+# <img src="docs/logo.svg" alt="" width="52" align="top"> Bolt Panel
 
 **A free, self-hosted cPanel alternative for your own Ubuntu VPS.** Deploy Node.js apps from Git, run your domains, SSL, DNS and email with webmail, and manage databases and backups from one fast panel. Point Claude or any other MCP client at it and let an AI agent do the clicking.
 

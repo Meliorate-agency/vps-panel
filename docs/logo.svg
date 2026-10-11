@@ -1,0 +1,14 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="-4 -4 32 32" width="128" height="128">
+  <!-- Bolt Panel mark: the BoltMark path, Dragon theme stops (glow, accent, deep). -->
+  <defs>
+    <linearGradient id="b" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#d98139"/>
+      <stop offset="50%" stop-color="#cf5b30"/>
+      <stop offset="100%" stop-color="#9e3a30"/>
+    </linearGradient>
+    <filter id="glow" x="-50%" y="-50%" width="200%" height="200%">
+      <feDropShadow dx="0" dy="0" stdDeviation="1.6" flood-color="#d98139" flood-opacity="0.6"/>
+    </filter>
+  </defs>
+  <path d="M13 2L3 14h7l-1 8 11-12h-7l1-8z" fill="url(#b)" filter="url(#glow)"/>
+</svg>
