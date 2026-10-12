@@ -51,6 +51,22 @@ const DEFAULT_PATHS: &[&str] = &[
     crate::handlers::files::DRIVE_DIR,
 ];
 
+/// Docker's named volumes: the quick-install containers keep their data here
+/// (n8n's workflows and credentials, pgAdmin, Qdrant, Roundcube's settings and
+/// address books), and none of it was in any snapshot. Only boxes with Docker
+/// have it, and restic fails a backup on a missing path, so it joins the
+/// default set only when it exists. Copied live, like /srv/apps.
+const DOCKER_VOLUMES: &str = "/var/lib/docker/volumes";
+
+/// What a backup without an explicit path list covers.
+fn default_backup_paths() -> Vec<String> {
+    let mut paths: Vec<String> = DEFAULT_PATHS.iter().map(|s| s.to_string()).collect();
+    if std::path::Path::new(DOCKER_VOLUMES).is_dir() {
+        paths.push(DOCKER_VOLUMES.to_string());
+    }
+    paths
+}
+
 /// SECURITY: a requested backup path must be one of the panel's known backup
 /// roots, or a path inside one. Without this guard a caller could back up
 /// /etc/shadow, /root/.ssh, /etc/letsencrypt (TLS private keys), etc. into the
@@ -66,6 +82,7 @@ fn validate_backup_path(p: &str) -> AgentResult<()> {
     }
     let allowed = DEFAULT_PATHS
         .iter()
+        .chain(std::iter::once(&DOCKER_VOLUMES))
         .any(|root| p == *root || p.starts_with(&format!("{root}/")));
     if !allowed {
         return Err(AgentError::Invalid(format!(
@@ -181,10 +198,7 @@ pub async fn run(
         for p in &problems {
             task.log(p.clone());
         }
-        let paths: Vec<String> = req
-            .paths
-            .clone()
-            .unwrap_or_else(|| DEFAULT_PATHS.iter().map(|s| s.to_string()).collect());
+        let paths: Vec<String> = req.paths.clone().unwrap_or_else(default_backup_paths);
         let mut args: Vec<String> = vec!["backup".into(), "--json".into()];
         for exclude in BACKUP_EXCLUDES {
             args.push(format!("--exclude={exclude}"));
@@ -384,7 +398,7 @@ fn repo_env_from_cfg(cfg: &crate::config::Config) -> Vec<(&'static str, String)>
 
 #[cfg(test)]
 mod tests {
-    use super::{validate_restore, RESTORE_ROOT};
+    use super::{validate_backup_path, validate_restore, RESTORE_ROOT};
 
     #[test]
     fn restores_only_into_a_new_folder_under_the_restore_root() {
@@ -401,5 +415,15 @@ mod tests {
             .unwrap()
             .starts_with("/srv/drive/restores/abc123-"));
         assert!(validate_restore("not-hex!", "").is_err());
+    }
+
+    #[test]
+    fn docker_volumes_are_a_backup_root_but_not_the_rest_of_docker() {
+        assert!(validate_backup_path("/var/lib/docker/volumes").is_ok());
+        assert!(validate_backup_path("/var/lib/docker/volumes/n8n_data/_data").is_ok());
+        assert!(validate_backup_path("/srv/apps/shop").is_ok());
+        for bad in ["/var/lib/docker", "/var/lib/docker/image", "/var/lib/docker/volumes/../containers", "/etc/shadow"] {
+            assert!(validate_backup_path(bad).is_err(), "{bad} should be refused");
+        }
     }
 }

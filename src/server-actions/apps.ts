@@ -123,8 +123,10 @@ export async function deployAppAction(
   fd: FormData,
 ): Promise<ActionResult<{ taskId: string }>> {
   const s = await requireAdmin();
-  const envText = String(fd.get("env") ?? "");
-  const env = parseEnv(envText);
+  // Only a form that has an env field replaces the env file. The deploy form
+  // has none, and sending [] made the agent empty /etc/vps-panel/apps/<name>.env
+  // (and the build's variables) on every deploy; undefined keeps the file.
+  const env = fd.has("env") ? parseEnv(String(fd.get("env") ?? "")) : undefined;
   const repoUrlRaw = String(fd.get("repo_url") ?? "").trim();
   // Step comes from the clicked submit button's value (name="step").
   // Validate against the allowed set to keep junk out of the agent body.

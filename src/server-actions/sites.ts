@@ -125,32 +125,6 @@ function checkAppSubdomainCollision(domain: string): ActionResult | null {
   return null;
 }
 
-async function autoAllowPort(
-  actorId: number,
-  domain: string,
-  port: number,
-  reason: string,
-) {
-  try {
-    await agent.firewall.allow(port, "tcp");
-    writeAudit({
-      actorId,
-      action: "firewall.auto_allow",
-      target: `${port}/tcp`,
-      result: "ok",
-      message: `${reason} ${domain}`,
-    });
-  } catch (e: unknown) {
-    writeAudit({
-      actorId,
-      action: "firewall.auto_allow",
-      target: `${port}/tcp`,
-      result: "error",
-      message: e instanceof Error ? e.message : String(e),
-    });
-  }
-}
-
 type SiteRoute = {
   mode: SiteMode;
   upstreamPort: number | null;
@@ -188,9 +162,9 @@ async function doCreate(
         issueSsl ? 1 : 0,
       );
 
-    if (route.mode === "port" && route.upstreamPort !== null) {
-      await autoAllowPort(actorId, domain, route.upstreamPort, "auto-opened for site");
-    }
+    // No UFW rule for a port-mode site's upstream: nginx reaches it on
+    // 127.0.0.1, which UFW does not filter. Opening the port (as this used
+    // to) only made the app reachable on <ip>:<port>, past nginx and HTTPS.
 
     if (issueSsl && resp.task_id) {
       // Fire-and-forget: poll the agent's task until it settles so the
@@ -424,10 +398,6 @@ export async function adoptSiteAction(
       return { ok: false, error: "site already exists" };
     }
     return { ok: false, error: msg };
-  }
-
-  if (route.mode === "port" && route.upstreamPort !== null) {
-    await autoAllowPort(s.userId, domain, route.upstreamPort, "auto-opened for adopted site");
   }
 
   writeAudit({

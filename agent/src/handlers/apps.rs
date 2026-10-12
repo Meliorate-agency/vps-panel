@@ -1389,17 +1389,10 @@ pub async fn delete(
     let _ = fs_atomic::remove_if_exists(&env_path).await;
 
     let (subdomain, _, source_dir) = lookup_app(&state, &name).await.unwrap_or_default();
+    // Only the app's own `# vps-app:<name>` vhost: a file of that name that
+    // the app did not write (a hand-made vhost) used to be deleted too.
     if !subdomain.is_empty() {
-        let _ = fs_atomic::remove_if_exists(&PathBuf::from(format!(
-            "/etc/nginx/sites-enabled/{subdomain}"
-        )))
-        .await;
-        let _ = fs_atomic::remove_if_exists(&PathBuf::from(format!(
-            "/etc/nginx/sites-available/{subdomain}"
-        )))
-        .await;
-        let _ = nginx_handler::test_config().await;
-        let _ = exec::run("systemctl", ["reload", "nginx"]).await;
+        remove_app_vhost(&name, &subdomain).await;
     }
     let _ = exec::run("systemctl", ["daemon-reload"]).await;
 

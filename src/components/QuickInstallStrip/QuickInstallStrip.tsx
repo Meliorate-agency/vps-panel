@@ -243,24 +243,15 @@ export default function QuickInstallStrip({
                   <TailscaleManager card={tailscale.card} />
                 ) : r.web_ui ? (
                   <>
-                    <form action={bindFormAction} className={styles.bindForm}>
-                      <input type="hidden" name="slug" value={r.slug} />
-                      <select
-                        name="bind"
-                        defaultValue={r.bind ?? "127.0.0.1"}
-                        className={styles.bindSelect}
-                        disabled={bindBusy}
-                        onChange={(e) => e.currentTarget.form?.requestSubmit()}
-                        title={
-                          "Container listen interface — NOT a subdomain.\n" +
-                          "LOCAL: only reachable from this host (use Route to add a subdomain via nginx).\n" +
-                          "PUBLIC: reachable on the public IP at the raw port (UFW must allow it)."
-                        }
-                      >
-                        <option value="127.0.0.1">Local 127.0.0.1</option>
-                        <option value="0.0.0.0">Public 0.0.0.0</option>
-                      </select>
-                    </form>
+                    <ContainerBindForm
+                      slug={r.slug}
+                      name={r.name}
+                      currentBind={r.bind ?? "127.0.0.1"}
+                      port={r.default_port}
+                      pending={bindBusy}
+                      isReBindingThis={reBindingThis}
+                      bindFormAction={bindFormAction}
+                    />
                     {url ? (
                       <a
                         className={styles.openBtn}
@@ -380,40 +371,40 @@ export default function QuickInstallStrip({
 }
 
 /**
- * Bind dropdown for the systemd-managed DB engines (MariaDB, PostgreSQL).
+ * LOCAL/PUBLIC dropdown with a confirmation before going PUBLIC.
  *
- * Why a dedicated component instead of reusing the inline `<form>` block
- * the docker web-UIs use: a database engine has no built-in login wall,
- * so a misclick to PUBLIC instantly exposes auth attempts from the
- * entire internet. We need a confirmation step the docker GUIs don't.
- *
- * Implementation: a controlled `<select>` whose `LOCAL → PUBLIC` change
- * opens the app's styled `ConfirmDialog` (centered, danger tone) instead
- * of a native `window.confirm`. Submission is dispatched imperatively via
- * the bound server action so the dropdown can stay on its current value
- * until the operator actually confirms, and snap back if they cancel. The
- * select is re-synced to the server's truth whenever the live bind changes
- * AND after any in-flight toggle settles, so a failed toggle can never
- * leave the dropdown showing a state that wasn't applied (critical for the
- * LOCAL direction: showing "local" while the port is still open would be
- * dangerously misleading).
+ * A controlled `<select>` whose `LOCAL → PUBLIC` change opens the app's styled
+ * `ConfirmDialog` (centered, danger tone) instead of a native
+ * `window.confirm`. Submission is dispatched imperatively via the bound server
+ * action so the dropdown can stay on its current value until the operator
+ * actually confirms, and snap back if they cancel. The select is re-synced to
+ * the server's truth whenever the live bind changes AND after any in-flight
+ * toggle settles, so a failed toggle can never leave the dropdown showing a
+ * state that wasn't applied (critical for the LOCAL direction: showing
+ * "local" while the port is still open would be dangerously misleading).
  */
-function DbBindForm({
-  engine,
+function BindForm({
+  slug,
   currentBind,
-  port,
   pending,
   isReBindingThis,
   bindFormAction,
+  tooltip,
+  confirmTitle,
+  confirmLabel,
+  children,
 }: {
-  engine: "mariadb" | "postgresql";
+  slug: string;
   currentBind: string;
-  port: number;
   pending: boolean;
   isReBindingThis: boolean;
   bindFormAction: (fd: FormData) => void;
+  tooltip: string;
+  confirmTitle: string;
+  confirmLabel: string;
+  /** The confirm dialog's body. */
+  children: React.ReactNode;
 }) {
-  const engineName = engine === "mariadb" ? "MariaDB" : "PostgreSQL";
   const [value, setValue] = useState(currentBind);
   const [confirmOpen, setConfirmOpen] = useState(false);
   const wasPending = useRef(pending);
@@ -434,7 +425,7 @@ function DbBindForm({
 
   const submit = (bind: string) => {
     const fd = new FormData();
-    fd.set("slug", engine);
+    fd.set("slug", slug);
     fd.set("bind", bind);
     setValue(bind); // optimistic; reconciled by the effects above
     // Inside a transition, or pending never turns true: the select stayed
@@ -462,11 +453,7 @@ function DbBindForm({
           className={styles.bindSelect}
           disabled={pending}
           onChange={onSelect}
-          title={
-            `${engineName} listen interface.\n` +
-            `LOCAL: bound to 127.0.0.1 only (default). Reach from this host or via the docker bridge for phpMyAdmin.\n` +
-            `PUBLIC: bound to 0.0.0.0 + UFW opens ${port}/tcp. Reachable from any machine - make sure users have strong passwords.`
-          }
+          title={tooltip}
         >
           <option value="127.0.0.1">Local 127.0.0.1</option>
           <option value="0.0.0.0">Public 0.0.0.0</option>
@@ -480,8 +467,8 @@ function DbBindForm({
 
       <ConfirmDialog
         open={confirmOpen}
-        title={`Expose ${engineName} to the public internet?`}
-        confirmLabel={`Expose ${engineName}`}
+        title={confirmTitle}
+        confirmLabel={confirmLabel}
         cancelLabel="Keep local"
         tone="danger"
         pending={pending}
@@ -491,22 +478,120 @@ function DbBindForm({
         }}
         onCancel={() => setConfirmOpen(false)}
       >
-        <p style={{ marginTop: 0 }}>
-          Port <strong>{port}</strong> will be opened in UFW. Anyone with TCP
-          reach to this host will be able to attempt to authenticate against{" "}
-          {engineName}.
-        </p>
-        <p style={{ marginBottom: 6 }}>Before continuing, make sure:</p>
-        <ul style={{ margin: "0 0 4px", paddingLeft: 18 }}>
-          <li>Every database user has a strong password</li>
-          <li>No users have weak default credentials</li>
-          <li>
-            {engine === "postgresql"
-              ? "The panel will append a host-all-0.0.0.0/0 line to pg_hba.conf"
-              : "No '%'-host accounts have weak passwords"}
-          </li>
-        </ul>
+        {children}
       </ConfirmDialog>
     </>
+  );
+}
+
+/**
+ * The systemd-managed DB engines (MariaDB, PostgreSQL). A database has no
+ * built-in login wall, so a misclick to PUBLIC instantly exposes auth
+ * attempts from the entire internet.
+ */
+function DbBindForm({
+  engine,
+  currentBind,
+  port,
+  pending,
+  isReBindingThis,
+  bindFormAction,
+}: {
+  engine: "mariadb" | "postgresql";
+  currentBind: string;
+  port: number;
+  pending: boolean;
+  isReBindingThis: boolean;
+  bindFormAction: (fd: FormData) => void;
+}) {
+  const engineName = engine === "mariadb" ? "MariaDB" : "PostgreSQL";
+  return (
+    <BindForm
+      slug={engine}
+      currentBind={currentBind}
+      pending={pending}
+      isReBindingThis={isReBindingThis}
+      bindFormAction={bindFormAction}
+      tooltip={
+        `${engineName} listen interface.\n` +
+        `LOCAL: bound to 127.0.0.1 only (default). Reach from this host or via the docker bridge for phpMyAdmin.\n` +
+        `PUBLIC: bound to 0.0.0.0 + UFW opens ${port}/tcp. Reachable from any machine - make sure users have strong passwords.`
+      }
+      confirmTitle={`Expose ${engineName} to the public internet?`}
+      confirmLabel={`Expose ${engineName}`}
+    >
+      <p style={{ marginTop: 0 }}>
+        Port <strong>{port}</strong> will be opened in UFW. Anyone with TCP
+        reach to this host will be able to attempt to authenticate against{" "}
+        {engineName}.
+      </p>
+      <p style={{ marginBottom: 6 }}>Before continuing, make sure:</p>
+      <ul style={{ margin: "0 0 4px", paddingLeft: 18 }}>
+        <li>Every database user has a strong password</li>
+        <li>No users have weak default credentials</li>
+        <li>
+          {engine === "postgresql"
+            ? "The panel will append a host-all-0.0.0.0/0 line to pg_hba.conf"
+            : "No '%'-host accounts have weak passwords"}
+        </li>
+      </ul>
+    </BindForm>
+  );
+}
+
+/**
+ * Docker web UIs (pgAdmin, phpMyAdmin, n8n). Docker publishes container ports
+ * in its own firewall rules, ahead of UFW: PUBLIC means the whole internet,
+ * and no UFW rule can narrow it. The tooltip used to say "UFW must allow it".
+ */
+function ContainerBindForm({
+  slug,
+  name,
+  currentBind,
+  port,
+  pending,
+  isReBindingThis,
+  bindFormAction,
+}: {
+  slug: string;
+  name: string;
+  currentBind: string;
+  port: number;
+  pending: boolean;
+  isReBindingThis: boolean;
+  bindFormAction: (fd: FormData) => void;
+}) {
+  return (
+    <BindForm
+      slug={slug}
+      currentBind={currentBind}
+      pending={pending}
+      isReBindingThis={isReBindingThis}
+      bindFormAction={bindFormAction}
+      tooltip={
+        "Container listen interface - NOT a subdomain.\n" +
+        "LOCAL: only reachable from this host (use Route to add a subdomain via nginx).\n" +
+        `PUBLIC: anyone on the internet can reach port ${port}. Docker bypasses the firewall, so UFW cannot block it.`
+      }
+      confirmTitle={`Make ${name} public?`}
+      confirmLabel={`Make ${name} public`}
+    >
+      <p style={{ marginTop: 0 }}>
+        Port <strong>{port}</strong> becomes reachable from the whole internet,
+        over plain HTTP. Docker publishes container ports ahead of the firewall,
+        so UFW rules cannot limit who reaches it: {name}&apos;s own login is the
+        only protection.
+      </p>
+      {slug === "pgadmin" && (
+        <p>
+          pgAdmin was installed with the login <code>admin@example.com</code> /{" "}
+          <code>changeme</code>. Change it first.
+        </p>
+      )}
+      <p style={{ marginBottom: 4 }}>
+        Safer: keep it Local and use <strong>Route</strong> to give it a domain
+        with HTTPS.
+      </p>
+    </BindForm>
   );
 }

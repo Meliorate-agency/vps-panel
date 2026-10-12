@@ -42,6 +42,18 @@ const POSTGRESQL: Recipe = &[
     &["systemctl", "start", "postgresql"],
 ];
 
+/// Docker Engine from Ubuntu's docker.io, only when there is no docker yet. A
+/// box that already runs Docker CE (docker.com's packages) keeps it: docker.io
+/// conflicts with them, and installing it on every recipe asked apt to swap the
+/// engine out from under the running containers.
+const INSTALL_DOCKER: Step =
+    &["sh", "-c", "command -v docker >/dev/null 2>&1 || apt-get install -y docker.io"];
+
+/// Every container the panel runs caps its json log at 3 files of 10 MB:
+/// Docker's default keeps the log forever, and nothing else trims it.
+const DOCKER_LOG_MAX_SIZE: &str = "max-size=10m";
+const DOCKER_LOG_MAX_FILE: &str = "max-file=3";
+
 const REDIS: Recipe = &[
     &["apt-get", "update"],
     &["apt-get", "install", "-y", "redis-server"],
@@ -51,7 +63,7 @@ const REDIS: Recipe = &[
 
 const QDRANT: Recipe = &[
     &["apt-get", "update"],
-    &["apt-get", "install", "-y", "docker.io"],
+    INSTALL_DOCKER,
     &["systemctl", "enable", "docker"],
     &["systemctl", "start", "docker"],
     &["docker", "volume", "create", "qdrant_storage"],
@@ -63,6 +75,10 @@ const QDRANT: Recipe = &[
         "qdrant",
         "--restart",
         "unless-stopped",
+        "--log-opt",
+        DOCKER_LOG_MAX_SIZE,
+        "--log-opt",
+        DOCKER_LOG_MAX_FILE,
         "-p",
         "127.0.0.1:6333:6333",
         "-p",
@@ -75,7 +91,7 @@ const QDRANT: Recipe = &[
 
 const DOCKER: Recipe = &[
     &["apt-get", "update"],
-    &["apt-get", "install", "-y", "docker.io"],
+    INSTALL_DOCKER,
     &["systemctl", "enable", "docker"],
     &["systemctl", "start", "docker"],
 ];
@@ -89,7 +105,7 @@ const NGINX: Recipe = &[
 
 const PGADMIN: Recipe = &[
     &["apt-get", "update"],
-    &["apt-get", "install", "-y", "docker.io"],
+    INSTALL_DOCKER,
     &["systemctl", "enable", "docker"],
     &["systemctl", "start", "docker"],
     &["docker", "volume", "create", "pgadmin_data"],
@@ -101,6 +117,10 @@ const PGADMIN: Recipe = &[
         "pgadmin",
         "--restart",
         "unless-stopped",
+        "--log-opt",
+        DOCKER_LOG_MAX_SIZE,
+        "--log-opt",
+        DOCKER_LOG_MAX_FILE,
         "-p",
         "127.0.0.1:5050:80",
         "-e",
@@ -116,7 +136,7 @@ const PGADMIN: Recipe = &[
 
 const PHPMYADMIN: Recipe = &[
     &["apt-get", "update"],
-    &["apt-get", "install", "-y", "docker.io"],
+    INSTALL_DOCKER,
     &["systemctl", "enable", "docker"],
     &["systemctl", "start", "docker"],
     &[
@@ -127,6 +147,10 @@ const PHPMYADMIN: Recipe = &[
         "phpmyadmin",
         "--restart",
         "unless-stopped",
+        "--log-opt",
+        DOCKER_LOG_MAX_SIZE,
+        "--log-opt",
+        DOCKER_LOG_MAX_FILE,
         "-p",
         "127.0.0.1:8081:80",
         "-e",
@@ -154,7 +178,7 @@ const TAILSCALE: Recipe = &[];
 
 const N8N: Recipe = &[
     &["apt-get", "update"],
-    &["apt-get", "install", "-y", "docker.io"],
+    INSTALL_DOCKER,
     &["systemctl", "enable", "docker"],
     &["systemctl", "start", "docker"],
     &["docker", "volume", "create", "n8n_data"],
@@ -166,6 +190,10 @@ const N8N: Recipe = &[
         "n8n",
         "--restart",
         "unless-stopped",
+        "--log-opt",
+        DOCKER_LOG_MAX_SIZE,
+        "--log-opt",
+        DOCKER_LOG_MAX_FILE,
         "-p",
         "127.0.0.1:5678:5678",
         "-v",
@@ -545,10 +573,16 @@ async fn current_docker_env(name: &str, var: &str) -> Option<String> {
     None
 }
 
+/// The address a container publishes `host_port` on. PortBindings is keyed by
+/// the CONTAINER port ("80/tcp" for pgAdmin's 5050:80), so the binding is found
+/// by its HostPort: looking it up as "<host_port>/tcp" missed pgAdmin and
+/// phpMyAdmin, reported them as Local, and saving phpMyAdmin's settings then
+/// quietly moved a public container back to 127.0.0.1.
 async fn current_docker_bind(name: &str, host_port: u16) -> Option<String> {
     let format = format!(
-        "{{{{ (index (index .HostConfig.PortBindings \"{}/tcp\") 0).HostIp }}}}",
-        host_port
+        "{{{{range $p, $b := .HostConfig.PortBindings}}}}{{{{range $b}}}}\
+         {{{{if eq .HostPort \"{host_port}\"}}}}ip={{{{.HostIp}}}};{{{{end}}}}\
+         {{{{end}}}}{{{{end}}}}"
     );
     let out = Command::new("docker")
         .args(["inspect", "--format", &format, name])
@@ -559,12 +593,14 @@ async fn current_docker_bind(name: &str, host_port: u16) -> Option<String> {
     if !out.status.success() {
         return None;
     }
-    let s = String::from_utf8_lossy(&out.stdout).trim().to_string();
-    if s.is_empty() || s == "<no value>" {
-        Some("0.0.0.0".to_string())
-    } else {
-        Some(s)
-    }
+    parse_docker_bind(&String::from_utf8_lossy(&out.stdout))
+}
+
+/// `ip=<HostIp>;` per binding of the port (see current_docker_bind). An empty
+/// HostIp is all interfaces; no binding at all is None.
+fn parse_docker_bind(out: &str) -> Option<String> {
+    let ip = out.split(';').find_map(|s| s.trim().strip_prefix("ip="))?;
+    Some(if ip.is_empty() { "0.0.0.0".to_string() } else { ip.to_string() })
 }
 
 /// The image config digest (`sha256:...`) the *running* container was created
@@ -949,7 +985,7 @@ async fn detect_mail_hostname() -> Option<String> {
 async fn install_roundcube_dynamic(task: crate::ipc::tasks::TaskHandle) {
     let prep: &[&[&str]] = &[
         &["apt-get", "update"],
-        &["apt-get", "install", "-y", "docker.io"],
+        INSTALL_DOCKER,
         &["systemctl", "enable", "docker"],
         &["systemctl", "start", "docker"],
         &["docker", "volume", "create", "roundcube_db"],
@@ -1031,6 +1067,10 @@ async fn install_roundcube_dynamic(task: crate::ipc::tasks::TaskHandle) {
         "roundcube",
         "--restart",
         "unless-stopped",
+        "--log-opt",
+        DOCKER_LOG_MAX_SIZE,
+        "--log-opt",
+        DOCKER_LOG_MAX_FILE,
         "-p",
         "127.0.0.1:8082:80",
         "-e",
@@ -1380,6 +1420,10 @@ pub async fn update_roundcube_settings(
             "roundcube",
             "--restart",
             "unless-stopped",
+            "--log-opt",
+            DOCKER_LOG_MAX_SIZE,
+            "--log-opt",
+            DOCKER_LOG_MAX_FILE,
             "-p",
             "127.0.0.1:8082:80",
             "-e",
@@ -1603,6 +1647,10 @@ pub async fn update_n8n_settings(
             "n8n",
             "--restart",
             "unless-stopped",
+            "--log-opt",
+            DOCKER_LOG_MAX_SIZE,
+            "--log-opt",
+            DOCKER_LOG_MAX_FILE,
             "-p",
             &port_arg,
             "-e",
@@ -1698,6 +1746,10 @@ pub async fn update_n8n(State(state): State<AppState>) -> AgentResult<Json<TaskA
             "n8n".into(),
             "--restart".into(),
             "unless-stopped".into(),
+            "--log-opt".into(),
+            DOCKER_LOG_MAX_SIZE.into(),
+            "--log-opt".into(),
+            DOCKER_LOG_MAX_FILE.into(),
             "-p".into(),
             port_arg,
         ];
@@ -1922,6 +1974,10 @@ async fn recreate_phpmyadmin(
         "phpmyadmin",
         "--restart",
         "unless-stopped",
+        "--log-opt",
+        DOCKER_LOG_MAX_SIZE,
+        "--log-opt",
+        DOCKER_LOG_MAX_FILE,
         "-p",
         port_arg.as_str(),
         "-e",
@@ -2036,6 +2092,10 @@ pub async fn set_bind(
             svc.container_name,
             "--restart",
             "unless-stopped",
+            "--log-opt",
+            DOCKER_LOG_MAX_SIZE,
+            "--log-opt",
+            DOCKER_LOG_MAX_FILE,
             "-p",
             port_arg.as_str(),
         ];
@@ -2850,5 +2910,15 @@ mod tests {
         let input = "port = 5432\n";
         let out = upsert_listen_addresses(input, "*");
         assert_eq!(out, "port = 5432\nlisten_addresses = '*'\n");
+    }
+
+    #[test]
+    fn docker_bind_comes_from_the_binding_with_that_host_port() {
+        // Real docker inspect output (see current_docker_bind's template).
+        assert_eq!(parse_docker_bind("ip=127.0.0.1;").as_deref(), Some("127.0.0.1"));
+        assert_eq!(parse_docker_bind("ip=;").as_deref(), Some("0.0.0.0"));
+        assert_eq!(parse_docker_bind("ip=0.0.0.0;").as_deref(), Some("0.0.0.0"));
+        assert_eq!(parse_docker_bind(""), None);
+        assert_eq!(parse_docker_bind("\n"), None);
     }
 }
