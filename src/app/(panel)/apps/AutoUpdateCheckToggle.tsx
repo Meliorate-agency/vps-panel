@@ -58,7 +58,7 @@ export default function AutoUpdateCheckToggle({
       </span>
       <span className={styles.hint}>
         {on
-          ? "— a git fetch per app, every load. Quick-install apps have their own toggle in their settings."
+          ? "— a git fetch per app (a registry check for Docker apps), every load. Quick-install apps have their own toggle in their settings."
           : "— faster loads; use each app's Check button instead"}
       </span>
     </div>

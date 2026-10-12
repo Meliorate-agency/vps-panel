@@ -1,6 +1,12 @@
 import Link from "next/link";
 import DeployForm from "./DeployForm";
-import { checkAppSourceStateAction, deployAppAction } from "@/server-actions/apps";
+import DockerForm from "./DockerForm";
+import {
+  checkAppSourceStateAction,
+  deployAppAction,
+  dockerImageInfoAction,
+} from "@/server-actions/apps";
+import { quickInstallAction } from "@/server-actions/quickInstall";
 import { agent } from "@/lib/agent";
 import { freeSlotsFor } from "@/lib/appSlots";
 import styles from "@/components/page.module.css";
@@ -24,6 +30,7 @@ export default async function NewAppPage({
   // install into source_dir before starting the unit. No method param =
   // legacy flow (operator already put code into source_dir manually).
   const sourceMethod = sp.method === "github" ? "github" : "manual";
+  const isDocker = sp.method === "docker";
 
   // Unowned slots only: one bound to another app or a quick-install service
   // is never offered to a new app (the agent would 409 on the port anyway).
@@ -50,6 +57,47 @@ export default async function NewAppPage({
           )
           .catch(() => [])
       : [];
+
+  if (isDocker) {
+    const docker = await agent.docker
+      .status()
+      .catch(() => ({ installed: false, running: false, version: null }));
+    return (
+      <div>
+        <Link href="/apps" className={styles.backArrow} aria-label="Back to apps">
+          <svg width="16" height="16" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+            <path
+              d="M10 3L5 8l5 5"
+              stroke="currentColor"
+              strokeWidth="1.8"
+              strokeLinecap="round"
+              strokeLinejoin="round"
+            />
+          </svg>
+        </Link>
+        <div className={styles.head}>
+          <div>
+            <h1 className={styles.title}>Deploy a Docker image</h1>
+            <div className={styles.subtitle}>
+              Runs the image as a container with its own systemd service, published on
+              127.0.0.1 and served on a port-mode site from{" "}
+              <Link href="/domains">/domains</Link>.
+            </div>
+          </div>
+        </div>
+        <div className={styles.section}>
+          <DockerForm
+            mode="new"
+            action={deployAppAction}
+            imageInfo={dockerImageInfoAction}
+            installDocker={quickInstallAction}
+            portSites={portSites}
+            docker={docker}
+          />
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div>

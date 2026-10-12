@@ -1,9 +1,10 @@
 import "server-only";
 import { agent, type CreateApp } from "@/lib/agent";
 import { applyAppRouting } from "@/lib/appRouting";
-import { recordAppDeploy, slotConflict } from "@/lib/appRows";
+import { appRuntime, recordAppDeploy, slotConflict } from "@/lib/appRows";
 import {
   optionalBoolean,
+  optionalNumber,
   optionalString,
   requireNumber,
   requireString,
@@ -19,7 +20,7 @@ export const TOOLS: Tool[] = [
     page: "Apps",
     name: "apps.list",
     description:
-      "List every deployed Node.js app. Returns one row per app with name, subdomain, upstream port, source folder, systemd active/sub-state, and source-folder state ('missing' / 'empty' / 'populated'). Includes drift-detected external apps (folders under /srv/apps not created by the panel).",
+      "List every deployed app (Node.js from Git, or a Docker image). Returns one row per app with name, runtime ('node' / 'docker'), image (Docker apps), subdomain, upstream port, source folder, systemd active/sub-state, and source-folder state ('missing' / 'empty' / 'populated', 'none' for Docker apps). Includes drift-detected external apps (folders under /srv/apps not created by the panel).",
     inputSchema: { type: "object", properties: {}, additionalProperties: false },
     call: async () => agent.apps.list(),
   },
@@ -67,7 +68,7 @@ export const TOOLS: Tool[] = [
     page: "Apps",
     name: "apps.create",
     description:
-      "Deploy a new Node app or re-run a stage on an existing one. Optionally clones a git repo into /srv/apps/<name>, runs npm ci + npm run build, writes the systemd unit (vps-app-<name>.service), and starts it. Returns a task_id whose log can be streamed via tasks.get.",
+      "Deploy a new app or re-run a stage on an existing one. runtime 'node' (default): optionally clones a git repo into /srv/apps/<name>, runs npm ci + npm run build, writes the systemd unit (vps-app-<name>.service), and starts it. runtime 'docker': pulls a public image and runs it as a container from the same unit, published on 127.0.0.1:<port> only, with the given env, kept folders (named volumes) and limits; steps pull / deploy / all. Returns a task_id whose log can be streamed via tasks.get.",
     inputSchema: {
       type: "object",
       properties: {
@@ -87,9 +88,36 @@ export const TOOLS: Tool[] = [
         },
         runtime: {
           type: "string",
-          description: "Runtime tag. Only 'node' is supported in v1.",
-          enum: ["node"],
-          default: "node",
+          description:
+            "'node' (code from Git in /srv/apps/<name>) or 'docker' (an image from a registry). Omit on a re-run to keep the app's runtime; an app never switches runtime (delete it first).",
+          enum: ["node", "docker"],
+        },
+        image: {
+          type: "string",
+          description:
+            "Docker apps: image reference, e.g. louislam/uptime-kuma:1 or ghcr.io/owner/app:1.4. Public registries only. Omit on a re-run to keep the saved Docker settings.",
+        },
+        container_port: {
+          type: "integer",
+          description: "Docker apps: the port the app listens on inside the container (often the image's EXPOSE).",
+          minimum: 1,
+          maximum: 65535,
+        },
+        volumes: {
+          type: "array",
+          description:
+            "Docker apps: folders inside the container to keep across restarts and updates (named volumes, included in backups), e.g. ['/app/data'].",
+          items: { type: "string" },
+        },
+        memory_mb: {
+          type: "integer",
+          description: "Docker apps: memory limit in MB, 0 = none. Default 1024.",
+          minimum: 0,
+        },
+        cpus: {
+          type: "number",
+          description: "Docker apps: CPU limit in cores (e.g. 0.5), 0 = none. Default 1.",
+          minimum: 0,
         },
         exec_start: {
           type: "string",
@@ -113,7 +141,7 @@ export const TOOLS: Tool[] = [
         },
         step: {
           type: "string",
-          description: "Run only one stage of the pipeline instead of the full deploy. Default 'all' runs pull→install→build→deploy.",
+          description: "Run only one stage of the pipeline instead of the full deploy. Default 'all' runs pull→install→build→deploy (Docker apps: pull→deploy; they have no install or build).",
           enum: ["pull", "install", "build", "deploy", "all"],
           default: "all",
         },
@@ -128,12 +156,27 @@ export const TOOLS: Tool[] = [
     },
     call: async (args) => {
       const name = requireString(args, "name");
+      const image = optionalString(args, "image");
+      const runtime =
+        optionalString(args, "runtime") ?? (image ? "docker" : (appRuntime(name) ?? "node"));
+      const docker = runtime === "docker" && image
+        ? {
+            image,
+            container_port: optionalNumber(args, "container_port") ?? 0,
+            volumes: Array.isArray(args.volumes)
+              ? (args.volumes as unknown[]).filter((v): v is string => typeof v === "string")
+              : [],
+            memory_mb: optionalNumber(args, "memory_mb") ?? 1024,
+            cpus: optionalNumber(args, "cpus") ?? 1,
+          }
+        : undefined;
       const body: CreateApp = {
         name,
-        source_dir: `${APPS_BASE_DIR}/${name}`,
+        source_dir: runtime === "docker" ? "" : `${APPS_BASE_DIR}/${name}`,
         subdomain: requireString(args, "subdomain"),
         port: requireNumber(args, "port"),
-        runtime: optionalString(args, "runtime") ?? "node",
+        runtime,
+        docker,
         // Omitted = keep what the app already has (a re-run used to reset a
         // custom entrypoint and wipe the env file).
         exec_start: optionalString(args, "exec_start"),
@@ -222,7 +265,7 @@ export const TOOLS: Tool[] = [
     page: "Apps",
     name: "apps.update",
     description:
-      "Pull latest code, reinstall deps (npm ci or install), run build (if defined in package.json), then restart. Returns a task_id; stream the log via tasks.get.",
+      "Node apps: pull latest code, reinstall deps (npm ci or install), run build (if defined in package.json), then restart. Docker apps: pull the image tag again and, if it changed, restart on it (rolled back to the previous image if it does not come up). Returns a task_id; stream the log via tasks.get.",
     inputSchema: {
       type: "object",
       properties: { name: { type: "string", description: "App name." } },

@@ -1,5 +1,5 @@
 import Link from "next/link";
-import { agent, type AppRow, type GitStatusResp } from "@/lib/agent";
+import { agent, type AppRow, type DockerImageStatus, type GitStatusResp } from "@/lib/agent";
 import StatusBadge from "@/components/StatusBadge/StatusBadge";
 import QuickInstallStrip from "@/components/QuickInstallStrip/QuickInstallStrip";
 import {
@@ -38,6 +38,7 @@ import { tailscaleCard } from "@/lib/tailscale";
 import styles from "@/components/page.module.css";
 import DeployMethodButton from "./DeployMethodButton";
 import GitStatusBadge from "./GitStatusBadge";
+import ImageStatusBadge from "./ImageStatusBadge";
 import AutoUpdateCheckToggle from "./AutoUpdateCheckToggle";
 import CheckUpdateButton from "./CheckUpdateButton";
 import AppFolderSection from "./AppFolderSection";
@@ -53,7 +54,7 @@ const buildColumns = (autoCheck: boolean) => [
   { key: "source", label: "Source", width: "260px" },
   { key: "subdomain", label: "Subdomain" },
   { key: "port", label: "Port", width: "70px" },
-  { key: "git", label: "Git", width: "180px" },
+  { key: "git", label: "Updates", width: "180px" },
   { key: "status", label: "Status", width: "160px" },
   { key: "actions", label: "", width: autoCheck ? "150px" : "250px" },
 ];
@@ -67,6 +68,7 @@ const buildColumns = (autoCheck: boolean) => [
 function buildAppRow(
   a: AppRow,
   gitStatuses: Map<string, GitStatusResp>,
+  imageStatuses: Map<string, DockerImageStatus>,
   folderMeta: {
     currentFolderId: number | null;
     folders: { id: number; name: string }[];
@@ -74,6 +76,7 @@ function buildAppRow(
   autoCheck: boolean,
 ) {
   const isExternal = a.kind === "external";
+  const isDocker = a.runtime === "docker";
   const hasUnit = !!a.active;
   const statusText = a.sub || a.active || (isExternal ? "no unit" : "unknown");
   return {
@@ -93,10 +96,12 @@ function buildAppRow(
       >
         {isExternal ? (
           <StatusBadge text="external" tone="warn" />
+        ) : isDocker ? (
+          <StatusBadge text="docker" tone="info" />
         ) : (
           <StatusBadge text="panel" tone="ok" />
         )}
-        <span className={styles.code}>{a.source_dir || "-"}</span>
+        <span className={styles.code}>{(isDocker ? a.image : a.source_dir) || "-"}</span>
         {a.source_dir_state === "missing" && (
           <span title="source_dir doesn't exist on disk">
             <StatusBadge text="folder missing" tone="danger" />
@@ -127,7 +132,13 @@ function buildAppRow(
       </span>
     ),
     port: a.port || "-",
-    git: autoCheck ? (
+    git: autoCheck && isDocker ? (
+      <ImageStatusBadge
+        appName={a.name}
+        status={imageStatuses.get(a.name)}
+        updateAction={updateAppAction}
+      />
+    ) : autoCheck ? (
       <GitStatusBadge
         appName={a.name}
         status={gitStatuses.get(a.name)}
@@ -243,9 +254,20 @@ export default async function AppsPage() {
   // one network round trip per app on every single page load, and the
   // per-row Check button covers the same ground on demand.
   const gitStatuses = new Map<string, GitStatusResp>();
+  // Docker apps ask their registry instead (10 s cap per app on the agent).
+  const imageStatuses = new Map<string, DockerImageStatus>();
   if (autoCheck) {
+    const imageFetches = apps
+      .filter((a) => a.runtime === "docker")
+      .map(async (a) => {
+        try {
+          imageStatuses.set(a.name, await agent.apps.imageStatus(a.name));
+        } catch {
+          // leave unset - the cell says "not checked"
+        }
+      });
     const fetches = apps
-      .filter((a) => a.kind !== "external" && a.source_dir)
+      .filter((a) => a.kind !== "external" && a.runtime !== "docker" && a.source_dir)
       .map(async (a) => {
         try {
           const status = await agent.apps.gitStatus(a.name);
@@ -254,12 +276,13 @@ export default async function AppsPage() {
           // leave unset — row renders "—"
         }
       });
-    await Promise.all(fetches);
+    await Promise.all([...fetches, ...imageFetches]);
   }
 
   const orphans = apps.filter(
     (a) =>
       a.kind !== "external" &&
+      a.runtime !== "docker" &&
       (a.source_dir_state === "missing" || a.source_dir_state === "empty"),
   );
 
@@ -282,7 +305,7 @@ export default async function AppsPage() {
         <div>
           <h1 className={styles.title}>Apps</h1>
           <div className={styles.subtitle}>
-            Node.js apps managed by systemd, served by nginx.
+            Node.js apps and Docker images, managed by systemd, served by nginx.
           </div>
           <AutoUpdateCheckToggle
             enabled={autoCheck}
@@ -342,6 +365,7 @@ export default async function AppsPage() {
                   buildAppRow(
                     a,
                     gitStatuses,
+                    imageStatuses,
                     { currentFolderId: f.id, folders: folderList },
                     autoCheck,
                   ),
@@ -366,6 +390,7 @@ export default async function AppsPage() {
                 buildAppRow(
                   a,
                   gitStatuses,
+                  imageStatuses,
                   { currentFolderId: null, folders: folderList },
                   autoCheck,
                 ),
@@ -387,7 +412,7 @@ export default async function AppsPage() {
               fallbackLabel="External"
               columns={columns}
               rows={externalApps.map((a) =>
-                buildAppRow(a, gitStatuses, null, autoCheck),
+                buildAppRow(a, gitStatuses, imageStatuses, null, autoCheck),
               )}
               empty="No external apps."
             />

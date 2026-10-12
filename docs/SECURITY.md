@@ -26,6 +26,8 @@ Adversaries we explicitly do NOT defend against:
 - Each deployed Node app runs as the unprivileged `apps` user with a hardened systemd unit: `ProtectSystem=strict`, `PrivateTmp=true`, `NoNewPrivileges=true`, `ReadWritePaths` limited to its source dir and a per-app data dir.
 - Apps cannot read `/etc/vps-panel`, `/var/lib/vps-panel`, the agent socket, or other apps' env files.
 - Each app's env file is mode `0640 root:apps` and contains only that app's secrets.
+- A Docker app runs its image in a container with `no-new-privileges`, a process limit, and memory and CPU limits by default. The image runs as its publisher built it (often root inside the container), so deploying an image means trusting its publisher. The panel accepts only an image name, a port, env, folders and limits, never raw `docker` flags: privileged mode, the host network, the Docker socket and host paths cannot be asked for. Kept folders are named volumes, not host paths.
+- A Docker app's port is published on `127.0.0.1` only and reaches the internet through nginx. Docker's own port publishing bypasses UFW, so a `0.0.0.0` publish would be public whatever the firewall says; the agent never writes one.
 
 ### Network surface (defense against #1 - internet attackers)
 - UFW default deny inbound. Allowed: 22 (SSH), 25, 465, 587 (mail SMTP), 80, 443 (web), 53 (DNS), 993, 995 (IMAP/POP3 SSL).

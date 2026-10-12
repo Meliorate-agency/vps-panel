@@ -1,6 +1,6 @@
 # <img src="docs/logo.svg" alt="" width="52" align="top"> Bolt Panel
 
-**A free, self-hosted cPanel alternative for your own Ubuntu VPS.** Deploy Node.js apps from Git, run your domains, SSL, DNS and email with webmail, and manage databases and backups from one fast panel. Point Claude or any other MCP client at it and let an AI agent do the clicking.
+**A free, self-hosted cPanel alternative for your own Ubuntu VPS.** Deploy Node.js apps from Git or any Docker image, run your domains, SSL, DNS and email with webmail, and manage databases and backups from one fast panel. Point Claude or any other MCP client at it and let an AI agent do the clicking.
 
 [![License: AGPL-3.0](https://img.shields.io/github/license/Meliorate-agency/vps-panel)](LICENSE)
 ![Ubuntu 24.04](https://img.shields.io/badge/Ubuntu-24.04_LTS-E95420?logo=ubuntu&logoColor=white)
@@ -14,14 +14,14 @@
 
 - **Free and open source.** AGPL-3.0, no per-account licence, no telemetry.
 - **Light.** nginx, a Rust agent and a Next.js UI. No Apache/PHP stack to babysit; a 2 GB VPS is enough.
-- **Git to running app in one form.** Each app gets a hardened systemd service, an nginx vhost and a Let's Encrypt cert, with "update available" badges and one-click updates.
+- **Git or Docker image to running app in one form.** Each app gets its own systemd service, an nginx vhost and a Let's Encrypt cert, with "update available" badges and one-click updates that roll back if the new version does not come up.
 - **Your own mail server, done right.** Postfix, Dovecot and Rspamd with DKIM, SPF and DMARC published for you, Roundcube webmail, forwarders, catch-alls and delivery tracking.
 - **AI-ready.** A built-in MCP server exposes 50+ tools to Claude Desktop, Cursor or your own agent, with read-only or full-access tokens and an audit log of every call.
 - **Safe by design.** The UI never runs as root: a small Rust agent does privileged work over a Unix socket. The installer hardens the OS (ufw, fail2ban, AppArmor, unattended-upgrades, SSH, sysctl).
 
 ## Features
 
-- **Apps:** deploy Node.js apps from Git or a folder, start/stop/restart, environment files, update checks, folders to group them.
+- **Apps:** deploy Node.js apps from Git or a folder, or any public Docker image (Uptime Kuma, Gitea, Metabase...) with env, kept folders and memory/CPU limits. Start/stop/restart, update checks with automatic rollback, folders to group them.
 - **Domains and DNS:** nginx sites (reverse proxy to a port, static folder, redirects), authoritative DNS with PowerDNS, one-click DNSSEC.
 - **SSL:** in-process ACME (Let's Encrypt), automatic renewal.
 - **Mail:** virtual mailboxes with quotas, DKIM signing, forwarders and catch-alls, delivery tracking, Roundcube webmail where each person sets their own filters and Out of Office.
@@ -55,7 +55,7 @@
 | Price | Free, open source | Paid licence per account |
 | Built for | One owner running their own apps, mail and DNS | Hosting many separate customer accounts |
 | Stack | nginx, Rust agent, Next.js | Apache, PHP, Exim |
-| Deploying apps | Node.js from Git, one form | PHP first; Node via Passenger |
+| Deploying apps | Node.js from Git or any Docker image, one form | PHP first; Node via Passenger |
 | AI agents | Built-in MCP server | Classic APIs |
 | Several servers | One view (My Networks) | One WHM per server |
 | PHP / WordPress | Not supported | Yes |

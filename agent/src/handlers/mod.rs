@@ -4,6 +4,7 @@ pub mod backups;
 pub mod cron;
 pub mod databases;
 pub mod diag;
+pub mod docker_apps;
 pub mod dns;
 pub mod files;
 pub mod firewall;
@@ -45,7 +46,7 @@ pub fn router(state: AppState) -> Router {
         .route("/apps/{name}/stop", post(apps::stop))
         .route("/apps/{name}/restart", post(apps::restart))
         .route("/apps/{name}/update", post(apps::update))
-        .route("/apps/{name}/env", patch(apps::patch_env))
+        .route("/apps/{name}/env", get(apps::get_env).patch(apps::patch_env))
         .route("/apps/{name}/entrypoint", patch(apps::set_entrypoint))
         .route("/apps/{name}/routing", patch(apps::set_routing))
         .route(
@@ -56,6 +57,11 @@ pub fn router(state: AppState) -> Router {
         )
         .route("/apps/{name}/git-status", get(apps::git_status))
         .route("/apps/{name}/source-state", get(apps::source_state))
+        // Docker image apps (docker_apps.rs; deploy/update go through /apps)
+        .route("/apps/{name}/docker", get(docker_apps::info))
+        .route("/apps/{name}/image-status", get(docker_apps::image_status))
+        .route("/docker/status", get(docker_apps::status))
+        .route("/docker/image-info", get(docker_apps::image_info))
         // Files (visual filesystem browser — jailed roots + trash)
         .route("/files/roots", get(files::roots))
         .route("/files/list", get(files::list))

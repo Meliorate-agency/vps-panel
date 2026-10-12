@@ -8,6 +8,14 @@ import { db } from "./db";
  * their slot looked free to the pickers and `apps.set_domain` refused them.
  */
 
+/** The runtime panel.db recorded for an app, or null for an unknown app. */
+export function appRuntime(name: string): string | null {
+  const row = db().prepare(`SELECT runtime FROM apps WHERE name = ?`).get(name) as
+    | { runtime: string }
+    | undefined;
+  return row?.runtime ?? null;
+}
+
 /** Why `port` / `subdomain` cannot go to `name`: another app already has it. */
 export function slotConflict(name: string, port: number, subdomain: string): string | null {
   const row = db()

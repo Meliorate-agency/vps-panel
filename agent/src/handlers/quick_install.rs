@@ -51,8 +51,8 @@ const INSTALL_DOCKER: Step =
 
 /// Every container the panel runs caps its json log at 3 files of 10 MB:
 /// Docker's default keeps the log forever, and nothing else trims it.
-const DOCKER_LOG_MAX_SIZE: &str = "max-size=10m";
-const DOCKER_LOG_MAX_FILE: &str = "max-file=3";
+pub(crate) const DOCKER_LOG_MAX_SIZE: &str = "max-size=10m";
+pub(crate) const DOCKER_LOG_MAX_FILE: &str = "max-file=3";
 
 const REDIS: Recipe = &[
     &["apt-get", "update"],
@@ -639,7 +639,7 @@ async fn current_docker_image_id(name: &str) -> Option<String> {
 /// callers wrap it in a timeout. Returns an empty Vec on any failure (no
 /// network, registry error, old docker) so the caller degrades to "unknown"
 /// rather than a false positive.
-async fn remote_image_config_digests(image: &str) -> Vec<String> {
+pub(crate) async fn remote_image_config_digests(image: &str) -> Vec<String> {
     let out = match Command::new("docker")
         .args(["manifest", "inspect", "--verbose", image])
         // `docker manifest` graduated out of experimental in CLI v23, but set

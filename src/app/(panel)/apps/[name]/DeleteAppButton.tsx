@@ -8,16 +8,20 @@ import styles from "@/components/page.module.css";
  * Styled replacement for the old window.confirm() delete prompt. Adds a
  * "wipe source directory" checkbox so the operator can pick whether
  * /srv/apps/<name> stays on disk (default — useful for re-deploys that
- * keep node_modules / .git) or gets `rm -rf`'d.
+ * keep node_modules / .git) or gets `rm -rf`'d. For a Docker app the same
+ * checkbox deletes its data volumes instead.
  */
 export default function DeleteAppButton({
   appName,
   sourceDir,
   deleteAction,
+  docker,
 }: {
   appName: string;
   sourceDir: string;
   deleteAction: (name: string, opts?: { wipe?: boolean }) => Promise<void>;
+  /** Set for a Docker app: its image and data volume names. */
+  docker?: { image: string; volumes: string[] };
 }) {
   const [open, setOpen] = useState(false);
   const [wipe, setWipe] = useState(false);
@@ -72,8 +76,9 @@ export default function DeleteAppButton({
         }}
       >
         <p style={{ marginTop: 0 }}>
-          Stops the systemd unit, removes the unit file and env file, and
-          (if the app owns its own nginx vhost) deletes that too.
+          {docker
+            ? "Stops the container, removes its systemd unit, env file and settings, and the app's image tags."
+            : "Stops the systemd unit, removes the unit file and env file, and (if the app owns its own nginx vhost) deletes that too."}
         </p>
 
         <div
@@ -91,10 +96,16 @@ export default function DeleteAppButton({
           <div>
             <strong style={{ fontFamily: "inherit" }}>App:</strong> {appName}
           </div>
-          <div>
-            <strong style={{ fontFamily: "inherit" }}>Source:</strong>{" "}
-            {sourceDir || "(unknown)"}
-          </div>
+          {docker ? (
+            <div>
+              <strong style={{ fontFamily: "inherit" }}>Image:</strong> {docker.image}
+            </div>
+          ) : (
+            <div>
+              <strong style={{ fontFamily: "inherit" }}>Source:</strong>{" "}
+              {sourceDir || "(unknown)"}
+            </div>
+          )}
         </div>
 
         <label
@@ -116,6 +127,20 @@ export default function DeleteAppButton({
             checked={wipe}
             onChange={(e) => setWipe(e.target.checked)}
           />
+          {docker ? (
+            <span style={{ display: "flex", flexDirection: "column", gap: 2 }}>
+              <strong style={{ fontSize: 13 }}>Also delete the data volumes</strong>
+              <span className={styles.muted} style={{ fontSize: 12 }}>
+                {docker.volumes.length > 0 ? (
+                  <span className={styles.code}>{docker.volumes.join(", ")}</span>
+                ) : (
+                  "The app keeps no folders."
+                )}{" "}
+                - everything the app saved. Cannot be undone. Leave unchecked to keep the
+                data: deploying an app with the same name and folders picks it up again.
+              </span>
+            </span>
+          ) : (
           <span style={{ display: "flex", flexDirection: "column", gap: 2 }}>
             <strong style={{ fontSize: 13 }}>
               Also wipe the source directory
@@ -129,6 +154,7 @@ export default function DeleteAppButton({
               Leave unchecked if you want to redeploy on this folder later.
             </span>
           </span>
+          )}
         </label>
 
         <div className={styles.muted} style={{ fontSize: 12, marginTop: 12 }}>

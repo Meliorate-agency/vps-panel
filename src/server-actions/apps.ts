@@ -2,7 +2,15 @@
 
 import { revalidatePath } from "next/cache";
 import { redirect } from "next/navigation";
-import { agent, type CreateApp, type AppEnvFilesResp, type GitStatusResp } from "@/lib/agent";
+import {
+  agent,
+  type CreateApp,
+  type AppEnvFilesResp,
+  type DockerImageInfo,
+  type DockerImageStatus,
+  type DockerSpec,
+  type GitStatusResp,
+} from "@/lib/agent";
 import { requireAdmin, requireSession } from "@/lib/auth";
 import { writeAudit } from "@/lib/audit";
 import { db } from "@/lib/db";
@@ -79,6 +87,29 @@ export async function checkAppUpdateAction(
   name: string,
 ): Promise<CheckUpdateResult> {
   await requireAdmin();
+  // A Docker app has no git checkout: "behind" means the registry has a
+  // newer image than the one it runs.
+  let runtime: string | undefined;
+  try {
+    runtime = (await agent.apps.get(name)).runtime;
+  } catch (e: unknown) {
+    return { ok: false, error: e instanceof Error ? e.message : String(e) };
+  }
+  if (runtime === "docker") {
+    let image: DockerImageStatus;
+    try {
+      image = await agent.apps.imageStatus(name);
+    } catch (e: unknown) {
+      return { ok: false, error: e instanceof Error ? e.message : String(e) };
+    }
+    if (image.update_available === null) {
+      return { ok: false, error: image.error ?? "could not check the registry" };
+    }
+    if (!image.update_available) return { ok: true, kind: "up_to_date" };
+    const r = await updateAppAction(name);
+    if (!r.ok) return { ok: false, error: r.error };
+    return { ok: true, kind: "updating", taskId: r.taskId, behind: 1 };
+  }
   let status;
   try {
     status = await agent.apps.gitStatus(name);
@@ -122,6 +153,7 @@ export async function deployAppAction(
   _prev: ActionResult<{ taskId: string }> | null,
   fd: FormData,
 ): Promise<ActionResult<{ taskId: string }>> {
+  if (fd.get("runtime") === "docker") return deployDockerApp(fd);
   const s = await requireAdmin();
   // Only a form that has an env field replaces the env file. The deploy form
   // has none, and sending [] made the agent empty /etc/vps-panel/apps/<name>.env
@@ -173,6 +205,83 @@ export async function deployAppAction(
     const msg = e instanceof Error ? e.message : String(e);
     writeAudit({ actorId: s.userId, action: auditAction, target: req.name, request: req, result: "error", message: msg });
     return { ok: false, error: msg };
+  }
+}
+
+/**
+ * The Docker form (new app, or Settings on a Docker app's page). Steps:
+ * pull, deploy, all. The env field is always on that form, so it replaces
+ * the env file.
+ */
+async function deployDockerApp(fd: FormData): Promise<ActionResult<{ taskId: string }>> {
+  const s = await requireAdmin();
+  const stepRaw = String(fd.get("step") ?? "deploy");
+  const step: CreateApp["step"] = (["pull", "deploy", "all"] as const).includes(stepRaw as never)
+    ? (stepRaw as CreateApp["step"])
+    : "deploy";
+  const docker: DockerSpec = {
+    image: String(fd.get("image") ?? "").trim(),
+    container_port: Number(fd.get("container_port") ?? 0),
+    volumes: String(fd.get("volumes") ?? "")
+      .split(/\r?\n/)
+      .map((v) => v.trim())
+      .filter(Boolean),
+    memory_mb: Number(fd.get("memory_mb") ?? 1024),
+    cpus: Number(fd.get("cpus") ?? 1),
+  };
+  const req: CreateApp = {
+    name: String(fd.get("name") ?? "").trim(),
+    source_dir: "",
+    port: Number(fd.get("port") ?? 0),
+    subdomain: String(fd.get("subdomain") ?? "").trim().toLowerCase(),
+    runtime: "docker",
+    env: fd.has("env") ? parseEnv(String(fd.get("env") ?? "")) : undefined,
+    // The /domains site owns the name's vhost and certificate.
+    issue_ssl: false,
+    skip_dns_check: true,
+    step,
+    docker,
+  };
+  if (!docker.image) return { ok: false, error: "Enter an image, e.g. louislam/uptime-kuma:1" };
+  if (step !== "pull" && !(docker.container_port >= 1 && docker.container_port <= 65535)) {
+    return { ok: false, error: "Enter the port the app listens on inside the container" };
+  }
+  const persistsRow = step === "deploy" || step === "all";
+  if (persistsRow) {
+    const conflict = slotConflict(req.name, req.port, req.subdomain);
+    if (conflict) return { ok: false, error: conflict };
+  }
+  try {
+    const accepted = await agent.apps.create(req);
+    if (persistsRow) recordAppDeploy(req, accepted.task_id);
+    writeAudit({ actorId: s.userId, action: `apps.${step}`, target: req.name, request: req, result: "ok" });
+    if (persistsRow) revalidatePath(`/apps/${encodeURIComponent(req.name)}`);
+    return { ok: true, data: { taskId: accepted.task_id } };
+  } catch (e: unknown) {
+    const msg = e instanceof Error ? e.message : String(e);
+    writeAudit({ actorId: s.userId, action: `apps.${step}`, target: req.name, request: req, result: "error", message: msg });
+    return { ok: false, error: msg };
+  }
+}
+
+/** What a pulled image declares, so the Docker form can fill in the port and
+ *  the folders to keep. */
+export async function dockerImageInfoAction(image: string): Promise<ActionResult<DockerImageInfo>> {
+  await requireAdmin();
+  try {
+    return { ok: true, data: await agent.docker.imageInfo(image.trim()) };
+  } catch (e: unknown) {
+    return { ok: false, error: e instanceof Error ? e.message : String(e) };
+  }
+}
+
+/** Ask the registry whether a Docker app's image has a newer build. */
+export async function refreshImageStatusAction(name: string): Promise<ActionResult<DockerImageStatus>> {
+  await requireAdmin();
+  try {
+    return { ok: true, data: await agent.apps.imageStatus(name) };
+  } catch (e: unknown) {
+    return { ok: false, error: e instanceof Error ? e.message : String(e) };
   }
 }
 

@@ -18,6 +18,8 @@ type Props = {
   /** Slots kept out of the picker, with the reason, for the hint line. */
   unavailable: { domain: string; reason: string }[];
   action: (prev: Result | null, fd: FormData) => Promise<Result>;
+  /** A Docker app: the slot's port is where its container is published. */
+  docker?: boolean;
 };
 
 const NONE = "";
@@ -32,7 +34,7 @@ function slotKey(s: Slot | null): string {
  * one goes through a confirm first. Save stays greyed out until the value
  * differs from what the server has - same UX as the entrypoint editor.
  */
-export default function DomainForm({ current, slots, unavailable, action }: Props) {
+export default function DomainForm({ current, slots, unavailable, action, docker }: Props) {
   const [state, formAction, pending] = useActionState<Result | null, FormData>(
     action,
     null,
@@ -113,8 +115,16 @@ export default function DomainForm({ current, slots, unavailable, action }: Prop
           <Link href="/domains" className={styles.code}>
             /domains
           </Link>
-          . The app adopts the slot&apos;s port through{" "}
-          <span className={styles.code}>PORT</span> and restarts. Only slots not
+          .{" "}
+          {docker ? (
+            <>The container is published on the slot&apos;s port and restarts.</>
+          ) : (
+            <>
+              The app adopts the slot&apos;s port through{" "}
+              <span className={styles.code}>PORT</span> and restarts.
+            </>
+          )}{" "}
+          Only slots not
           bound to another app are listed.
           {slots.length === 0 && !current && (
             <> No free slot right now - add a port-mode site first.</>

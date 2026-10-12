@@ -2,6 +2,7 @@ use crate::error::{AgentError, AgentResult};
 use crate::exec;
 use crate::fs_atomic;
 use crate::handlers::app_git;
+use crate::handlers::docker_apps;
 use crate::handlers::nginx as nginx_handler;
 use crate::ipc::{OkResponse, TaskAccepted};
 use crate::nginx_template::AppVhostTemplate;
@@ -66,9 +67,18 @@ pub struct CreateApp {
     /// each as a separate task so the operator can iterate per stage.
     #[serde(default)]
     pub step: Option<String>,
+    /// "node" or "docker". None = what the app already is (docker when
+    /// /etc/vps-panel/apps/<name>.docker.json exists), else node. An app
+    /// never switches runtime on a re-deploy: delete it first.
+    #[serde(default)]
+    pub runtime: Option<String>,
+    /// Docker apps: image, container port, kept folders, limits. None on a
+    /// re-deploy keeps the saved settings (docker_apps.rs).
+    #[serde(default)]
+    pub docker: Option<docker_apps::DockerSpec>,
 }
 
-#[derive(Deserialize, Serialize)]
+#[derive(Deserialize, Serialize, Clone)]
 pub struct EnvKv {
     pub key: String,
     pub value: String,
@@ -92,7 +102,12 @@ pub struct AppRow {
     /// Lets /apps surface a "folder empty" warning so the operator can spot
     /// an app whose code was wiped (e.g. via the delete-with-wipe flow) but
     /// whose panel-side row is still around.
+    /// "none" — a Docker app, which has no source folder.
     pub source_dir_state: String,
+    /// "node" | "docker".
+    pub runtime: String,
+    /// Docker apps: the image reference they run, as entered.
+    pub image: Option<String>,
 }
 
 const APPS_BASE_DIR: &str = "/srv/apps";
@@ -171,7 +186,7 @@ pub struct SetEntrypointResp {
     pub restarted: bool,
 }
 
-const VPS_APP_PREFIX: &str = "vps-app-";
+pub(crate) const VPS_APP_PREFIX: &str = "vps-app-";
 
 // Project `.env*` scanning limits. Recurse the source dir but never descend
 // into dependency/build output (which can hold thousands of fixture .env
@@ -227,11 +242,8 @@ pub async fn list(State(state): State<AppState>) -> AgentResult<Json<Vec<AppRow>
         if !source_dir.is_empty() {
             seen_source_dirs.insert(source_dir.clone());
         }
-        let source_dir_state = if source_dir.is_empty() {
-            "missing".to_string()
-        } else {
-            classify_dir(&source_dir).await
-        };
+        let docker = docker_apps::read_config(&name).await;
+        let source_dir_state = source_dir_state_for(&source_dir, docker.is_some()).await;
         rows.push(AppRow {
             name,
             subdomain,
@@ -241,6 +253,8 @@ pub async fn list(State(state): State<AppState>) -> AgentResult<Json<Vec<AppRow>
             sub,
             kind: "panel".into(),
             source_dir_state,
+            runtime: runtime_label(docker.is_some()),
+            image: docker.map(|d| d.image),
         });
     }
 
@@ -279,12 +293,29 @@ pub async fn list(State(state): State<AppState>) -> AgentResult<Json<Vec<AppRow>
                 sub,
                 kind: "external".into(),
                 source_dir_state,
+                runtime: runtime_label(false),
+                image: None,
             });
         }
     }
 
     rows.sort_by(|a, b| a.name.cmp(&b.name));
     Ok(Json(rows))
+}
+
+fn runtime_label(docker: bool) -> String {
+    if docker { "docker" } else { "node" }.to_string()
+}
+
+/// A Docker app keeps its data in named volumes and has no source folder.
+async fn source_dir_state_for(source_dir: &str, docker: bool) -> String {
+    if docker {
+        "none".to_string()
+    } else if source_dir.is_empty() {
+        "missing".to_string()
+    } else {
+        classify_dir(source_dir).await
+    }
 }
 
 // Best-effort lookup of an external app's systemd state. The manual deploy
@@ -453,11 +484,8 @@ pub async fn get(
         let out = exec::run("systemctl", ["show", &unit, "--no-pager"]).await?;
         let active = field(&out.stdout, "ActiveState=").unwrap_or_default();
         let sub = field(&out.stdout, "SubState=").unwrap_or_default();
-        let source_dir_state = if source_dir.is_empty() {
-            "missing".to_string()
-        } else {
-            classify_dir(&source_dir).await
-        };
+        let docker = docker_apps::read_config(&name).await;
+        let source_dir_state = source_dir_state_for(&source_dir, docker.is_some()).await;
         return Ok(Json(AppRow {
             name,
             subdomain,
@@ -467,6 +495,8 @@ pub async fn get(
             sub,
             kind: "panel".into(),
             source_dir_state,
+            runtime: runtime_label(docker.is_some()),
+            image: docker.map(|d| d.image),
         }));
     }
 
@@ -488,6 +518,8 @@ pub async fn get(
             sub,
             kind: "external".into(),
             source_dir_state,
+            runtime: runtime_label(false),
+            image: None,
         }));
     }
 
@@ -529,6 +561,23 @@ pub async fn create(
     if let Some(env) = &req.env {
         validate_env_keys(env)?;
     }
+    let mut req = req;
+    if resolve_runtime(&req).await? == "docker" {
+        req.runtime = Some("docker".into());
+        match req.docker.take() {
+            Some(spec) => {
+                let spec = docker_apps::normalize_spec(spec);
+                docker_apps::validate_spec(&spec)?;
+                req.docker = Some(spec);
+            }
+            None if docker_apps::is_docker_app(&req.name) => {}
+            None => {
+                return Err(AgentError::Invalid(
+                    "a new Docker app needs its image and container port".into(),
+                ))
+            }
+        }
+    }
     refuse_if_app_task_running(&state, &req.name)?;
 
     let task = state.tasks.create(&format!("apps.create:{}", req.name));
@@ -555,17 +604,49 @@ pub async fn create(
     Ok(Json(TaskAccepted { task_id }))
 }
 
+/// "node" or "docker" for a deploy request. An app keeps the runtime it was
+/// deployed with: the other runtime's unit would replace it but leave its
+/// files (a build, volumes) behind, so switching means delete + deploy.
+async fn resolve_runtime(req: &CreateApp) -> AgentResult<&'static str> {
+    let is_docker = docker_apps::is_docker_app(&req.name);
+    let has_unit = PathBuf::from(format!("/etc/systemd/system/{VPS_APP_PREFIX}{}.service", req.name)).exists();
+    let wanted = match req.runtime.as_deref() {
+        None if is_docker => "docker",
+        None | Some("node") => "node",
+        Some("docker") => "docker",
+        Some(other) => {
+            return Err(AgentError::Invalid(format!(
+                "unknown runtime {other:?} - expected node or docker"
+            )))
+        }
+    };
+    if wanted == "node" && is_docker {
+        return Err(AgentError::Conflict(format!(
+            "{} is a Docker app - delete it first to deploy a Node app under that name",
+            req.name
+        )));
+    }
+    if wanted == "docker" && has_unit && !is_docker {
+        return Err(AgentError::Conflict(format!(
+            "{} is a Node app - delete it first to deploy a Docker app under that name",
+            req.name
+        )));
+    }
+    Ok(wanted)
+}
+
 async fn run_deploy(
     cfg: &crate::config::Config,
     acme_email: &str,
     req: &CreateApp,
     task: &crate::ipc::tasks::TaskHandle,
 ) -> AgentResult<()> {
+    if req.runtime.as_deref() == Some("docker") {
+        return docker_apps::run_deploy(cfg, acme_email, req, task).await;
+    }
     let unit_name = format!("{VPS_APP_PREFIX}{}.service", req.name);
     let unit_path = PathBuf::from(format!("/etc/systemd/system/{unit_name}"));
     let env_path = PathBuf::from(format!("/etc/vps-panel/apps/{}.env", req.name));
-    let vhost_path = PathBuf::from(format!("/etc/nginx/sites-available/{}", req.subdomain));
-    let vhost_link = PathBuf::from(format!("/etc/nginx/sites-enabled/{}", req.subdomain));
 
     // Which stages this request asked for. None / "all" = everything,
     // matching the pre-staged behaviour. Individual stages can be invoked
@@ -810,24 +891,7 @@ async fn run_deploy(
         }
     }
 
-    match &req.env {
-        Some(env) => {
-            task.log(format!("writing env file {}", env_path.display()));
-            fs_atomic::ensure_dir(env_path.parent().unwrap(), 0o750).await?;
-            fs_atomic::write(&env_path, render_env_file(env).as_bytes(), 0o640).await?;
-        }
-        None if env_path.exists() => {
-            task.log(format!("keeping the existing env file {}", env_path.display()));
-        }
-        None => {
-            task.log(format!("writing an empty env file {}", env_path.display()));
-            fs_atomic::ensure_dir(env_path.parent().unwrap(), 0o750).await?;
-            fs_atomic::write(&env_path, b"", 0o640).await?;
-        }
-    }
-    if cfg.apps_uid != 0 {
-        let _ = fs_atomic::chown_blocking(&env_path, 0, cfg.apps_gid);
-    }
+    write_deploy_env(cfg, req.env.as_deref(), &env_path, task).await?;
     let exec_start = match &req.exec_start {
         Some(s) => s.clone(),
         None => existing_exec_start(&unit_path)
@@ -889,6 +953,52 @@ async fn run_deploy(
         )));
     }
 
+    publish_vhost(cfg, acme_email, req, &unit_name, &unit_path, unit_existed, task).await
+}
+
+/// The deploy's EnvironmentFile: the request's variables replace the file,
+/// none keeps it (an empty one for a new app). root:apps 0640.
+pub(crate) async fn write_deploy_env(
+    cfg: &crate::config::Config,
+    env: Option<&[EnvKv]>,
+    env_path: &std::path::Path,
+    task: &crate::ipc::tasks::TaskHandle,
+) -> AgentResult<()> {
+    match env {
+        Some(env) => {
+            task.log(format!("writing env file {}", env_path.display()));
+            fs_atomic::ensure_dir(env_path.parent().unwrap(), 0o750).await?;
+            fs_atomic::write(env_path, render_env_file(env).as_bytes(), 0o640).await?;
+        }
+        None if env_path.exists() => {
+            task.log(format!("keeping the existing env file {}", env_path.display()));
+        }
+        None => {
+            task.log(format!("writing an empty env file {}", env_path.display()));
+            fs_atomic::ensure_dir(env_path.parent().unwrap(), 0o750).await?;
+            fs_atomic::write(env_path, b"", 0o640).await?;
+        }
+    }
+    if cfg.apps_uid != 0 {
+        let _ = fs_atomic::chown_blocking(env_path, 0, cfg.apps_gid);
+    }
+    Ok(())
+}
+
+/// The last deploy stage, once the unit is up: the app's own vhost (unless a
+/// /domains site already routes the name) and its certificate.
+pub(crate) async fn publish_vhost(
+    cfg: &crate::config::Config,
+    acme_email: &str,
+    req: &CreateApp,
+    unit_name: &str,
+    unit_path: &std::path::Path,
+    unit_existed: bool,
+    task: &crate::ipc::tasks::TaskHandle,
+) -> AgentResult<()> {
+    let vhost_path = PathBuf::from(format!("/etc/nginx/sites-available/{}", req.subdomain));
+    let vhost_link = PathBuf::from(format!("/etc/nginx/sites-enabled/{}", req.subdomain));
+
     // If the operator has already provisioned a port-mode site under
     // /domains for this subdomain (file `/etc/nginx/sites-available/site-
     // <domain>`), the HTTP routing slot exists — proxy_pass, SSL block,
@@ -934,10 +1044,10 @@ async fn run_deploy(
         if let Err(e) = nginx_handler::test_config().await {
             let _ = std::fs::remove_file(&vhost_link);
             let _ = std::fs::remove_file(&vhost_path);
-            let _ = exec::run("systemctl", ["stop", &unit_name]).await;
-            let _ = exec::run("systemctl", ["disable", &unit_name]).await;
+            let _ = exec::run("systemctl", ["stop", unit_name]).await;
+            let _ = exec::run("systemctl", ["disable", unit_name]).await;
             if !unit_existed {
-                rollback_unit(&unit_path).await;
+                rollback_unit(unit_path).await;
             }
             return Err(e);
         }
@@ -1104,7 +1214,7 @@ async fn run_npm(
     .await
 }
 
-async fn rollback_unit(unit_path: &std::path::Path) {
+pub(crate) async fn rollback_unit(unit_path: &std::path::Path) {
     let _ = fs_atomic::remove_if_exists(unit_path).await;
     let _ = exec::run("systemctl", ["daemon-reload"]).await;
 }
@@ -1150,14 +1260,14 @@ pub async fn ensure_app_unit_defaults() {
 /// Restart, Update, env and entrypoint saves). Clears the unit's failed state
 /// and start-rate counter first, so the crash-loop limit above never refuses
 /// an action the operator asked for.
-async fn app_systemctl(args: &[&str], unit: &str) -> AgentResult<()> {
+pub(crate) async fn app_systemctl(args: &[&str], unit: &str) -> AgentResult<()> {
     let _ = exec::run("systemctl", ["reset-failed", unit]).await;
     let mut full: Vec<&str> = args.to_vec();
     full.push(unit);
     exec::run("systemctl", full).await.map(|_| ())
 }
 
-async fn unit_prop(unit: &str, prop: &str) -> String {
+pub(crate) async fn unit_prop(unit: &str, prop: &str) -> String {
     exec::run("systemctl", ["show", "-p", prop, "--value", unit])
         .await
         .map(|o| o.stdout.trim().to_string())
@@ -1180,6 +1290,26 @@ const APP_STABLE_SECS: u64 = 10;
 /// APP_STABLE_SECS without systemd restarting it. Call right after the start
 /// (an explicit start resets NRestarts). Err carries a one-line reason.
 async fn verify_app_up(unit: &str, port: u16, bind_wait: Duration) -> Result<(), String> {
+    verify_unit_up(unit, port, bind_wait, Readiness::Listening).await
+}
+
+/// When an app counts as started.
+#[derive(Clone, Copy, PartialEq)]
+pub(crate) enum Readiness {
+    /// Something accepts connections on the port (a Node app binds it itself).
+    Listening,
+    /// The port answers an HTTP request with at least one byte. Docker's
+    /// proxy accepts on a published port as soon as the container exists and
+    /// drops the connection while the app inside is still starting.
+    HttpAnswer,
+}
+
+pub(crate) async fn verify_unit_up(
+    unit: &str,
+    port: u16,
+    bind_wait: Duration,
+    readiness: Readiness,
+) -> Result<(), String> {
     use tokio::net::TcpStream;
     let baseline = unit_restarts(unit).await;
     let deadline = tokio::time::Instant::now() + bind_wait;
@@ -1191,14 +1321,21 @@ async fn verify_app_up(unit: &str, port: u16, bind_wait: Duration) -> Result<(),
         if state == "failed" || state == "inactive" {
             return Err(format!("{unit} exited while starting (state: {state})"));
         }
-        if TcpStream::connect(("127.0.0.1", port)).await.is_ok() {
+        let ready = match readiness {
+            Readiness::Listening => TcpStream::connect(("127.0.0.1", port)).await.is_ok(),
+            Readiness::HttpAnswer => http_answers(port).await,
+        };
+        if ready {
             break;
         }
         if tokio::time::Instant::now() >= deadline {
-            return Err(format!(
-                "{unit} did not bind port {port} within {}s",
-                bind_wait.as_secs()
-            ));
+            return Err(match readiness {
+                Readiness::Listening => format!("{unit} did not bind port {port} within {}s", bind_wait.as_secs()),
+                Readiness::HttpAnswer => format!(
+                    "{unit} did not answer HTTP on 127.0.0.1:{port} within {}s (is the container port right?)",
+                    bind_wait.as_secs()
+                ),
+            });
         }
         sleep(Duration::from_millis(500)).await;
     }
@@ -1213,8 +1350,23 @@ async fn verify_app_up(unit: &str, port: u16, bind_wait: Duration) -> Result<(),
     Ok(())
 }
 
+/// Any reply at all (an error page or a redirect included) to a plain GET.
+async fn http_answers(port: u16) -> bool {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let probe = async {
+        let mut stream = tokio::net::TcpStream::connect(("127.0.0.1", port)).await.ok()?;
+        stream
+            .write_all(b"GET / HTTP/1.0\r\nHost: localhost\r\nUser-Agent: vps-panel-agent\r\n\r\n")
+            .await
+            .ok()?;
+        let mut byte = [0u8; 1];
+        (stream.read(&mut byte).await.ok()? > 0).then_some(())
+    };
+    matches!(tokio::time::timeout(Duration::from_secs(3), probe).await, Ok(Some(())))
+}
+
 /// Append the unit's last journal lines to the task log.
-async fn log_journal_tail(unit: &str, lines: u32, task: &crate::ipc::tasks::TaskHandle) {
+pub(crate) async fn log_journal_tail(unit: &str, lines: u32, task: &crate::ipc::tasks::TaskHandle) {
     let n = lines.to_string();
     match exec::run(
         "journalctl",
@@ -1380,6 +1532,9 @@ pub async fn delete(
     Query(q): Query<DeleteQuery>,
 ) -> AgentResult<Json<OkResponse>> {
     validate_name(&name)?;
+    // Read before anything is removed: it names the container, image tags and
+    // volumes to clean up.
+    let docker = docker_apps::read_config(&name).await;
     let unit = format!("{VPS_APP_PREFIX}{name}.service");
     let _ = exec::run("systemctl", ["stop", &unit]).await;
     let _ = exec::run("systemctl", ["disable", &unit]).await;
@@ -1395,6 +1550,12 @@ pub async fn delete(
         remove_app_vhost(&name, &subdomain).await;
     }
     let _ = exec::run("systemctl", ["daemon-reload"]).await;
+
+    // A Docker app has no checkout: `wipe` means its data volumes.
+    if let Some(spec) = &docker {
+        docker_apps::remove_app(&name, spec, q.wipe).await;
+        return Ok(Json(OkResponse::default()));
+    }
 
     // The fetch cache is no use without the app.
     app_git::remove_mirror(&name).await;
@@ -1468,6 +1629,25 @@ pub async fn update(
         .await
         .ok_or(AgentError::NotFound)?;
     let has_slot = port != 0;
+    if docker_apps::is_docker_app(&name) {
+        refuse_if_app_task_running(&state, &name)?;
+        let task = state.tasks.create(&format!("apps.update:{name}"));
+        let task_id = task.id.clone();
+        tokio::spawn(async move {
+            task.start();
+            match docker_apps::run_update(&name, has_slot.then_some(port), &task).await {
+                Ok(()) => {
+                    task.log("done");
+                    task.finish(true);
+                }
+                Err(e) => {
+                    task.log(format!("error: {e}"));
+                    task.finish(false);
+                }
+            }
+        });
+        return Ok(Json(TaskAccepted { task_id }));
+    }
     if source_dir.is_empty() {
         return Err(AgentError::Invalid(
             "app has no recorded source_dir".into(),
@@ -1527,7 +1707,7 @@ pub async fn update(
 
 /// One deploy stage or update per app at a time. Two runs in the same checkout
 /// corrupt node_modules/.next, and they would share the app's build snapshot.
-fn refuse_if_app_task_running(state: &AppState, name: &str) -> AgentResult<()> {
+pub(crate) fn refuse_if_app_task_running(state: &AppState, name: &str) -> AgentResult<()> {
     for kind in [format!("apps.create:{name}"), format!("apps.update:{name}")] {
         if state.tasks.any_live_kind(&kind) {
             return Err(AgentError::Conflict(format!(
@@ -1758,6 +1938,23 @@ pub async fn patch_env(
     Ok(Json(PatchEnvResp { ok: true, restarted }))
 }
 
+#[derive(Serialize)]
+pub struct EnvResp {
+    /// The EnvironmentFile's KEY=VALUE pairs in file order, values as stored
+    /// (newlines escaped as `\n`). Empty when the file does not exist.
+    pub env: Vec<EnvKv>,
+}
+
+/// The app's EnvironmentFile (`/etc/vps-panel/apps/<name>.env`). Holds
+/// secrets: the panel reads it for admins only and no MCP tool calls it.
+pub async fn get_env(Path(name): Path<String>) -> AgentResult<Json<EnvResp>> {
+    validate_name(&name)?;
+    let body = tokio::fs::read_to_string(format!("/etc/vps-panel/apps/{name}.env"))
+        .await
+        .unwrap_or_default();
+    Ok(Json(EnvResp { env: parse_env_file(&body) }))
+}
+
 /// List every `.env*` file inside an app's source directory. These are the
 /// files the app's own framework reads (e.g. Next.js `.env.local`), distinct
 /// from the systemd EnvironmentFile at `/etc/vps-panel/apps/<name>.env`.
@@ -1913,6 +2110,11 @@ pub async fn set_entrypoint(
     Json(req): Json<SetEntrypoint>,
 ) -> AgentResult<Json<SetEntrypointResp>> {
     validate_name(&name)?;
+    if docker_apps::is_docker_app(&name) {
+        return Err(AgentError::Invalid(
+            "a Docker app runs its image's own command - change the image instead".into(),
+        ));
+    }
     let exec = req.exec_start.trim();
     if exec.is_empty() {
         return Err(AgentError::Invalid("exec_start must not be empty".into()));
@@ -2069,14 +2271,26 @@ pub async fn set_routing(
         }));
     };
 
+    // A Docker app's port is the host side of its `-p` publish, so its unit
+    // is rendered again; the container keeps listening on its own port and
+    // PORT in its env file is the container's business.
+    let docker = docker_apps::read_config(&name).await;
     if port != old_port {
-        write_unit_port(&unit_path, &unit_body, port).await?;
-        rewrite_env_file_port(&state.config, &name, port).await?;
+        match &docker {
+            Some(spec) => docker_apps::write_unit(&name, port, spec).await?,
+            None => {
+                write_unit_port(&unit_path, &unit_body, port).await?;
+                rewrite_env_file_port(&state.config, &name, port).await?;
+            }
+        }
         exec::run("systemctl", ["daemon-reload"]).await?;
     }
     app_systemctl(&["enable", "--now"], &unit).await?;
 
-    let up = verify_app_up(&unit, port, Duration::from_secs(ROUTING_BIND_WAIT_SECS)).await;
+    let up = match docker {
+        Some(_) => docker_apps::verify_up(&unit, port).await,
+        None => verify_app_up(&unit, port, Duration::from_secs(ROUTING_BIND_WAIT_SECS)).await,
+    };
     let bound = up.is_ok();
     let mut log = Vec::new();
     if let Err(reason) = up {
@@ -2333,7 +2547,7 @@ fn validate_env_keys(env: &[EnvKv]) -> AgentResult<()> {
 /// file order. Values come back as stored (newlines stay escaped), so
 /// rendering them again is lossless. Comments, blank and malformed lines are
 /// skipped.
-fn parse_env_file(body: &str) -> Vec<EnvKv> {
+pub(crate) fn parse_env_file(body: &str) -> Vec<EnvKv> {
     body.lines()
         .filter_map(|line| {
             let line = line.trim_end_matches('\r');
@@ -2384,7 +2598,7 @@ fn render_env_file(env: &[EnvKv]) -> String {
 
 /// The port answers, and not because this app's own unit holds it (a
 /// re-deploy of a running app is not a conflict).
-async fn port_held_by_other(port: u16, own_unit: &str) -> bool {
+pub(crate) async fn port_held_by_other(port: u16, own_unit: &str) -> bool {
     port_in_use(port).await && unit_prop(own_unit, "ActiveState").await != "active"
 }
 
@@ -2474,7 +2688,7 @@ async fn legacy_fetch_url(name: &str, owner: Option<&app_git::Owner>, dir: &str)
     (is_safe_git_url(&origin) && misused_alias_hint(&origin).is_none()).then_some(origin)
 }
 
-async fn lookup_app(state: &AppState, name: &str) -> Option<(String, u16, String)> {
+pub(crate) async fn lookup_app(state: &AppState, name: &str) -> Option<(String, u16, String)> {
     let from_db: Option<(String, u16, String)> = state
         .panel_db
         .with(|conn| {

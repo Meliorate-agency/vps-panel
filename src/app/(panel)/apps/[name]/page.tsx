@@ -1,7 +1,9 @@
 import { notFound } from "next/navigation";
 import { agent, type GitStatusResp } from "@/lib/agent";
 import StatusBadge from "@/components/StatusBadge/StatusBadge";
+import Table from "@/components/Table/Table";
 import styles from "@/components/page.module.css";
+import { getSession } from "@/lib/auth";
 import {
   startAppAction,
   stopAppAction,
@@ -15,6 +17,8 @@ import {
   updateAppAction,
   checkAppSourceStateAction,
   setAppDomainAction,
+  dockerImageInfoAction,
+  refreshImageStatusAction,
 } from "@/server-actions/apps";
 import { freeSlotsFor, listRoutingSlots, slotUnavailableReason } from "@/lib/appSlots";
 import AppServiceControls from "./AppServiceControls";
@@ -25,6 +29,8 @@ import EntrypointForm from "./EntrypointForm";
 import DomainForm from "./DomainForm";
 import DeployForm from "../new/DeployForm";
 import UpdatesPanel from "./UpdatesPanel";
+import DockerImagePanel from "./DockerImagePanel";
+import DockerForm from "../new/DockerForm";
 
 export const dynamic = "force-dynamic";
 
@@ -54,6 +60,7 @@ export default async function AppDetailPage({
   const sourceMissing =
     app.source_dir_state === "missing" || app.source_dir_state === "empty";
   const isExternal = app.kind === "external";
+  const isDocker = app.runtime === "docker";
   const setDomain = setAppDomainAction.bind(null, name);
 
   // Routing slots for the Domain picker (panel apps) and the recovery form
@@ -75,7 +82,7 @@ export default async function AppDetailPage({
   // folder doesn't exist (the agent would just 404); the component falls back
   // to a client-side load + inline error if this comes back null.
   const initialEnvFiles =
-    app.source_dir_state === "missing"
+    app.source_dir_state === "missing" || isDocker
       ? null
       : await agent.apps.listEnvFiles(name).catch(() => null);
 
@@ -83,7 +90,7 @@ export default async function AppDetailPage({
   // (no panel-managed repo URL stored) and skip when there's no code on
   // disk — git would just error.
   let gitStatus: GitStatusResp | undefined;
-  if (!isExternal && !sourceMissing) {
+  if (!isExternal && !isDocker && !sourceMissing) {
     gitStatus = await agent.apps.gitStatus(name).catch(() => undefined);
   }
 
@@ -180,6 +187,176 @@ export default async function AppDetailPage({
             sourceDir={app.source_dir}
             deleteAction={deleteAppAction}
           />
+        </div>
+      </div>
+    );
+  }
+
+  if (isDocker) {
+    const [info, session, dockerStatus] = await Promise.all([
+      agent.apps.dockerInfo(name).catch(() => null),
+      getSession(),
+      agent.docker.status().catch(() => ({ installed: false, running: false, version: null })),
+    ]);
+    // The env file holds secrets: read it for admins only, who are also the
+    // only ones the settings form would let save.
+    const canManage = session?.role === "admin";
+    const env = canManage ? await agent.apps.getEnv(name).then((r) => r.env).catch(() => []) : [];
+    const spec = info?.spec;
+    return (
+      <div>
+        <div className={styles.head}>
+          <div>
+            <h1 className={styles.title}>{app.name}</h1>
+            <div className={styles.subtitle}>
+              <StatusBadge text="docker" tone="info" />{" "}
+              {unassigned ? (
+                <>
+                  <StatusBadge text="no domain" tone="warn" />{" "}
+                  <span className={styles.muted}>unloaded - assign a routing slot below</span>{" "}
+                </>
+              ) : (
+                <>
+                  <span className={styles.code}>{app.subdomain}</span> -&gt;{" "}
+                  <span className={styles.code}>127.0.0.1:{app.port}</span>{" "}
+                  {spec && (
+                    <>
+                      -&gt; container <span className={styles.code}>:{spec.container_port}</span>{" "}
+                    </>
+                  )}
+                </>
+              )}
+              <StatusBadge text={app.sub || app.active || "unknown"} />
+            </div>
+          </div>
+          <div className={styles.actions}>
+            <AppServiceControls
+              startAction={start}
+              stopAction={stop}
+              restartAction={restart}
+              active={app.active}
+              unassigned={unassigned}
+            />
+          </div>
+        </div>
+
+        {!info && (
+          <div className={styles.notice} style={{ marginBottom: 16 }}>
+            Could not read this app&apos;s Docker settings from the agent. Check that Docker is
+            running on <a href="/services">/services</a>.
+          </div>
+        )}
+
+        <div className={styles.section}>
+          <h2 className={styles.sectionTitle}>Domain</h2>
+          <p className={styles.muted} style={{ marginBottom: 10 }}>
+            Which routing slot serves this app. Moving it publishes the container on the new
+            slot&apos;s port (127.0.0.1 only) and restarts it; the old domain answers 502 until
+            another app takes it. &quot;No domain&quot; stops the container.
+          </p>
+          <DomainForm
+            current={currentSlot}
+            slots={freeSlots.map((s) => ({ domain: s.domain, port: s.port }))}
+            unavailable={unavailableSlots}
+            action={setDomain}
+            docker
+          />
+        </div>
+
+        <div className={styles.section}>
+          <h2 className={styles.sectionTitle}>Image</h2>
+          <DockerImagePanel
+            appName={name}
+            image={spec?.image ?? app.image ?? ""}
+            currentId={info?.current_id ?? null}
+            previousId={info?.previous_id ?? null}
+            canManage={canManage}
+            checkAction={refreshImageStatusAction}
+            updateAction={updateAppAction}
+          />
+        </div>
+
+        {canManage && spec && (
+          <div className={styles.section}>
+            <h2 className={styles.sectionTitle}>Settings</h2>
+            <p className={styles.muted} style={{ marginBottom: 10 }}>
+              Saving recreates the container with these settings. Kept folders keep their data;
+              a folder taken off the list keeps its volume until the app is deleted.
+            </p>
+            <DockerForm
+              mode="edit"
+              name={name}
+              slot={currentSlot}
+              action={deployAppAction}
+              imageInfo={dockerImageInfoAction}
+              docker={dockerStatus}
+              initial={{
+                image: spec.image,
+                container_port: String(spec.container_port),
+                volumes: spec.volumes.join("\n"),
+                memory_mb: String(spec.memory_mb),
+                cpus: String(spec.cpus),
+                env: env.map((kv) => `${kv.key}=${kv.value}`).join("\n"),
+              }}
+            />
+          </div>
+        )}
+
+        <div className={styles.section}>
+          <h2 className={styles.sectionTitle}>Data</h2>
+          <p className={styles.muted} style={{ marginBottom: 10 }}>
+            Docker volumes that keep these folders across restarts and updates. Backups include
+            them (<span className={styles.code}>/var/lib/docker/volumes</span>).
+          </p>
+          <Table
+            columns={[
+              { key: "folder", label: "Folder in the container" },
+              { key: "volume", label: "Volume" },
+              { key: "path", label: "On the server" },
+            ]}
+            rows={(info?.volumes ?? []).map((v) => ({
+              folder: <span className={styles.code}>{v.container_path}</span>,
+              volume: <span className={styles.code}>{v.volume}</span>,
+              path: v.host_path ? (
+                <span className={styles.code}>{v.host_path}</span>
+              ) : (
+                <span className={styles.muted}>created on the next deploy</span>
+              ),
+            }))}
+            empty="This app keeps no folders: everything it writes is reset on every update."
+          />
+        </div>
+
+        <div
+          style={{
+            display: "grid",
+            gridTemplateColumns: "1fr 1fr",
+            gap: 16,
+            alignItems: "stretch",
+          }}
+        >
+          <div className={styles.section} style={{ marginBottom: 0 }}>
+            <h2 className={styles.sectionTitle}>Danger zone</h2>
+            <DeleteAppButton
+              appName={name}
+              sourceDir=""
+              deleteAction={deleteAppAction}
+              docker={{
+                image: spec?.image ?? app.image ?? "",
+                volumes: (info?.volumes ?? []).map((v) => v.volume),
+              }}
+            />
+          </div>
+
+          <div className={styles.section} style={{ marginBottom: 0 }}>
+            <h2 className={styles.sectionTitle}>Logs</h2>
+            <p className={styles.muted}>
+              The container&apos;s output, live at{" "}
+              <a href={`/logs?unit=vps-app-${encodeURIComponent(name)}.service`}>
+                /logs?unit=vps-app-{name}.service
+              </a>
+            </p>
+          </div>
         </div>
       </div>
     );

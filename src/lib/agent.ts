@@ -148,6 +148,25 @@ export const agent = {
         path: `/apps/${encodeURIComponent(name)}/entrypoint`,
         body: { exec_start: execStart },
       }),
+    /** The EnvironmentFile as KEY/VALUE pairs. Holds secrets: admin pages
+     *  only, never an MCP tool. */
+    getEnv: (name: string) =>
+      agentRequest<{ env: { key: string; value: string }[] }>({
+        method: "GET",
+        path: `/apps/${encodeURIComponent(name)}/env`,
+      }),
+    /** Docker apps: saved settings, image ids and where the volumes live. */
+    dockerInfo: (name: string) =>
+      agentRequest<DockerAppInfo>({
+        method: "GET",
+        path: `/apps/${encodeURIComponent(name)}/docker`,
+      }),
+    /** Docker apps: does the registry have a newer image (network call). */
+    imageStatus: (name: string) =>
+      agentRequest<DockerImageStatus>({
+        method: "GET",
+        path: `/apps/${encodeURIComponent(name)}/image-status`,
+      }),
     /** Move the app onto another routing slot (port-mode site) - rewrites
      *  PORT and restarts - or, with both fields null, take it off its slot
      *  (stop + disable). */
@@ -160,6 +179,14 @@ export const agent = {
         path: `/apps/${encodeURIComponent(name)}/routing`,
         body,
       }),
+  },
+
+  docker: {
+    status: () => agentRequest<DockerStatus>({ method: "GET", path: "/docker/status" }),
+    /** What a pulled image declares (EXPOSE ports, VOLUME folders). 404 when
+     *  the image is not on the server. */
+    imageInfo: (image: string) =>
+      agentRequest<DockerImageInfo>({ method: "GET", path: "/docker/image-info", query: { image } }),
   },
 
   services: {
@@ -1091,8 +1118,56 @@ export type AppRow = {
   kind: "panel" | "external";
   /** "missing" → /srv/apps/<name> doesn't exist
    *  "empty"   → exists but contains nothing
-   *  "populated" → exists with code */
-  source_dir_state: "missing" | "empty" | "populated";
+   *  "populated" → exists with code
+   *  "none"    → a Docker app, which has no source folder */
+  source_dir_state: "missing" | "empty" | "populated" | "none";
+  runtime: "node" | "docker";
+  /** Docker apps: the image they run, as entered. */
+  image: string | null;
+};
+
+/** A Docker app's settings (/etc/vps-panel/apps/<name>.docker.json). */
+export type DockerSpec = {
+  image: string;
+  /** The port the app listens on inside the container. */
+  container_port: number;
+  /** Folders inside the container kept in named volumes. */
+  volumes: string[];
+  /** 0 = no limit. */
+  memory_mb: number;
+  /** 0 = no limit. */
+  cpus: number;
+};
+
+export type DockerAppInfo = {
+  spec: DockerSpec;
+  current_id: string | null;
+  /** The image Update rolls back to. */
+  previous_id: string | null;
+  volumes: { container_path: string; volume: string; host_path: string | null }[];
+};
+
+export type DockerImageStatus = {
+  image: string;
+  current_id: string | null;
+  /** null = could not tell (see error). */
+  update_available: boolean | null;
+  error: string | null;
+};
+
+export type DockerImageInfo = {
+  id: string;
+  exposed_ports: number[];
+  volumes: string[];
+  /** "" = root. */
+  user: string;
+};
+
+export type DockerStatus = {
+  installed: boolean;
+  /** The daemon answers. */
+  running: boolean;
+  version: string | null;
 };
 
 export type GitStatusResp = {
@@ -1140,8 +1215,12 @@ export type CreateApp = {
   /** Optional git repo to clone into source_dir before the deploy runs.
    *  Streamed git/npm output goes into the task log. */
   repo_url?: string;
-  /** Which subset of the pipeline to run. Default = full deploy. */
+  /** Which subset of the pipeline to run. Default = full deploy. Docker
+   *  apps have pull / deploy / all only. */
   step?: "pull" | "install" | "build" | "deploy" | "all";
+  /** runtime "docker": the image settings (omit on a re-deploy to keep the
+   *  saved ones). */
+  docker?: DockerSpec;
 };
 
 export type AppRoutingResp = {

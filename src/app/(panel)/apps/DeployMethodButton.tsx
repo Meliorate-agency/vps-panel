@@ -6,9 +6,8 @@ import styles from "@/components/page.module.css";
 
 /**
  * "Deploy app" entrypoint on /apps. Click opens a centered modal with two
- * source-method cards (GitHub Pull, Docker). GitHub takes you to the
- * existing /apps/new deploy form. Docker is disabled — placeholder for a
- * future image-based deploy flow.
+ * source-method cards: GitHub Pull (/apps/new?method=github, a Node app) and
+ * Docker (/apps/new?method=docker, an image from a registry).
  */
 export default function DeployMethodButton() {
   const [open, setOpen] = useState(false);
@@ -119,7 +118,7 @@ export default function DeployMethodButton() {
               className={styles.muted}
               style={{ fontSize: 13, marginTop: 0, marginBottom: 16 }}
             >
-              Pick where the app&apos;s code comes from.
+              Pick where the app comes from.
             </p>
 
             <div
@@ -137,10 +136,11 @@ export default function DeployMethodButton() {
                 sub="Clone a public or deploy-keyed repo, then start the app."
               />
               <MethodCard
+                href="/apps/new?method=docker"
+                onPick={() => setOpen(false)}
                 logo={<DockerLogo />}
                 title="Docker"
-                sub="Pull an image and run it. Coming soon."
-                disabled
+                sub="Run an image from Docker Hub or another registry on one of your domains."
               />
             </div>
           </div>
