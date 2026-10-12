@@ -4,6 +4,7 @@ import DockerForm from "./DockerForm";
 import {
   checkAppSourceStateAction,
   deployAppAction,
+  dockerBuildInfoAction,
   dockerImageInfoAction,
 } from "@/server-actions/apps";
 import { quickInstallAction } from "@/server-actions/quickInstall";
@@ -46,7 +47,7 @@ export default async function NewAppPage({
   // which have a Host block in ~/.ssh/config and a private key on disk. A
   // keypair put in ~/.ssh by hand (authorized: false) may have no Host block.
   const rootKeypairs =
-    sourceMethod === "github"
+    sourceMethod === "github" || isDocker
       ? await agent.ssh
           .list("root")
           .then((rows) =>
@@ -77,10 +78,11 @@ export default async function NewAppPage({
         </Link>
         <div className={styles.head}>
           <div>
-            <h1 className={styles.title}>Deploy a Docker image</h1>
+            <h1 className={styles.title}>Deploy with Docker</h1>
             <div className={styles.subtitle}>
-              Runs the image as a container with its own systemd service, published on
-              127.0.0.1 and served on a port-mode site from{" "}
+              Runs an image from a registry, or one built from your repository&apos;s
+              Dockerfile, as a container with its own systemd service, published on 127.0.0.1
+              and served on a port-mode site from{" "}
               <Link href="/domains">/domains</Link>.
             </div>
           </div>
@@ -90,6 +92,8 @@ export default async function NewAppPage({
             mode="new"
             action={deployAppAction}
             imageInfo={dockerImageInfoAction}
+            buildInfo={dockerBuildInfoAction}
+            rootKeypairs={rootKeypairs}
             installDocker={quickInstallAction}
             portSites={portSites}
             docker={docker}

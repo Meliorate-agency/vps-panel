@@ -8,12 +8,12 @@ import { db } from "./db";
  * their slot looked free to the pickers and `apps.set_domain` refused them.
  */
 
-/** The runtime panel.db recorded for an app, or null for an unknown app. */
-export function appRuntime(name: string): string | null {
-  const row = db().prepare(`SELECT runtime FROM apps WHERE name = ?`).get(name) as
-    | { runtime: string }
+/** What panel.db recorded for an app (runtime, source folder), or null. */
+export function recordedApp(name: string): { runtime: string; source_dir: string } | null {
+  const row = db().prepare(`SELECT runtime, source_dir FROM apps WHERE name = ?`).get(name) as
+    | { runtime: string; source_dir: string }
     | undefined;
-  return row?.runtime ?? null;
+  return row ?? null;
 }
 
 /** Why `port` / `subdomain` cannot go to `name`: another app already has it. */

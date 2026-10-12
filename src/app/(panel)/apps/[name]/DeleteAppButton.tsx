@@ -20,8 +20,9 @@ export default function DeleteAppButton({
   appName: string;
   sourceDir: string;
   deleteAction: (name: string, opts?: { wipe?: boolean }) => Promise<void>;
-  /** Set for a Docker app: its image and data volume names. */
-  docker?: { image: string; volumes: string[] };
+  /** Set for a Docker app: its image and data volume names, and the Git
+   *  checkout it is built from (null for an image from a registry). */
+  docker?: { image: string; volumes: string[]; checkout?: string | null };
 }) {
   const [open, setOpen] = useState(false);
   const [wipe, setWipe] = useState(false);
@@ -129,15 +130,23 @@ export default function DeleteAppButton({
           />
           {docker ? (
             <span style={{ display: "flex", flexDirection: "column", gap: 2 }}>
-              <strong style={{ fontSize: 13 }}>Also delete the data volumes</strong>
+              <strong style={{ fontSize: 13 }}>
+                Also delete the data volumes{docker.checkout ? " and the checkout" : ""}
+              </strong>
               <span className={styles.muted} style={{ fontSize: 12 }}>
                 {docker.volumes.length > 0 ? (
                   <span className={styles.code}>{docker.volumes.join(", ")}</span>
                 ) : (
                   "The app keeps no folders."
                 )}{" "}
-                - everything the app saved. Cannot be undone. Leave unchecked to keep the
-                data: deploying an app with the same name and folders picks it up again.
+                - everything the app saved
+                {docker.checkout && (
+                  <>
+                    , and <span className={styles.code}>{docker.checkout}</span>
+                  </>
+                )}
+                . Cannot be undone. Leave unchecked to keep the data: deploying an app with the
+                same name and folders picks it up again.
               </span>
             </span>
           ) : (

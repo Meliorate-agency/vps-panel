@@ -1,7 +1,7 @@
 import "server-only";
 import { agent, type CreateApp } from "@/lib/agent";
 import { applyAppRouting } from "@/lib/appRouting";
-import { appRuntime, recordAppDeploy, slotConflict } from "@/lib/appRows";
+import { recordAppDeploy, recordedApp, slotConflict } from "@/lib/appRows";
 import {
   optionalBoolean,
   optionalNumber,
@@ -68,7 +68,7 @@ export const TOOLS: Tool[] = [
     page: "Apps",
     name: "apps.create",
     description:
-      "Deploy a new app or re-run a stage on an existing one. runtime 'node' (default): optionally clones a git repo into /srv/apps/<name>, runs npm ci + npm run build, writes the systemd unit (vps-app-<name>.service), and starts it. runtime 'docker': pulls a public image and runs it as a container from the same unit, published on 127.0.0.1:<port> only, with the given env, kept folders (named volumes) and limits; steps pull / deploy / all. Returns a task_id whose log can be streamed via tasks.get.",
+      "Deploy a new app or re-run a stage on an existing one. runtime 'node' (default): optionally clones a git repo into /srv/apps/<name>, runs npm ci + npm run build, writes the systemd unit (vps-app-<name>.service), and starts it. runtime 'docker': runs a container from the same unit, published on 127.0.0.1:<port> only, with the given env, kept folders (named volumes) and limits. Its image is either pulled from a public registry (image; steps pull / deploy / all) or built from the Dockerfile in repo_url (cloned into /srv/apps/<name> like a Node app; build_context, dockerfile, build_args; steps pull / build / deploy / all). Returns a task_id whose log can be streamed via tasks.get.",
     inputSchema: {
       type: "object",
       properties: {
@@ -96,6 +96,25 @@ export const TOOLS: Tool[] = [
           type: "string",
           description:
             "Docker apps: image reference, e.g. louislam/uptime-kuma:1 or ghcr.io/owner/app:1.4. Public registries only. Omit on a re-run to keep the saved Docker settings.",
+        },
+        build_context: {
+          type: "string",
+          description:
+            "Docker apps built from Git: the repository folder sent to docker build, relative to its root. Default '.'. Giving it (or dockerfile / build_args) with repo_url and no image means a build.",
+        },
+        dockerfile: {
+          type: "string",
+          description: "Docker apps built from Git: the Dockerfile, relative to build_context (as in Docker Compose). Default 'Dockerfile'.",
+        },
+        build_args: {
+          type: "array",
+          description:
+            "Docker apps built from Git: --build-arg values for the Dockerfile's ARG lines. They are stored in the image: no secrets (use env).",
+          items: {
+            type: "object",
+            properties: { key: { type: "string" }, value: { type: "string" } },
+            required: ["key", "value"],
+          },
         },
         container_port: {
           type: "integer",
@@ -157,11 +176,35 @@ export const TOOLS: Tool[] = [
     call: async (args) => {
       const name = requireString(args, "name");
       const image = optionalString(args, "image");
+      const recorded = recordedApp(name);
+      const repoUrl = optionalString(args, "repo_url");
+      const buildArgs = Array.isArray(args.build_args)
+        ? (args.build_args as { key: string; value: string }[]).filter(
+            (e) => typeof e?.key === "string" && typeof e?.value === "string",
+          )
+        : undefined;
+      const buildGiven =
+        optionalString(args, "build_context") !== undefined ||
+        optionalString(args, "dockerfile") !== undefined ||
+        buildArgs !== undefined;
       const runtime =
-        optionalString(args, "runtime") ?? (image ? "docker" : (appRuntime(name) ?? "node"));
-      const docker = runtime === "docker" && image
+        optionalString(args, "runtime") ??
+        (image || buildGiven ? "docker" : (recorded?.runtime ?? "node"));
+      // A build: no image, but build settings, or a repository for an app
+      // that is not a Docker app yet (a re-run without settings keeps the
+      // saved ones instead of resetting them to the defaults).
+      const build =
+        runtime === "docker" && !image && (buildGiven || (repoUrl && recorded?.runtime !== "docker"))
+          ? {
+              context: optionalString(args, "build_context") ?? ".",
+              dockerfile: optionalString(args, "dockerfile") ?? "Dockerfile",
+              args: buildArgs ?? [],
+            }
+          : null;
+      const docker = runtime === "docker" && (image || build)
         ? {
-            image,
+            image: image ?? "",
+            build,
             container_port: optionalNumber(args, "container_port") ?? 0,
             volumes: Array.isArray(args.volumes)
               ? (args.volumes as unknown[]).filter((v): v is string => typeof v === "string")
@@ -172,7 +215,14 @@ export const TOOLS: Tool[] = [
         : undefined;
       const body: CreateApp = {
         name,
-        source_dir: runtime === "docker" ? "" : `${APPS_BASE_DIR}/${name}`,
+        // A build's checkout is where a Node app's is; an image has none; a
+        // re-run on saved Docker settings keeps what panel.db recorded.
+        source_dir:
+          runtime !== "docker" || build
+            ? `${APPS_BASE_DIR}/${name}`
+            : image
+              ? ""
+              : (recorded?.source_dir ?? ""),
         subdomain: requireString(args, "subdomain"),
         port: requireNumber(args, "port"),
         runtime,

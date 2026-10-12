@@ -1,6 +1,6 @@
 # <img src="docs/logo.svg" alt="" width="52" align="top"> Bolt Panel
 
-**A free, self-hosted cPanel alternative for your own Ubuntu VPS.** Deploy Node.js apps from Git or any Docker image, run your domains, SSL, DNS and email with webmail, and manage databases and backups from one fast panel. Point Claude or any other MCP client at it and let an AI agent do the clicking.
+**A free, self-hosted cPanel alternative for your own Ubuntu VPS.** Deploy Node.js apps from Git, any Docker image, or your own Dockerfile, run your domains, SSL, DNS and email with webmail, and manage databases and backups from one fast panel. Point Claude or any other MCP client at it and let an AI agent do the clicking.
 
 [![License: AGPL-3.0](https://img.shields.io/github/license/Meliorate-agency/vps-panel)](LICENSE)
 ![Ubuntu 24.04](https://img.shields.io/badge/Ubuntu-24.04_LTS-E95420?logo=ubuntu&logoColor=white)
@@ -21,7 +21,7 @@
 
 ## Features
 
-- **Apps:** deploy Node.js apps from Git or a folder, or any public Docker image (Uptime Kuma, Gitea, Metabase...) with env, kept folders and memory/CPU limits. Start/stop/restart, update checks with automatic rollback, folders to group them.
+- **Apps:** deploy Node.js apps from Git or a folder, or any public Docker image (Uptime Kuma, Gitea, Metabase...), or build your own repository's Dockerfile in any language, with env, kept folders and memory/CPU limits. Start/stop/restart, update checks with automatic rollback, folders to group them.
 - **Domains and DNS:** nginx sites (reverse proxy to a port, static folder, redirects), authoritative DNS with PowerDNS, one-click DNSSEC.
 - **SSL:** in-process ACME (Let's Encrypt), automatic renewal.
 - **Mail:** virtual mailboxes with quotas, DKIM signing, forwarders and catch-alls, delivery tracking, Roundcube webmail where each person sets their own filters and Out of Office.
@@ -55,7 +55,7 @@
 | Price | Free, open source | Paid licence per account |
 | Built for | One owner running their own apps, mail and DNS | Hosting many separate customer accounts |
 | Stack | nginx, Rust agent, Next.js | Apache, PHP, Exim |
-| Deploying apps | Node.js from Git or any Docker image, one form | PHP first; Node via Passenger |
+| Deploying apps | Node.js from Git, any Docker image or your own Dockerfile, one form | PHP first; Node via Passenger |
 | AI agents | Built-in MCP server | Classic APIs |
 | Several servers | One view (My Networks) | One WHM per server |
 | PHP / WordPress | Not supported | Yes |

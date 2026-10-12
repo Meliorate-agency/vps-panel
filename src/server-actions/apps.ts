@@ -87,15 +87,17 @@ export async function checkAppUpdateAction(
   name: string,
 ): Promise<CheckUpdateResult> {
   await requireAdmin();
-  // A Docker app has no git checkout: "behind" means the registry has a
-  // newer image than the one it runs.
-  let runtime: string | undefined;
+  // A Docker app from a registry has no git checkout: "behind" means the
+  // registry has a newer image than the one it runs. One built from Git is
+  // checked like a Node app.
+  let fromRegistry = false;
   try {
-    runtime = (await agent.apps.get(name)).runtime;
+    const app = await agent.apps.get(name);
+    fromRegistry = app.runtime === "docker" && !app.docker_build;
   } catch (e: unknown) {
     return { ok: false, error: e instanceof Error ? e.message : String(e) };
   }
-  if (runtime === "docker") {
+  if (fromRegistry) {
     let image: DockerImageStatus;
     try {
       image = await agent.apps.imageStatus(name);
@@ -209,18 +211,23 @@ export async function deployAppAction(
 }
 
 /**
- * The Docker form (new app, or Settings on a Docker app's page). Steps:
- * pull, deploy, all. The env field is always on that form, so it replaces
- * the env file.
+ * The Docker form (new app, or Settings on a Docker app's page). From a
+ * registry (source=image): pull, deploy, all. Built from Git (source=git):
+ * pull, build, deploy, all. The env field is always on that form, so it
+ * replaces the env file.
  */
 async function deployDockerApp(fd: FormData): Promise<ActionResult<{ taskId: string }>> {
   const s = await requireAdmin();
+  const fromGit = fd.get("source") === "git";
+  const steps = fromGit ? (["pull", "build", "deploy", "all"] as const) : (["pull", "deploy", "all"] as const);
   const stepRaw = String(fd.get("step") ?? "deploy");
-  const step: CreateApp["step"] = (["pull", "deploy", "all"] as const).includes(stepRaw as never)
+  const step: CreateApp["step"] = (steps as readonly string[]).includes(stepRaw)
     ? (stepRaw as CreateApp["step"])
     : "deploy";
+  const name = String(fd.get("name") ?? "").trim();
+  const repoUrl = String(fd.get("repo_url") ?? "").trim();
   const docker: DockerSpec = {
-    image: String(fd.get("image") ?? "").trim(),
+    image: fromGit ? "" : String(fd.get("image") ?? "").trim(),
     container_port: Number(fd.get("container_port") ?? 0),
     volumes: String(fd.get("volumes") ?? "")
       .split(/\r?\n/)
@@ -228,10 +235,19 @@ async function deployDockerApp(fd: FormData): Promise<ActionResult<{ taskId: str
       .filter(Boolean),
     memory_mb: Number(fd.get("memory_mb") ?? 1024),
     cpus: Number(fd.get("cpus") ?? 1),
+    build: fromGit
+      ? {
+          context: String(fd.get("context") ?? "").trim() || ".",
+          dockerfile: String(fd.get("dockerfile") ?? "").trim() || "Dockerfile",
+          args: parseEnv(String(fd.get("build_args") ?? "")),
+        }
+      : null,
   };
   const req: CreateApp = {
-    name: String(fd.get("name") ?? "").trim(),
-    source_dir: "",
+    name,
+    // A build's checkout lives where a Node app's would.
+    source_dir: fromGit ? `/srv/apps/${name}` : "",
+    repo_url: fromGit && repoUrl ? repoUrl : undefined,
     port: Number(fd.get("port") ?? 0),
     subdomain: String(fd.get("subdomain") ?? "").trim().toLowerCase(),
     runtime: "docker",
@@ -242,8 +258,11 @@ async function deployDockerApp(fd: FormData): Promise<ActionResult<{ taskId: str
     step,
     docker,
   };
-  if (!docker.image) return { ok: false, error: "Enter an image, e.g. louislam/uptime-kuma:1" };
-  if (step !== "pull" && !(docker.container_port >= 1 && docker.container_port <= 65535)) {
+  if (!fromGit && !docker.image) return { ok: false, error: "Enter an image, e.g. louislam/uptime-kuma:1" };
+  if (fromGit && !repoUrl && (step === "pull" || step === "all")) {
+    return { ok: false, error: "Enter the repository URL" };
+  }
+  if ((step === "deploy" || step === "all") && !(docker.container_port >= 1 && docker.container_port <= 65535)) {
     return { ok: false, error: "Enter the port the app listens on inside the container" };
   }
   const persistsRow = step === "deploy" || step === "all";
@@ -269,7 +288,17 @@ async function deployDockerApp(fd: FormData): Promise<ActionResult<{ taskId: str
 export async function dockerImageInfoAction(image: string): Promise<ActionResult<DockerImageInfo>> {
   await requireAdmin();
   try {
-    return { ok: true, data: await agent.docker.imageInfo(image.trim()) };
+    return { ok: true, data: await agent.docker.imageInfo({ image: image.trim() }) };
+  } catch (e: unknown) {
+    return { ok: false, error: e instanceof Error ? e.message : String(e) };
+  }
+}
+
+/** What an app's last build from Git declares (port, folders). */
+export async function dockerBuildInfoAction(name: string): Promise<ActionResult<DockerImageInfo>> {
+  await requireAdmin();
+  try {
+    return { ok: true, data: await agent.docker.imageInfo({ app: name }) };
   } catch (e: unknown) {
     return { ok: false, error: e instanceof Error ? e.message : String(e) };
   }

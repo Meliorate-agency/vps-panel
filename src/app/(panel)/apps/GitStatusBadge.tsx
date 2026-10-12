@@ -24,6 +24,8 @@ type Props = {
   updateAction: (name: string) => Promise<UpdateResult>;
   /** Server action that runs this app's git fetch comparison again. */
   refreshAction: (name: string) => Promise<RefreshResult>;
+  /** A Docker app built from Git: an update runs docker build, not npm. */
+  docker?: boolean;
 };
 
 /** Desktop popover width, the same whatever it shows: a failed fetch's
@@ -77,6 +79,7 @@ export default function GitStatusBadge({
   isExternal,
   updateAction,
   refreshAction,
+  docker,
 }: Props) {
   const router = useRouter();
   const [open, setOpen] = useState(false);
@@ -423,18 +426,32 @@ export default function GitStatusBadge({
                 <li>
                   <span className={pageStyles.code}>git pull --ff-only</span>
                 </li>
-                <li>
-                  <span className={pageStyles.code}>npm ci</span> /{" "}
-                  <span className={pageStyles.code}>npm install</span>
-                </li>
-                <li>
-                  <span className={pageStyles.code}>npm run build</span> (if
-                  defined)
-                </li>
-                <li>
-                  <span className={pageStyles.code}>systemctl restart</span>{" "}
-                  vps-app-{appName}.service
-                </li>
+                {docker ? (
+                  <>
+                    <li>
+                      <span className={pageStyles.code}>docker build</span>
+                    </li>
+                    <li>
+                      restart on the new image (back to the previous one if it
+                      does not come up)
+                    </li>
+                  </>
+                ) : (
+                  <>
+                    <li>
+                      <span className={pageStyles.code}>npm ci</span> /{" "}
+                      <span className={pageStyles.code}>npm install</span>
+                    </li>
+                    <li>
+                      <span className={pageStyles.code}>npm run build</span> (if
+                      defined)
+                    </li>
+                    <li>
+                      <span className={pageStyles.code}>systemctl restart</span>{" "}
+                      vps-app-{appName}.service
+                    </li>
+                  </>
+                )}
               </ul>
             </div>
           )}
@@ -484,7 +501,9 @@ export default function GitStatusBadge({
                 title={
                   diverged
                     ? "Resolve diverged history manually first"
-                    : "Pull latest, reinstall, build, restart"
+                    : docker
+                      ? "Pull latest, docker build, restart on it"
+                      : "Pull latest, reinstall, build, restart"
                 }
               >
                 {pending ? (

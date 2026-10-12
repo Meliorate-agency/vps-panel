@@ -18,6 +18,7 @@ import {
   checkAppSourceStateAction,
   setAppDomainAction,
   dockerImageInfoAction,
+  dockerBuildInfoAction,
   refreshImageStatusAction,
 } from "@/server-actions/apps";
 import { freeSlotsFor, listRoutingSlots, slotUnavailableReason } from "@/lib/appSlots";
@@ -90,7 +91,8 @@ export default async function AppDetailPage({
   // (no panel-managed repo URL stored) and skip when there's no code on
   // disk — git would just error.
   let gitStatus: GitStatusResp | undefined;
-  if (!isExternal && !isDocker && !sourceMissing) {
+  // A Docker app built from Git has a checkout like a Node app.
+  if (!isExternal && (!isDocker || app.docker_build) && !sourceMissing) {
     gitStatus = await agent.apps.gitStatus(name).catch(() => undefined);
   }
 
@@ -263,13 +265,46 @@ export default async function AppDetailPage({
           />
         </div>
 
+        {app.docker_build && (
+          <div className={styles.section}>
+            <h2 className={styles.sectionTitle}>Updates</h2>
+            <UpdatesPanel
+              appName={name}
+              status={gitStatus}
+              sourceMissing={sourceMissing}
+              updateAction={updateAppAction}
+              docker
+            />
+          </div>
+        )}
+
+        {app.docker_build && (
+          <div className={styles.section}>
+            <h2 className={styles.sectionTitle}>Repository</h2>
+            <p className={styles.muted} style={{ marginBottom: 10 }}>
+              Where Rebuild (under Updates) pulls this app&apos;s code from before building it.
+            </p>
+            <RepoUrlForm initialUrl={initialRepoUrl} action={updateRepoUrl} />
+          </div>
+        )}
+
         <div className={styles.section}>
-          <h2 className={styles.sectionTitle}>Image</h2>
+          <h2 className={styles.sectionTitle}>{app.docker_build ? "Running build" : "Image"}</h2>
           <DockerImagePanel
             appName={name}
             image={spec?.image ?? app.image ?? ""}
             currentId={info?.current_id ?? null}
             previousId={info?.previous_id ?? null}
+            build={
+              spec?.build
+                ? {
+                    context: spec.build.context,
+                    dockerfile: spec.build.dockerfile,
+                    currentCommit: info?.current_commit ?? null,
+                    previousCommit: info?.previous_commit ?? null,
+                  }
+                : null
+            }
             canManage={canManage}
             checkAction={refreshImageStatusAction}
             updateAction={updateAppAction}
@@ -289,9 +324,15 @@ export default async function AppDetailPage({
               slot={currentSlot}
               action={deployAppAction}
               imageInfo={dockerImageInfoAction}
+              buildInfo={dockerBuildInfoAction}
               docker={dockerStatus}
               initial={{
+                source: spec.build ? "git" : "image",
                 image: spec.image,
+                repo_url: initialRepoUrl,
+                context: spec.build?.context ?? ".",
+                dockerfile: spec.build?.dockerfile ?? "Dockerfile",
+                build_args: (spec.build?.args ?? []).map((kv) => `${kv.key}=${kv.value}`).join("\n"),
                 container_port: String(spec.container_port),
                 volumes: spec.volumes.join("\n"),
                 memory_mb: String(spec.memory_mb),
@@ -339,11 +380,12 @@ export default async function AppDetailPage({
             <h2 className={styles.sectionTitle}>Danger zone</h2>
             <DeleteAppButton
               appName={name}
-              sourceDir=""
+              sourceDir={app.source_dir}
               deleteAction={deleteAppAction}
               docker={{
-                image: spec?.image ?? app.image ?? "",
+                image: spec?.build ? `built from ${initialRepoUrl || app.source_dir}` : (spec?.image ?? app.image ?? ""),
                 volumes: (info?.volumes ?? []).map((v) => v.volume),
+                checkout: app.docker_build ? app.source_dir : null,
               }}
             />
           </div>

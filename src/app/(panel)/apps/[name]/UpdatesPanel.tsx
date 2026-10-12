@@ -20,6 +20,8 @@ type Props = {
   sourceMissing: boolean;
   /** Server action that triggers pull + reinstall + restart on the agent. */
   updateAction: (name: string) => Promise<UpdateResult>;
+  /** A Docker app built from Git: Rebuild runs docker build, not npm. */
+  docker?: boolean;
 };
 
 function Spinner() {
@@ -72,7 +74,7 @@ function classifyError(err: string): string {
  * out as a multi-line block instead of a single pill, so SHAs are
  * always visible without hovering.
  */
-export default function UpdatesPanel({ appName, status, sourceMissing, updateAction }: Props) {
+export default function UpdatesPanel({ appName, status, sourceMissing, updateAction, docker }: Props) {
   const router = useRouter();
   const [checking, startCheck] = useTransition();
   const [rebuilding, startRebuild] = useTransition();
@@ -132,9 +134,20 @@ export default function UpdatesPanel({ appName, status, sourceMissing, updateAct
   return (
     <div>
       <p className={pageStyles.muted} style={{ marginBottom: 10 }}>
-        Pull the latest commit from the configured repo, reinstall deps, run{" "}
-        <span className={pageStyles.code}>npm run build</span> if defined, then
-        restart the systemd unit. Same flow as the clickable badge on{" "}
+        {docker ? (
+          <>
+            Pull the latest commit from the configured repo, run{" "}
+            <span className={pageStyles.code}>docker build</span>, then restart on the new
+            image; one that does not come up is rolled back to the previous build.
+          </>
+        ) : (
+          <>
+            Pull the latest commit from the configured repo, reinstall deps, run{" "}
+            <span className={pageStyles.code}>npm run build</span> if defined, then
+            restart the systemd unit.
+          </>
+        )}{" "}
+        Same flow as the clickable badge on{" "}
         <a href="/apps" className={pageStyles.code}>/apps</a>.
       </p>
 
@@ -241,7 +254,9 @@ export default function UpdatesPanel({ appName, status, sourceMissing, updateAct
               ? diverged
                 ? "Resolve diverged history on the server first"
                 : "Configure a repo URL first"
-              : "Pull, reinstall, build, restart"
+              : docker
+                ? "Pull, docker build, restart on the new image"
+                : "Pull, reinstall, build, restart"
           }
         >
           {rebuilding ? (

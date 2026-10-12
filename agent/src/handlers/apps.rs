@@ -78,7 +78,7 @@ pub struct CreateApp {
     pub docker: Option<docker_apps::DockerSpec>,
 }
 
-#[derive(Deserialize, Serialize, Clone)]
+#[derive(Deserialize, Serialize, Clone, Debug, PartialEq)]
 pub struct EnvKv {
     pub key: String,
     pub value: String,
@@ -106,8 +106,11 @@ pub struct AppRow {
     pub source_dir_state: String,
     /// "node" | "docker".
     pub runtime: String,
-    /// Docker apps: the image reference they run, as entered.
+    /// Docker apps from a registry: the image reference they run, as entered.
     pub image: Option<String>,
+    /// A Docker app built from the Dockerfile in its Git checkout
+    /// (/srv/apps/<name>) instead of pulled from a registry.
+    pub docker_build: bool,
 }
 
 const APPS_BASE_DIR: &str = "/srv/apps";
@@ -243,7 +246,8 @@ pub async fn list(State(state): State<AppState>) -> AgentResult<Json<Vec<AppRow>
             seen_source_dirs.insert(source_dir.clone());
         }
         let docker = docker_apps::read_config(&name).await;
-        let source_dir_state = source_dir_state_for(&source_dir, docker.is_some()).await;
+        let (runtime, image, docker_build) = docker_fields(docker.as_ref());
+        let source_dir_state = source_dir_state_for(&source_dir, image.is_some()).await;
         rows.push(AppRow {
             name,
             subdomain,
@@ -253,8 +257,9 @@ pub async fn list(State(state): State<AppState>) -> AgentResult<Json<Vec<AppRow>
             sub,
             kind: "panel".into(),
             source_dir_state,
-            runtime: runtime_label(docker.is_some()),
-            image: docker.map(|d| d.image),
+            runtime,
+            image,
+            docker_build,
         });
     }
 
@@ -295,6 +300,7 @@ pub async fn list(State(state): State<AppState>) -> AgentResult<Json<Vec<AppRow>
                 source_dir_state,
                 runtime: runtime_label(false),
                 image: None,
+                docker_build: false,
             });
         }
     }
@@ -307,9 +313,19 @@ fn runtime_label(docker: bool) -> String {
     if docker { "docker" } else { "node" }.to_string()
 }
 
-/// A Docker app keeps its data in named volumes and has no source folder.
-async fn source_dir_state_for(source_dir: &str, docker: bool) -> String {
-    if docker {
+/// (runtime, registry image, built from Git) for an app's row.
+fn docker_fields(docker: Option<&docker_apps::DockerSpec>) -> (String, Option<String>, bool) {
+    match docker {
+        None => (runtime_label(false), None, false),
+        Some(d) if d.build.is_some() => (runtime_label(true), None, true),
+        Some(d) => (runtime_label(true), Some(d.image.clone()), false),
+    }
+}
+
+/// A Docker app from a registry keeps its data in named volumes and has no
+/// source folder. One built from Git has its checkout like a Node app.
+async fn source_dir_state_for(source_dir: &str, image_app: bool) -> String {
+    if image_app {
         "none".to_string()
     } else if source_dir.is_empty() {
         "missing".to_string()
@@ -485,7 +501,8 @@ pub async fn get(
         let active = field(&out.stdout, "ActiveState=").unwrap_or_default();
         let sub = field(&out.stdout, "SubState=").unwrap_or_default();
         let docker = docker_apps::read_config(&name).await;
-        let source_dir_state = source_dir_state_for(&source_dir, docker.is_some()).await;
+        let (runtime, image, docker_build) = docker_fields(docker.as_ref());
+        let source_dir_state = source_dir_state_for(&source_dir, image.is_some()).await;
         return Ok(Json(AppRow {
             name,
             subdomain,
@@ -495,8 +512,9 @@ pub async fn get(
             sub,
             kind: "panel".into(),
             source_dir_state,
-            runtime: runtime_label(docker.is_some()),
-            image: docker.map(|d| d.image),
+            runtime,
+            image,
+            docker_build,
         }));
     }
 
@@ -520,6 +538,7 @@ pub async fn get(
             source_dir_state,
             runtime: runtime_label(false),
             image: None,
+            docker_build: false,
         }));
     }
 
@@ -568,6 +587,9 @@ pub async fn create(
             Some(spec) => {
                 let spec = docker_apps::normalize_spec(spec);
                 docker_apps::validate_spec(&spec)?;
+                if matches!(req.step.as_deref().unwrap_or("all"), "deploy" | "all") {
+                    docker_apps::require_port(&spec)?;
+                }
                 req.docker = Some(spec);
             }
             None if docker_apps::is_docker_app(&req.name) => {}
@@ -642,7 +664,9 @@ async fn run_deploy(
     task: &crate::ipc::tasks::TaskHandle,
 ) -> AgentResult<()> {
     if req.runtime.as_deref() == Some("docker") {
-        return docker_apps::run_deploy(cfg, acme_email, req, task).await;
+        // Boxed: the Docker deploy's future is large, and inlined into this
+        // one it overflowed a 2 MiB thread stack in debug builds.
+        return Box::pin(docker_apps::run_deploy(cfg, acme_email, req, task)).await;
     }
     let unit_name = format!("{VPS_APP_PREFIX}{}.service", req.name);
     let unit_path = PathBuf::from(format!("/etc/systemd/system/{unit_name}"));
@@ -671,86 +695,7 @@ async fn run_deploy(
 
     // Stage 1: PULL — git clone or pull, then chown to apps user.
     if do_pull {
-        if let Some(repo_url) = req.repo_url.as_deref() {
-            let repo_url = repo_url.trim();
-            if !is_safe_git_url(repo_url) {
-                return Err(AgentError::Invalid(format!(
-                    "refusing repo URL {repo_url:?} - must be https://… or git@…:…"
-                )));
-            }
-            // Friendly check for the common mistake: writing the SSH config
-            // Host alias as the *user* (`<alias>@github.com:…`) instead of
-            // as the *host* (`git@<alias>:…`). github/gitlab/bitbucket all
-            // require the SSH user to be "git" — anything else fails with
-            // a confusing "Permission denied (publickey)" because the
-            // username never gets to the public-key auth phase.
-            if let Some(misuse_hint) = misused_alias_hint(repo_url) {
-                return Err(AgentError::Invalid(misuse_hint));
-            }
-            let src = PathBuf::from(&req.source_dir);
-            let is_existing_clone = src.join(".git").is_dir();
-            // Root fetches into the app's mirror; the checkout is only ever
-            // touched by its owner (the apps user for a new clone). See
-            // app_git.rs.
-            let owner = if is_existing_clone {
-                normalize_checkout_owner(cfg, &req.source_dir).await;
-                app_git::owner_of(&src)?
-            } else {
-                app_git::owner_for_uid(cfg.apps_uid)?
-            };
-            let mirror = app_git::update_mirror(&req.name, repo_url, owner.as_ref().map(|o| o.gid), Some(task))
-                .await?;
-            if is_existing_clone {
-                app_git::point_origin_at_mirror(owner.as_ref(), &req.source_dir, &mirror).await?;
-                task.log(format!(
-                    "pulling latest from {repo_url} into {}",
-                    src.display()
-                ));
-                app_git::owner_git_logged(
-                    owner.as_ref(),
-                    Some(&req.source_dir),
-                    Some(&mirror),
-                    &["pull", "--ff-only"],
-                    task,
-                )
-                .await?;
-            } else {
-                if src.exists() {
-                    let mut rd = tokio::fs::read_dir(&src).await.map_err(AgentError::Io)?;
-                    if rd.next_entry().await.map_err(AgentError::Io)?.is_some() {
-                        return Err(AgentError::Conflict(format!(
-                            "source_dir {} is non-empty and not a git checkout - refusing to clone over it",
-                            src.display()
-                        )));
-                    }
-                } else {
-                    tokio::fs::create_dir_all(&src).await.map_err(AgentError::Io)?;
-                }
-                // The owner clones into it, so it must own the empty folder.
-                if cfg.apps_uid != 0 {
-                    fs_atomic::chown_blocking(&src, cfg.apps_uid, cfg.apps_gid)?;
-                }
-                app_git::trust_mirror(owner.as_ref(), &mirror).await?;
-                task.log(format!("cloning {repo_url} into {}", src.display()));
-                app_git::owner_git_logged(
-                    owner.as_ref(),
-                    None,
-                    Some(&mirror),
-                    &["clone", "--no-hardlinks", &mirror, &req.source_dir],
-                    task,
-                )
-                .await?;
-            }
-            if cfg.apps_uid != 0 {
-                let _ = exec::run("chown", ["-R", "apps:apps", &req.source_dir]).await;
-            }
-        } else if step == "pull" {
-            return Err(AgentError::Invalid(
-                "pull step requires a repo_url".into(),
-            ));
-        } else {
-            task.log("no repo_url - skipping git pull step");
-        }
+        pull_source(cfg, &req.name, &req.source_dir, req.repo_url.as_deref(), step == "pull", task).await?;
     }
 
     // Install and build replace the node_modules and build output the running
@@ -1080,6 +1025,102 @@ pub(crate) async fn publish_vhost(
             nginx_handler::test_config().await?;
             exec::run("systemctl", ["reload", "nginx"]).await?;
         }
+    }
+
+    Ok(())
+}
+
+/// The deploy's pull stage: clone `repo_url` into an empty `source_dir`, or
+/// pull an existing checkout, through the app's mirror (app_git.rs), then hand
+/// the tree to the apps user. No URL is an error only when `required` (a
+/// Pull on its own); otherwise the stage is skipped.
+pub(crate) async fn pull_source(
+    cfg: &crate::config::Config,
+    name: &str,
+    source_dir: &str,
+    repo_url: Option<&str>,
+    required: bool,
+    task: &crate::ipc::tasks::TaskHandle,
+) -> AgentResult<()> {
+    if let Some(repo_url) = repo_url {
+        let repo_url = repo_url.trim();
+        if !is_safe_git_url(repo_url) {
+            return Err(AgentError::Invalid(format!(
+                "refusing repo URL {repo_url:?} - must be https://… or git@…:…"
+            )));
+        }
+        // Friendly check for the common mistake: writing the SSH config
+        // Host alias as the *user* (`<alias>@github.com:…`) instead of
+        // as the *host* (`git@<alias>:…`). github/gitlab/bitbucket all
+        // require the SSH user to be "git" — anything else fails with
+        // a confusing "Permission denied (publickey)" because the
+        // username never gets to the public-key auth phase.
+        if let Some(misuse_hint) = misused_alias_hint(repo_url) {
+            return Err(AgentError::Invalid(misuse_hint));
+        }
+        let src = PathBuf::from(source_dir);
+        let is_existing_clone = src.join(".git").is_dir();
+        // Root fetches into the app's mirror; the checkout is only ever
+        // touched by its owner (the apps user for a new clone). See
+        // app_git.rs.
+        let owner = if is_existing_clone {
+            normalize_checkout_owner(cfg, source_dir).await;
+            app_git::owner_of(&src)?
+        } else {
+            app_git::owner_for_uid(cfg.apps_uid)?
+        };
+        let mirror = app_git::update_mirror(name, repo_url, owner.as_ref().map(|o| o.gid), Some(task))
+            .await?;
+        if is_existing_clone {
+            app_git::point_origin_at_mirror(owner.as_ref(), source_dir, &mirror).await?;
+            task.log(format!(
+                "pulling latest from {repo_url} into {}",
+                src.display()
+            ));
+            app_git::owner_git_logged(
+                owner.as_ref(),
+                Some(source_dir),
+                Some(&mirror),
+                &["pull", "--ff-only"],
+                task,
+            )
+            .await?;
+        } else {
+            if src.exists() {
+                let mut rd = tokio::fs::read_dir(&src).await.map_err(AgentError::Io)?;
+                if rd.next_entry().await.map_err(AgentError::Io)?.is_some() {
+                    return Err(AgentError::Conflict(format!(
+                        "source_dir {} is non-empty and not a git checkout - refusing to clone over it",
+                        src.display()
+                    )));
+                }
+            } else {
+                tokio::fs::create_dir_all(&src).await.map_err(AgentError::Io)?;
+            }
+            // The owner clones into it, so it must own the empty folder.
+            if cfg.apps_uid != 0 {
+                fs_atomic::chown_blocking(&src, cfg.apps_uid, cfg.apps_gid)?;
+            }
+            app_git::trust_mirror(owner.as_ref(), &mirror).await?;
+            task.log(format!("cloning {repo_url} into {}", src.display()));
+            app_git::owner_git_logged(
+                owner.as_ref(),
+                None,
+                Some(&mirror),
+                &["clone", "--no-hardlinks", &mirror, source_dir],
+                task,
+            )
+            .await?;
+        }
+        if cfg.apps_uid != 0 {
+            let _ = exec::run("chown", ["-R", "apps:apps", source_dir]).await;
+        }
+    } else if required {
+        return Err(AgentError::Invalid(
+            "pull step requires a repo_url".into(),
+        ));
+    } else {
+        task.log("no repo_url - skipping git pull step");
     }
 
     Ok(())
@@ -1551,10 +1592,13 @@ pub async fn delete(
     }
     let _ = exec::run("systemctl", ["daemon-reload"]).await;
 
-    // A Docker app has no checkout: `wipe` means its data volumes.
+    // `wipe` also means a Docker app's data volumes. One from a registry has
+    // no checkout; one built from Git goes on like a Node app (mirror, folder).
     if let Some(spec) = &docker {
         docker_apps::remove_app(&name, spec, q.wipe).await;
-        return Ok(Json(OkResponse::default()));
+        if spec.build.is_none() {
+            return Ok(Json(OkResponse::default()));
+        }
     }
 
     // The fetch cache is no use without the app.
@@ -1631,11 +1675,13 @@ pub async fn update(
     let has_slot = port != 0;
     if docker_apps::is_docker_app(&name) {
         refuse_if_app_task_running(&state, &name)?;
+        let repo_url = stored_repo_url(&state, &name);
         let task = state.tasks.create(&format!("apps.update:{name}"));
         let task_id = task.id.clone();
+        let cfg = state.config.clone();
         tokio::spawn(async move {
             task.start();
-            match docker_apps::run_update(&name, has_slot.then_some(port), &task).await {
+            match Box::pin(docker_apps::run_update(&cfg, &name, has_slot.then_some(port), repo_url.as_deref(), &task)).await {
                 Ok(()) => {
                     task.log("done");
                     task.finish(true);
@@ -1733,36 +1779,7 @@ async fn run_app_update(
 
     // 1) Fetch into the app's mirror as root, pull --ff-only in the checkout
     //    as its owner (app_git.rs).
-    normalize_checkout_owner(cfg, source_dir).await;
-    let owner = app_git::owner_of(std::path::Path::new(source_dir))?;
-    let url = match repo_url {
-        Some(u) => Some(u.to_string()),
-        None => legacy_fetch_url(name, owner.as_ref(), source_dir).await,
-    };
-    task.log(format!("pulling latest in {source_dir}"));
-    match url {
-        Some(url) => {
-            let mirror =
-                app_git::update_mirror(name, &url, owner.as_ref().map(|o| o.gid), Some(task)).await?;
-            app_git::point_origin_at_mirror(owner.as_ref(), source_dir, &mirror).await?;
-            app_git::owner_git_logged(
-                owner.as_ref(),
-                Some(source_dir),
-                Some(&mirror),
-                &["pull", "--ff-only"],
-                task,
-            )
-            .await?;
-        }
-        None => {
-            task.log("no Repository URL: pulling from the checkout's own origin as its owner");
-            app_git::owner_git_logged(owner.as_ref(), Some(source_dir), None, &["pull", "--ff-only"], task)
-                .await?;
-        }
-    }
-    if cfg.apps_uid != 0 {
-        let _ = exec::run("chown", ["-R", "apps:apps", source_dir]).await;
-    }
+    pull_checkout(cfg, name, source_dir, repo_url, task).await?;
 
     // 2+3) Install and build replace the node_modules and build output the
     //      running app starts from. Save them first: a failed install or build
@@ -1824,6 +1841,49 @@ async fn run_app_update(
             )))
         }
     }
+}
+
+/// Update's pull: fetch into the app's mirror as root, then `pull --ff-only`
+/// in the existing checkout as its owner. `repo_url` None = the URL the
+/// mirror was made from, else the checkout's own origin.
+pub(crate) async fn pull_checkout(
+    cfg: &crate::config::Config,
+    name: &str,
+    source_dir: &str,
+    repo_url: Option<&str>,
+    task: &crate::ipc::tasks::TaskHandle,
+) -> AgentResult<()> {
+    normalize_checkout_owner(cfg, source_dir).await;
+    let owner = app_git::owner_of(std::path::Path::new(source_dir))?;
+    let url = match repo_url {
+        Some(u) => Some(u.to_string()),
+        None => legacy_fetch_url(name, owner.as_ref(), source_dir).await,
+    };
+    task.log(format!("pulling latest in {source_dir}"));
+    match url {
+        Some(url) => {
+            let mirror =
+                app_git::update_mirror(name, &url, owner.as_ref().map(|o| o.gid), Some(task)).await?;
+            app_git::point_origin_at_mirror(owner.as_ref(), source_dir, &mirror).await?;
+            app_git::owner_git_logged(
+                owner.as_ref(),
+                Some(source_dir),
+                Some(&mirror),
+                &["pull", "--ff-only"],
+                task,
+            )
+            .await?;
+        }
+        None => {
+            task.log("no Repository URL: pulling from the checkout's own origin as its owner");
+            app_git::owner_git_logged(owner.as_ref(), Some(source_dir), None, &["pull", "--ff-only"], task)
+                .await?;
+        }
+    }
+    if cfg.apps_uid != 0 {
+        let _ = exec::run("chown", ["-R", "apps:apps", source_dir]).await;
+    }
+    Ok(())
 }
 
 /// npm ci (preferred when package-lock.json exists) or npm install, then
@@ -2525,7 +2585,7 @@ async fn dir_owner(_path: &std::path::Path) -> Option<(u32, u32)> {
     None
 }
 
-fn is_valid_env_key(key: &str) -> bool {
+pub(crate) fn is_valid_env_key(key: &str) -> bool {
     let mut chars = key.chars();
     matches!(chars.next(), Some(c) if c.is_ascii_alphabetic() || c == '_')
         && chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
@@ -2620,7 +2680,7 @@ async fn dns_resolves_locally(host: &str) -> AgentResult<()> {
 }
 
 /// The Repository URL saved on the app page, if any.
-fn stored_repo_url(state: &AppState, name: &str) -> Option<String> {
+pub(crate) fn stored_repo_url(state: &AppState, name: &str) -> Option<String> {
     state
         .panel_db
         .with(|conn| {

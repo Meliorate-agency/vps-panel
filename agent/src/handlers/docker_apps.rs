@@ -10,6 +10,9 @@
 //! - `vps-app-<name>.service`: rendered from the two plus the slot port.
 //! - image tags `vps-app-<name>:current` (what the unit runs) and `:previous`
 //!   (what Update rolls back to), container `vps-app-<name>`.
+//! - built from Git (DockerSpec.build): the checkout `/srv/apps/<name>` (the
+//!   same mirror, deploy keys and apps-owned checkout as a Node app) and the
+//!   tag `vps-app-<name>:build` (the last build, labelled with its commit).
 //! - named volumes `vps-app-<name>-<path>` (label vps-panel.app=<name>) for the
 //!   folders kept across restarts and updates. Backups include them
 //!   (backups.rs: /var/lib/docker/volumes).
@@ -23,7 +26,8 @@
 use crate::error::{AgentError, AgentResult};
 use crate::exec;
 use crate::fs_atomic;
-use crate::handlers::apps::{self, CreateApp, Readiness, VPS_APP_PREFIX};
+use crate::handlers::apps::{self, CreateApp, EnvKv, Readiness, VPS_APP_PREFIX};
+use crate::handlers::app_git;
 use crate::handlers::quick_install::{DOCKER_LOG_MAX_FILE, DOCKER_LOG_MAX_SIZE};
 use crate::ipc::tasks::TaskHandle;
 use crate::validate::validate_name;
@@ -46,6 +50,12 @@ const PIDS_LIMIT: u32 = 4096;
 const START_WAIT_SECS: u64 = 90;
 /// `docker manifest inspect` against the registry.
 const REGISTRY_TIMEOUT_SECS: u64 = 10;
+const APPS_BASE_DIR: &str = "/srv/apps";
+/// A build that runs longer is stopped (the CLI is killed; the old image
+/// keeps running).
+const BUILD_TIMEOUT_SECS: u64 = 30 * 60;
+const MAX_BUILD_ARGS: usize = 50;
+const COMMIT_LABEL: &str = "vps-panel.commit";
 
 fn default_memory_mb() -> u32 {
     1024
@@ -55,10 +65,35 @@ fn default_cpus() -> f64 {
     1.0
 }
 
+fn default_context() -> String {
+    ".".into()
+}
+
+fn default_dockerfile() -> String {
+    "Dockerfile".into()
+}
+
+/// Build the image from the app's Git checkout instead of pulling one.
+#[derive(Deserialize, Serialize, Clone, Debug, PartialEq)]
+pub struct BuildSpec {
+    /// Folder of the repo sent to the build, relative to its root.
+    #[serde(default = "default_context")]
+    pub context: String,
+    /// Relative to `context`, as in Docker Compose.
+    #[serde(default = "default_dockerfile")]
+    pub dockerfile: String,
+    /// `--build-arg`s, for the Dockerfile's ARG lines. They end up in the
+    /// image's history: not for secrets.
+    #[serde(default)]
+    pub args: Vec<EnvKv>,
+}
+
 /// A Docker app's settings, saved as `<name>.docker.json`.
 #[derive(Deserialize, Serialize, Clone, Debug, PartialEq)]
 pub struct DockerSpec {
-    /// e.g. `louislam/uptime-kuma:1`, `ghcr.io/owner/app:1.4`.
+    /// e.g. `louislam/uptime-kuma:1`, `ghcr.io/owner/app:1.4`. Empty when
+    /// the image is built from Git (`build`).
+    #[serde(default)]
     pub image: String,
     /// The port the app listens on inside the container.
     pub container_port: u16,
@@ -71,6 +106,9 @@ pub struct DockerSpec {
     /// 0 = no limit.
     #[serde(default = "default_cpus")]
     pub cpus: f64,
+    /// Set: built from the Dockerfile in /srv/apps/<name> (a Git checkout).
+    #[serde(default)]
+    pub build: Option<BuildSpec>,
 }
 
 pub fn config_path(name: &str) -> PathBuf {
@@ -98,6 +136,15 @@ fn previous_tag(name: &str) -> String {
     format!("{VPS_APP_PREFIX}{name}:previous")
 }
 
+fn build_tag(name: &str) -> String {
+    format!("{VPS_APP_PREFIX}{name}:build")
+}
+
+/// The checkout a Git-built app's image comes from.
+pub fn source_dir(name: &str) -> String {
+    format!("{APPS_BASE_DIR}/{name}")
+}
+
 fn unit_name(name: &str) -> String {
     format!("{VPS_APP_PREFIX}{name}.service")
 }
@@ -120,9 +167,29 @@ pub fn volume_name(app: &str, path: &str) -> String {
 }
 
 /// Trimmed image, folders without a trailing slash, blank and repeated
-/// folders dropped.
+/// folders dropped; build paths without `./` or a trailing slash, an empty
+/// context or Dockerfile back to the default, blank build args dropped.
 pub fn normalize_spec(mut spec: DockerSpec) -> DockerSpec {
     spec.image = spec.image.trim().to_string();
+    if let Some(b) = spec.build.as_mut() {
+        let tidy = |p: &str| {
+            let p = p.trim().trim_end_matches('/');
+            let p = p.strip_prefix("./").unwrap_or(p);
+            p.to_string()
+        };
+        b.context = tidy(&b.context);
+        if b.context.is_empty() {
+            b.context = default_context();
+        }
+        b.dockerfile = tidy(&b.dockerfile);
+        if b.dockerfile.is_empty() {
+            b.dockerfile = default_dockerfile();
+        }
+        b.args.retain(|kv| !kv.key.trim().is_empty());
+        for kv in b.args.iter_mut() {
+            kv.key = kv.key.trim().to_string();
+        }
+    }
     let mut volumes: Vec<String> = Vec::new();
     for v in &spec.volumes {
         let v = v.trim();
@@ -135,10 +202,19 @@ pub fn normalize_spec(mut spec: DockerSpec) -> DockerSpec {
     spec
 }
 
+/// Everything but the container port, which Pull and Build may not know yet
+/// (see require_port).
 pub fn validate_spec(spec: &DockerSpec) -> AgentResult<()> {
-    validate_image(&spec.image)?;
-    if spec.container_port == 0 {
-        return Err(AgentError::Invalid("container port must be 1-65535".into()));
+    match &spec.build {
+        Some(build) => {
+            if !spec.image.is_empty() {
+                return Err(AgentError::Invalid(
+                    "give an image or a build from Git, not both".into(),
+                ));
+            }
+            validate_build(build)?;
+        }
+        None => validate_image(&spec.image)?,
     }
     if spec.memory_mb != 0 && !(64..=1_048_576).contains(&spec.memory_mb) {
         return Err(AgentError::Invalid(
@@ -166,6 +242,58 @@ pub fn validate_spec(spec: &DockerSpec) -> AgentResult<()> {
                 "folder {v:?} maps to the same volume name as another folder in the list"
             )));
         }
+    }
+    Ok(())
+}
+
+/// Deploying needs the port the app listens on inside the container.
+pub fn require_port(spec: &DockerSpec) -> AgentResult<()> {
+    if spec.container_port == 0 {
+        return Err(AgentError::Invalid(
+            "enter the port the app listens on inside the container".into(),
+        ));
+    }
+    Ok(())
+}
+
+fn validate_build(build: &BuildSpec) -> AgentResult<()> {
+    if build.context != "." {
+        validate_repo_path(&build.context, "build folder")?;
+    }
+    validate_repo_path(&build.dockerfile, "Dockerfile")?;
+    if build.args.len() > MAX_BUILD_ARGS {
+        return Err(AgentError::Invalid(format!("at most {MAX_BUILD_ARGS} build variables")));
+    }
+    for kv in &build.args {
+        if !apps::is_valid_env_key(&kv.key) {
+            return Err(AgentError::Invalid(format!(
+                "invalid build variable {:?}: must match [A-Za-z_][A-Za-z0-9_]*",
+                kv.key
+            )));
+        }
+        if kv.value.contains('\0') {
+            return Err(AgentError::Invalid(format!("build variable {} has a NUL byte", kv.key)));
+        }
+    }
+    Ok(())
+}
+
+/// A path inside the repo: relative, plain characters, no `.`/`..`
+/// segments, nothing that could start with `-`. Where it really leads is
+/// checked again on disk before a build (resolve_build_paths).
+fn validate_repo_path(p: &str, what: &str) -> AgentResult<()> {
+    let bad = |why: &str| AgentError::Invalid(format!("{what} {p:?} {why}"));
+    if p.is_empty() || p.len() > 200 {
+        return Err(bad("must be 1-200 characters"));
+    }
+    if p.starts_with('/') || p.starts_with('-') {
+        return Err(bad("must be a path inside the repository, like apps/web"));
+    }
+    if !p.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '/' | '.' | '_' | '-')) {
+        return Err(bad("may only use letters, digits and / . _ -"));
+    }
+    if p.split('/').any(|s| s.is_empty() || s == "." || s == "..") {
+        return Err(bad("must not contain empty, . or .. segments"));
     }
     Ok(())
 }
@@ -473,7 +601,8 @@ pub async fn verify_up(unit: &str, port: u16) -> Result<(), String> {
     apps::verify_unit_up(unit, port, Duration::from_secs(START_WAIT_SECS), Readiness::HttpAnswer).await
 }
 
-/// POST /apps for runtime "docker". Steps: pull, deploy, all (pull + deploy).
+/// POST /apps for runtime "docker". From a registry: pull, deploy, all (pull +
+/// deploy). Built from Git: pull (the checkout), build, deploy, all.
 pub async fn run_deploy(
     cfg: &crate::config::Config,
     acme_email: &str,
@@ -488,29 +617,46 @@ pub async fn run_deploy(
     };
     validate_spec(&spec)?;
     docker_bin()?;
-    match req.step.as_deref().unwrap_or("all") {
-        "pull" => pull_and_describe(&spec.image, task).await,
-        "deploy" => deploy(cfg, acme_email, req, &spec, task).await,
-        "all" => {
-            pull_and_describe(&spec.image, task).await?;
-            deploy(cfg, acme_email, req, &spec, task).await
-        }
-        "install" | "build" => Err(AgentError::Invalid(
-            "a Docker app has no install or build step: Pull, then Deploy".into(),
+    let name = req.name.as_str();
+    let src = source_dir(name);
+    let repo_url = req.repo_url.as_deref();
+    // Each stage is boxed: together in one state machine they overflowed a
+    // 2 MiB thread stack in debug builds.
+    match (&spec.build, req.step.as_deref().unwrap_or("all")) {
+        (_, "install") => Err(AgentError::Invalid("a Docker app has no install step".into())),
+        (None, "pull") => pull_and_describe(&spec.image, task).await,
+        (None, "build") => Err(AgentError::Invalid(
+            "an image from a registry is not built here: Pull, then Deploy".into(),
         )),
-        other => Err(AgentError::Invalid(format!(
-            "unknown step '{other}' - expected pull / deploy / all"
+        (None, "deploy") => Box::pin(deploy(cfg, acme_email, req, &spec, &spec.image, task)).await,
+        (None, "all") => {
+            pull_and_describe(&spec.image, task).await?;
+            Box::pin(deploy(cfg, acme_email, req, &spec, &spec.image, task)).await
+        }
+        (Some(_), "pull") => Box::pin(apps::pull_source(cfg, name, &src, repo_url, true, task)).await,
+        (Some(build), "build") => Box::pin(build_image(name, build, task)).await.map(|_| ()),
+        (Some(_), "deploy") => Box::pin(deploy(cfg, acme_email, req, &spec, &build_tag(name), task)).await,
+        (Some(build), "all") => {
+            Box::pin(apps::pull_source(cfg, name, &src, repo_url, false, task)).await?;
+            Box::pin(build_image(name, build, task)).await?;
+            Box::pin(deploy(cfg, acme_email, req, &spec, &build_tag(name), task)).await
+        }
+        (_, other) => Err(AgentError::Invalid(format!(
+            "unknown step '{other}' - expected pull / build / deploy / all"
         ))),
     }
 }
 
+/// Start the app on `source_ref` (a registry image, or the app's `:build`).
 async fn deploy(
     cfg: &crate::config::Config,
     acme_email: &str,
     req: &CreateApp,
     spec: &DockerSpec,
+    source_ref: &str,
     task: &TaskHandle,
 ) -> AgentResult<()> {
+    require_port(spec)?;
     let name = req.name.as_str();
     let unit = unit_name(name);
     let unit_path = PathBuf::from(format!("/etc/systemd/system/{unit}"));
@@ -522,13 +668,17 @@ async fn deploy(
             req.port
         )));
     }
-    if image_id(&spec.image).await.is_none() {
-        task.log(format!("{} is not on this server yet", spec.image));
-        pull(&spec.image, task).await?;
+    if spec.build.is_none() && image_id(source_ref).await.is_none() {
+        task.log(format!("{source_ref} is not on this server yet"));
+        pull(source_ref, task).await?;
     }
-    let new_id = image_id(&spec.image)
-        .await
-        .ok_or_else(|| AgentError::Invalid(format!("{} is not on this server after the pull", spec.image)))?;
+    let new_id = image_id(source_ref).await.ok_or_else(|| {
+        AgentError::Invalid(if spec.build.is_some() {
+            "there is no build of this app yet: Build first".to_string()
+        } else {
+            format!("{source_ref} is not on this server after the pull")
+        })
+    })?;
 
     apps::write_deploy_env(cfg, req.env.as_deref(), &env_path, task).await?;
     task.log(format!("writing {}", config_path(name).display()));
@@ -550,7 +700,7 @@ async fn deploy(
             tag(&current_tag(name), &previous_tag(name), task).await?;
         }
     }
-    tag(&spec.image, &current_tag(name), task).await?;
+    tag(source_ref, &current_tag(name), task).await?;
 
     let unit_existed = unit_path.exists();
     task.log(format!("writing systemd unit {}", unit_path.display()));
@@ -581,42 +731,207 @@ async fn deploy(
              fix the settings and Deploy again."
         )));
     }
-    apps::publish_vhost(cfg, acme_email, req, &unit, &unit_path, unit_existed, task).await
+    Box::pin(apps::publish_vhost(cfg, acme_email, req, &unit, &unit_path, unit_existed, task)).await
 }
 
-/// POST /apps/:name/update for a Docker app: pull the image again and move the
-/// app onto it if it changed. A new image that does not come up is rolled
-/// back to the one that ran before.
-pub async fn run_update(name: &str, slot_port: Option<u16>, task: &TaskHandle) -> AgentResult<()> {
+/// The build folder and Dockerfile as real paths, both inside the checkout.
+/// Checked on disk because the repo decides what they are: a symlinked
+/// Dockerfile pointing at /etc/shadow would otherwise be read by the docker
+/// CLI, which runs as root.
+fn resolve_build_paths(src: &str, build: &BuildSpec) -> AgentResult<(PathBuf, PathBuf)> {
+    let root = std::fs::canonicalize(src)
+        .map_err(|_| AgentError::Invalid(format!("{src} does not exist yet: Pull first")))?;
+    let inside = |p: &std::path::Path| p.starts_with(&root);
+    let context = std::fs::canonicalize(root.join(&build.context))
+        .ok()
+        .filter(|c| inside(c) && c.is_dir())
+        .ok_or_else(|| {
+            AgentError::Invalid(format!("build folder {:?} is not a folder in the repository", build.context))
+        })?;
+    let dockerfile = std::fs::canonicalize(context.join(&build.dockerfile))
+        .ok()
+        .filter(|d| inside(d) && d.is_file())
+        .ok_or_else(|| {
+            AgentError::Invalid(format!(
+                "no Dockerfile at {:?} in build folder {:?}",
+                build.dockerfile, build.context
+            ))
+        })?;
+    Ok((context, dockerfile))
+}
+
+/// The commit a checkout is on, read as its owner.
+async fn head_commit(src: &str) -> Option<String> {
+    let owner = app_git::owner_of(std::path::Path::new(src)).ok()?;
+    app_git::owner_git(owner.as_ref(), Some(src), None, &["rev-parse", "HEAD"])
+        .await
+        .ok()
+        .map(|o| o.stdout.trim().to_string())
+        .filter(|c| c.len() >= 7)
+}
+
+fn short_commit(c: &str) -> &str {
+    &c[..c.len().min(7)]
+}
+
+/// One label of a local image, or None.
+async fn image_label(reference: &str, label: &str) -> Option<String> {
+    let format = format!("{{{{index .Config.Labels \"{label}\"}}}}");
+    exec::run("docker", ["image", "inspect", "--format", &format, reference])
+        .await
+        .ok()
+        .map(|o| o.stdout.trim().to_string())
+        .filter(|v| !v.is_empty() && v != "<no value>")
+}
+
+/// BuildKit (`docker buildx`) when it is there or can be installed; the
+/// legacy builder otherwise, which cannot run `RUN --mount` lines.
+async fn ensure_buildkit(task: &TaskHandle) -> bool {
+    if exec::run("docker", ["buildx", "version"]).await.is_ok() {
+        return true;
+    }
+    task.log("Docker's BuildKit builder (docker-buildx) is missing - installing it");
+    let installed = exec::run_streaming_envs(
+        "apt-get",
+        ["install", "-y", "docker-buildx"],
+        [("DEBIAN_FRONTEND", "noninteractive")],
+        |l| task.log(l.to_string()),
+    )
+    .await;
+    if matches!(installed, Ok(0)) && exec::run("docker", ["buildx", "version"]).await.is_ok() {
+        return true;
+    }
+    task.log("could not install docker-buildx: using Docker's legacy builder (no RUN --mount)");
+    false
+}
+
+/// `docker build` the app's checkout into `vps-app-<name>:build`, labelled
+/// with the commit. Base images are pulled again (`--pull`) so an update also
+/// picks up their security fixes. The running app is not touched. Returns the
+/// new image id.
+async fn build_image(name: &str, build: &BuildSpec, task: &TaskHandle) -> AgentResult<String> {
+    let src = source_dir(name);
+    let (context, dockerfile) = resolve_build_paths(&src, build)?;
+    let commit = head_commit(&src).await;
+    let buildkit = ensure_buildkit(task).await;
+    let mut args: Vec<String> = vec!["build".into()];
+    if buildkit {
+        args.push("--progress=plain".into());
+    }
+    args.extend(["--pull".into(), "-t".into(), build_tag(name)]);
+    args.extend(["--label".into(), format!("vps-panel.app={name}")]);
+    if let Some(c) = &commit {
+        args.extend(["--label".into(), format!("{COMMIT_LABEL}={c}")]);
+    }
+    args.extend(["-f".into(), dockerfile.display().to_string()]);
+    for kv in &build.args {
+        args.extend(["--build-arg".into(), format!("{}={}", kv.key, kv.value)]);
+    }
+    args.push(context.display().to_string());
+    task.log(format!(
+        "$ docker build -t {} -f {} {}{}",
+        build_tag(name),
+        dockerfile.display(),
+        context.display(),
+        if build.args.is_empty() { "" } else { " (+ build variables)" }
+    ));
+    let envs: Vec<(&str, &str)> = if buildkit { Vec::new() } else { vec![("DOCKER_BUILDKIT", "0")] };
+    let run = exec::run_streaming_envs("docker", args.iter(), envs, |l| task.log(l.to_string()));
+    let code = match tokio::time::timeout(Duration::from_secs(BUILD_TIMEOUT_SECS), run).await {
+        Err(_) => {
+            return Err(AgentError::Invalid(format!(
+                "the build ran longer than {} minutes and was stopped",
+                BUILD_TIMEOUT_SECS / 60
+            )))
+        }
+        Ok(r) => r?,
+    };
+    if code != 0 {
+        return Err(AgentError::Invalid(format!(
+            "docker build failed (exit {code}): see the build output above"
+        )));
+    }
+    let id = image_id(&build_tag(name))
+        .await
+        .ok_or_else(|| AgentError::Invalid("the build finished but left no image".into()))?;
+    task.log(format!(
+        "built {} from commit {}",
+        short_id(&id),
+        commit.as_deref().map(short_commit).unwrap_or("(unknown)")
+    ));
+    Ok(id)
+}
+
+/// POST /apps/:name/update for a Docker app. From a registry: pull the image
+/// again. Built from Git: pull the checkout and, when it moved past the
+/// commit the app runs, build it. Either way the app moves onto the new image
+/// only if it changed, and back to the previous one if it does not come up.
+pub async fn run_update(
+    cfg: &crate::config::Config,
+    name: &str,
+    slot_port: Option<u16>,
+    repo_url: Option<&str>,
+    task: &TaskHandle,
+) -> AgentResult<()> {
     let spec = read_config(name).await.ok_or(AgentError::NotFound)?;
     docker_bin()?;
-    let unit = unit_name(name);
-    if spec.image.contains('@') {
-        task.log("the image is pinned to a digest, so there is nothing newer to pull");
+    let Some(build) = &spec.build else {
+        if spec.image.contains('@') {
+            task.log("the image is pinned to a digest, so there is nothing newer to pull");
+            return Ok(());
+        }
+        if let Err(e) = pull(&spec.image, task).await {
+            return Err(AgentError::Other(anyhow::anyhow!("{e}. The app keeps running the current image.")));
+        }
+        return Box::pin(swap_in(name, &spec.image, &spec.image, slot_port, task)).await;
+    };
+    let src = source_dir(name);
+    Box::pin(apps::pull_checkout(cfg, name, &src, repo_url, task)).await?;
+    let head = head_commit(&src).await;
+    if head.is_some() && head == image_label(&current_tag(name), COMMIT_LABEL).await {
+        task.log(format!(
+            "already running commit {}",
+            head.as_deref().map(short_commit).unwrap_or_default()
+        ));
         return Ok(());
     }
-    if let Err(e) = pull(&spec.image, task).await {
-        return Err(AgentError::Other(anyhow::anyhow!("{e}. The app keeps running the current image.")));
+    if let Err(e) = Box::pin(build_image(name, build, task)).await {
+        return Err(AgentError::Other(anyhow::anyhow!("{e}. The app keeps running the current build.")));
     }
-    let new_id = image_id(&spec.image)
+    let what = format!("commit {}", head.as_deref().map(short_commit).unwrap_or("(unknown)"));
+    Box::pin(swap_in(name, &build_tag(name), &what, slot_port, task)).await
+}
+
+/// Move the app onto `source_ref`'s image: `:current` becomes `:previous`,
+/// the new image `:current`, restart and verify. One that does not come up is
+/// rolled back. Nothing happens when it is the image already running.
+async fn swap_in(
+    name: &str,
+    source_ref: &str,
+    what: &str,
+    slot_port: Option<u16>,
+    task: &TaskHandle,
+) -> AgentResult<()> {
+    let unit = unit_name(name);
+    let new_id = image_id(source_ref)
         .await
-        .ok_or_else(|| AgentError::Invalid(format!("{} is not on this server after the pull", spec.image)))?;
+        .ok_or_else(|| AgentError::Invalid(format!("{source_ref} is not on this server")))?;
     let cur_id = image_id(&current_tag(name)).await;
     if cur_id.as_deref() == Some(new_id.as_str()) {
-        task.log(format!("already on the newest {} ({})", spec.image, short_id(&new_id)));
+        task.log(format!("already on the newest {what} ({})", short_id(&new_id)));
         return Ok(());
     }
     let old_previous = image_id(&previous_tag(name)).await;
     if cur_id.is_some() {
         tag(&current_tag(name), &previous_tag(name), task).await?;
     }
-    tag(&spec.image, &current_tag(name), task).await?;
+    tag(source_ref, &current_tag(name), task).await?;
 
     let Some(port) = slot_port else {
         task.log("the app has no domain assigned: the new image starts once it has one");
         return Ok(());
     };
-    task.log(format!("restarting {unit} on {}", short_id(&new_id)));
+    task.log(format!("restarting {unit} on {what} ({})", short_id(&new_id)));
     apps::app_systemctl(&["restart"], &unit).await?;
     match verify_up(&unit, port).await {
         Ok(()) => {
@@ -651,14 +966,16 @@ pub async fn run_update(name: &str, slot_port: Option<u16>, task: &TaskHandle) -
     }
 }
 
-/// Everything but the unit and env file (apps::delete removes those): the
-/// container, the app's image tags, the settings file and, with `wipe`, the
-/// data volumes, also ones a later deploy no longer listed (found by label).
+/// Everything but the unit and env file (apps::delete removes those, and a
+/// Git-built app's mirror and checkout): the container, the app's image tags,
+/// the settings file and, with `wipe`, the data volumes, also ones a later
+/// deploy no longer listed (found by label).
 pub async fn remove_app(name: &str, spec: &DockerSpec, wipe: bool) {
     let _ = exec::run("docker", ["rm", "-f", &container_name(name)]).await;
     // Untags; the image itself goes only when nothing else uses it.
-    let _ = exec::run("docker", ["rmi", &current_tag(name)]).await;
-    let _ = exec::run("docker", ["rmi", &previous_tag(name)]).await;
+    for t in [current_tag(name), previous_tag(name), build_tag(name)] {
+        let _ = exec::run("docker", ["rmi", &t]).await;
+    }
     let _ = fs_atomic::remove_if_exists(&config_path(name)).await;
     if !wipe {
         return;
@@ -695,6 +1012,9 @@ pub struct DockerAppInfo {
     pub current_id: Option<String>,
     /// The image Update rolls back to.
     pub previous_id: Option<String>,
+    /// Built from Git: the commits those two images were built from.
+    pub current_commit: Option<String>,
+    pub previous_commit: Option<String>,
     pub volumes: Vec<VolumeInfo>,
 }
 
@@ -719,6 +1039,8 @@ pub async fn info(Path(name): Path<String>) -> AgentResult<Json<DockerAppInfo>> 
     Ok(Json(DockerAppInfo {
         current_id: image_id(&current_tag(&name)).await,
         previous_id: image_id(&previous_tag(&name)).await,
+        current_commit: image_label(&current_tag(&name), COMMIT_LABEL).await,
+        previous_commit: image_label(&previous_tag(&name), COMMIT_LABEL).await,
         spec,
         volumes,
     }))
@@ -745,6 +1067,10 @@ pub async fn image_status(Path(name): Path<String>) -> AgentResult<Json<ImageSta
         update_available: None,
         error: None,
     };
+    if spec.build.is_some() {
+        status.error = Some("built from Git: its updates are new commits (the git status)".into());
+        return Ok(Json(status));
+    }
     if spec.image.contains('@') {
         status.update_available = Some(false);
         return Ok(Json(status));
@@ -797,15 +1123,29 @@ pub async fn status() -> Json<DockerStatus> {
 
 #[derive(Deserialize)]
 pub struct ImageQuery {
-    pub image: String,
+    /// A registry image already pulled to this server.
+    #[serde(default)]
+    pub image: Option<String>,
+    /// Or an app name: its last build from Git (`vps-app-<app>:build`).
+    #[serde(default)]
+    pub app: Option<String>,
 }
 
-/// GET /docker/image-info?image=: what a pulled image declares, for the
-/// deploy form to fill in the port and folders.
+/// GET /docker/image-info?image= | ?app=: what a pulled or built image
+/// declares, for the deploy form to fill in the port and folders.
 pub async fn image_info(Query(q): Query<ImageQuery>) -> AgentResult<Json<ImageInfo>> {
-    let image = q.image.trim();
-    validate_image(image)?;
-    inspect_image(image).await.map(Json).ok_or(AgentError::NotFound)
+    let reference = match (q.image.as_deref().map(str::trim), q.app.as_deref()) {
+        (Some(image), _) if !image.is_empty() => {
+            validate_image(image)?;
+            image.to_string()
+        }
+        (_, Some(app)) => {
+            validate_name(app)?;
+            build_tag(app)
+        }
+        _ => return Err(AgentError::Invalid("give image or app".into())),
+    };
+    inspect_image(&reference).await.map(Json).ok_or(AgentError::NotFound)
 }
 
 #[cfg(test)]
@@ -819,6 +1159,19 @@ mod tests {
             volumes: vec!["/app/data".into()],
             memory_mb: 512,
             cpus: 1.0,
+            build: None,
+        }
+    }
+
+    fn built() -> DockerSpec {
+        DockerSpec {
+            image: String::new(),
+            build: Some(BuildSpec {
+                context: ".".into(),
+                dockerfile: "Dockerfile".into(),
+                args: vec![],
+            }),
+            ..spec()
         }
     }
 
@@ -902,7 +1255,10 @@ mod tests {
         assert!(validate_spec(&DockerSpec { cpus: 0.05, ..spec() }).is_err());
         assert!(validate_spec(&DockerSpec { cpus: f64::NAN, ..spec() }).is_err());
         assert!(validate_spec(&DockerSpec { cpus: 100_000.0, ..spec() }).is_err());
-        assert!(validate_spec(&DockerSpec { container_port: 0, ..spec() }).is_err());
+        // Pull and Build may not know the port yet; deploying needs it.
+        assert!(validate_spec(&DockerSpec { container_port: 0, ..spec() }).is_ok());
+        assert!(require_port(&DockerSpec { container_port: 0, ..spec() }).is_err());
+        assert!(require_port(&spec()).is_ok());
         assert_eq!(format_cpus(1.0), "1");
         assert_eq!(format_cpus(0.5), "0.5");
         assert_eq!(format_cpus(1.25), "1.25");
@@ -947,6 +1303,79 @@ mod tests {
         let s = DockerSpec { memory_mb: 0, cpus: 0.0, volumes: vec![], ..spec() };
         let unit = render_unit("web", 7011, &s, "/usr/bin/docker");
         assert!(!unit.contains("--memory") && !unit.contains("--cpus") && !unit.contains(" -v "));
+    }
+
+    #[test]
+    fn build_settings() {
+        assert!(validate_spec(&built()).is_ok());
+        // An image and a build at once is refused.
+        assert!(validate_spec(&DockerSpec { image: "nginx".into(), ..built() }).is_err());
+        let tidy = normalize_spec(DockerSpec {
+            build: Some(BuildSpec {
+                context: " ./apps/web/ ".into(),
+                dockerfile: "".into(),
+                args: vec![
+                    EnvKv { key: " NODE_ENV ".into(), value: "production".into() },
+                    EnvKv { key: " ".into(), value: "x".into() },
+                ],
+            }),
+            ..built()
+        });
+        let b = tidy.build.as_ref().unwrap();
+        assert_eq!((b.context.as_str(), b.dockerfile.as_str(), b.args.len()), ("apps/web", "Dockerfile", 1));
+        assert_eq!(b.args[0].key, "NODE_ENV");
+        assert!(validate_spec(&tidy).is_ok());
+        let with = |context: &str, dockerfile: &str| DockerSpec {
+            build: Some(BuildSpec { context: context.into(), dockerfile: dockerfile.into(), args: vec![] }),
+            ..built()
+        };
+        assert!(validate_spec(&with("apps/web", "docker/Dockerfile.prod")).is_ok());
+        for (c, d) in [("../x", "Dockerfile"), ("/etc", "Dockerfile"), ("-x", "Dockerfile"), ("a//b", "Dockerfile"), (".", "../Dockerfile"), (".", "-f"), (".", "a b")] {
+            assert!(validate_spec(&with(c, d)).is_err(), "{c:?} {d:?} should be refused");
+        }
+        let bad_arg = DockerSpec {
+            build: Some(BuildSpec { args: vec![EnvKv { key: "A-B".into(), value: "1".into() }], ..built().build.unwrap() }),
+            ..built()
+        };
+        assert!(validate_spec(&bad_arg).is_err());
+        // Settings saved before builds existed still read, as a registry image.
+        let old: DockerSpec = serde_json::from_str(r#"{"image":"nginx","container_port":80}"#).unwrap();
+        assert!(old.build.is_none());
+        let saved: DockerSpec =
+            serde_json::from_str(r#"{"container_port":3000,"build":{"context":"web"}}"#).unwrap();
+        assert_eq!(saved.image, "");
+        assert_eq!(saved.build.unwrap().dockerfile, "Dockerfile");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn build_paths_stay_in_the_checkout() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("app");
+        std::fs::create_dir_all(root.join("web")).unwrap();
+        std::fs::write(root.join("Dockerfile"), "FROM scratch
+").unwrap();
+        std::fs::write(root.join("web/Dockerfile"), "FROM scratch
+").unwrap();
+        std::fs::write(dir.path().join("secret"), "x").unwrap();
+        std::os::unix::fs::symlink(dir.path().join("secret"), root.join("Evil")).unwrap();
+        std::os::unix::fs::symlink(dir.path(), root.join("up")).unwrap();
+        let src = root.to_str().unwrap();
+        let b = |context: &str, dockerfile: &str| BuildSpec {
+            context: context.into(),
+            dockerfile: dockerfile.into(),
+            args: vec![],
+        };
+        let (ctx, df) = resolve_build_paths(src, &b(".", "Dockerfile")).unwrap();
+        assert_eq!((ctx.clone(), df), (std::fs::canonicalize(&root).unwrap(), std::fs::canonicalize(root.join("Dockerfile")).unwrap()));
+        assert!(resolve_build_paths(src, &b("web", "Dockerfile")).is_ok());
+        assert!(resolve_build_paths(src, &b(".", "web/Dockerfile")).is_ok());
+        // A symlink out of the checkout, as the Dockerfile or the folder.
+        assert!(resolve_build_paths(src, &b(".", "Evil")).is_err());
+        assert!(resolve_build_paths(src, &b("up", "secret")).is_err());
+        assert!(resolve_build_paths(src, &b(".", "missing")).is_err());
+        assert!(resolve_build_paths(src, &b("web", "web")).is_err());
+        assert!(resolve_build_paths(dir.path().join("nope").to_str().unwrap(), &b(".", "Dockerfile")).is_err());
     }
 
     #[test]

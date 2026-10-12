@@ -13,18 +13,30 @@ function shortId(id: string | null): string {
   return id ? id.replace(/^sha256:/, "").slice(0, 12) : "-";
 }
 
+/** A Docker app built from Git: what it builds and which commits run. */
+type BuildInfo = {
+  context: string;
+  dockerfile: string;
+  currentCommit: string | null;
+  previousCommit: string | null;
+};
+
 /**
  * "Image" section of a Docker app's page. Check asks the registry whether
  * the image's tag points at a newer build (one network call, on demand so
  * the page never waits on a registry). Update pulls the tag again and moves
  * the app onto it; the agent rolls back to the previous image when the new
  * one does not come up. Either way the operator watches the task log.
+ *
+ * An app built from Git (`build`) shows its running build and commit
+ * instead; its updates are new commits, handled by the Updates section.
  */
 export default function DockerImagePanel({
   appName,
   image,
   currentId,
   previousId,
+  build,
   canManage,
   checkAction,
   updateAction,
@@ -33,6 +45,7 @@ export default function DockerImagePanel({
   image: string;
   currentId: string | null;
   previousId: string | null;
+  build: BuildInfo | null;
   canManage: boolean;
   checkAction: (name: string) => Promise<StatusResult>;
   updateAction: (name: string) => Promise<UpdateResult>;
@@ -61,6 +74,42 @@ export default function DockerImagePanel({
       else setError(r.error);
     });
   };
+
+  if (build) {
+    const commit = (c: string | null) => (c ? <> from commit <span className={styles.code}>{c.slice(0, 7)}</span></> : null);
+    return (
+      <div style={{ display: "grid", gridTemplateColumns: "max-content 1fr", gap: "6px 14px", fontSize: 13 }}>
+        <span className={styles.muted}>Builds</span>
+        <span>
+          <span className={styles.code}>{build.dockerfile}</span> in{" "}
+          <span className={styles.code}>{build.context === "." ? "the repository root" : build.context}</span>
+        </span>
+        <span className={styles.muted}>Running</span>
+        <span>
+          {currentId ? (
+            <>
+              <span className={styles.code}>{shortId(currentId)}</span>
+              {commit(build.currentCommit)}
+            </>
+          ) : (
+            <span className={styles.muted}>no build yet: Save and redeploy below builds one</span>
+          )}
+        </span>
+        <span className={styles.muted}>Rollback</span>
+        <span>
+          {previousId ? (
+            <>
+              <span className={styles.code}>{shortId(previousId)}</span>
+              {commit(build.previousCommit)}
+              <span className={styles.muted}> - a rebuild that does not come up returns to it</span>
+            </>
+          ) : (
+            <span className={styles.muted}>none yet (kept from the first rebuild on)</span>
+          )}
+        </span>
+      </div>
+    );
+  }
 
   return (
     <div>

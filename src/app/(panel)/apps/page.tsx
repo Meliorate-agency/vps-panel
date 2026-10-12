@@ -77,6 +77,9 @@ function buildAppRow(
 ) {
   const isExternal = a.kind === "external";
   const isDocker = a.runtime === "docker";
+  // A Docker app pulled from a registry: no checkout, its updates come from
+  // the registry. One built from Git is checked like a Node app.
+  const isImageApp = isDocker && !a.docker_build;
   const hasUnit = !!a.active;
   const statusText = a.sub || a.active || (isExternal ? "no unit" : "unknown");
   return {
@@ -101,7 +104,7 @@ function buildAppRow(
         ) : (
           <StatusBadge text="panel" tone="ok" />
         )}
-        <span className={styles.code}>{(isDocker ? a.image : a.source_dir) || "-"}</span>
+        <span className={styles.code}>{(isImageApp ? a.image : a.source_dir) || "-"}</span>
         {a.source_dir_state === "missing" && (
           <span title="source_dir doesn't exist on disk">
             <StatusBadge text="folder missing" tone="danger" />
@@ -132,7 +135,7 @@ function buildAppRow(
       </span>
     ),
     port: a.port || "-",
-    git: autoCheck && isDocker ? (
+    git: autoCheck && isImageApp ? (
       <ImageStatusBadge
         appName={a.name}
         status={imageStatuses.get(a.name)}
@@ -145,6 +148,7 @@ function buildAppRow(
         isExternal={isExternal}
         updateAction={updateAppAction}
         refreshAction={refreshGitStatusAction}
+        docker={a.docker_build}
       />
     ) : isExternal ? (
       <span className={styles.muted}>—</span>
@@ -254,11 +258,11 @@ export default async function AppsPage() {
   // one network round trip per app on every single page load, and the
   // per-row Check button covers the same ground on demand.
   const gitStatuses = new Map<string, GitStatusResp>();
-  // Docker apps ask their registry instead (10 s cap per app on the agent).
+  // Docker apps from a registry ask it instead (10 s cap per app on the agent).
   const imageStatuses = new Map<string, DockerImageStatus>();
   if (autoCheck) {
     const imageFetches = apps
-      .filter((a) => a.runtime === "docker")
+      .filter((a) => a.runtime === "docker" && !a.docker_build)
       .map(async (a) => {
         try {
           imageStatuses.set(a.name, await agent.apps.imageStatus(a.name));
@@ -267,7 +271,7 @@ export default async function AppsPage() {
         }
       });
     const fetches = apps
-      .filter((a) => a.kind !== "external" && a.runtime !== "docker" && a.source_dir)
+      .filter((a) => a.kind !== "external" && !(a.runtime === "docker" && !a.docker_build) && a.source_dir)
       .map(async (a) => {
         try {
           const status = await agent.apps.gitStatus(a.name);
@@ -282,7 +286,7 @@ export default async function AppsPage() {
   const orphans = apps.filter(
     (a) =>
       a.kind !== "external" &&
-      a.runtime !== "docker" &&
+      !(a.runtime === "docker" && !a.docker_build) &&
       (a.source_dir_state === "missing" || a.source_dir_state === "empty"),
   );
 
