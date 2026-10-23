@@ -2696,11 +2696,6 @@ pub(crate) fn stored_repo_url(state: &AppState, name: &str) -> Option<String> {
         .filter(|u| !u.is_empty())
 }
 
-/// A panel checkout under /srv/apps belongs to the apps user; the deploy
-/// chowns it after every pull. If the folder and its .git disagree (a pull
-/// by an older version, a manual edit), git refuses to run in it as either
-/// user ("dubious ownership"), so hand it back to apps first. Only when they
-/// differ: a recursive chown of node_modules on every update check is slow.
 async fn normalize_checkout_owner(cfg: &crate::config::Config, dir: &str) {
     #[cfg(unix)]
     {
@@ -2708,11 +2703,8 @@ async fn normalize_checkout_owner(cfg: &crate::config::Config, dir: &str) {
         if cfg.apps_uid == 0 || !dir.starts_with(&format!("{APPS_BASE_DIR}/")) {
             return;
         }
-        let owned = |p: std::path::PathBuf| {
-            std::fs::symlink_metadata(p).map(|m| m.uid() == cfg.apps_uid).unwrap_or(true)
-        };
-        let path = std::path::Path::new(dir);
-        if owned(path.to_path_buf()) && owned(path.join(".git")) {
+        let top_owned = std::fs::symlink_metadata(dir).map(|m| m.uid() == cfg.apps_uid).unwrap_or(true);
+        if top_owned && app_git::owned_by(&format!("{dir}/.git"), cfg.apps_uid).await {
             return;
         }
         let _ = exec::run("chown", ["-R", "apps:apps", dir]).await;

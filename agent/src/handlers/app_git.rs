@@ -308,6 +308,12 @@ async fn shared_with(path: &str, gid: u32) -> bool {
     matches!(out, Ok(o) if o.stdout.trim().is_empty())
 }
 
+#[cfg(unix)]
+pub(crate) async fn owned_by(path: &str, uid: u32) -> bool {
+    let out = exec::run("find", [path, "!", "-uid", &uid.to_string(), "-print", "-quit"]).await;
+    !matches!(out, Ok(o) if !o.stdout.trim().is_empty())
+}
+
 /// A clone killed half-way (the update check's timeout) leaves its temp dir.
 async fn remove_leftovers(app: &str) {
     let prefix = format!("{app}.git.tmp-");
@@ -511,5 +517,25 @@ mod tests {
         let r = std::fs::metadata(d.join("mirror.git/refs/heads/main")).unwrap();
         assert_eq!(r.gid(), gid);
         assert_eq!(r.mode() & 0o040, 0o040);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn one_foreign_file_inside_git_is_not_owned() {
+        use super::owned_by;
+        let dir = tempfile::tempdir().unwrap();
+        let git = dir.path().join(".git");
+        std::fs::create_dir_all(git.join("objects/ab")).unwrap();
+        std::fs::write(git.join("index"), b"").unwrap();
+        let path = git.display().to_string();
+        let me = nix::unistd::getuid();
+        assert!(owned_by(&path, me.as_raw()).await);
+        assert!(owned_by(&format!("{path}/missing"), me.as_raw()).await);
+        if me.is_root() {
+            std::os::unix::fs::chown(git.join("index"), Some(4242), None).unwrap();
+            assert!(!owned_by(&path, 0).await);
+        } else {
+            assert!(!owned_by(&path, me.as_raw() + 1).await);
+        }
     }
 }
