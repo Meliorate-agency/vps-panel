@@ -39,6 +39,8 @@ import styles from "@/components/page.module.css";
 import DeployMethodButton from "./DeployMethodButton";
 import GitStatusBadge from "./GitStatusBadge";
 import ImageStatusBadge from "./ImageStatusBadge";
+import CommentCell from "./CommentCell";
+import { listAppComments, setAppCommentAction } from "@/server-actions/appComments";
 import AutoUpdateCheckToggle from "./AutoUpdateCheckToggle";
 import CheckUpdateButton from "./CheckUpdateButton";
 import AppFolderSection from "./AppFolderSection";
@@ -51,6 +53,7 @@ export const dynamic = "force-dynamic";
  *  page-load auto-check is off. */
 const buildColumns = (autoCheck: boolean) => [
   { key: "name", label: "Name" },
+  { key: "comment", label: "Comment", width: "200px" },
   { key: "source", label: "Source", width: "260px" },
   { key: "subdomain", label: "Subdomain" },
   { key: "port", label: "Port", width: "70px" },
@@ -69,6 +72,7 @@ function buildAppRow(
   a: AppRow,
   gitStatuses: Map<string, GitStatusResp>,
   imageStatuses: Map<string, DockerImageStatus>,
+  comments: Record<string, string>,
   folderMeta: {
     currentFolderId: number | null;
     folders: { id: number; name: string }[];
@@ -87,6 +91,13 @@ function buildAppRow(
       <Link href={`/apps/${encodeURIComponent(a.name)}`}>
         <strong>{a.name}</strong>
       </Link>
+    ),
+    comment: (
+      <CommentCell
+        appName={a.name}
+        comment={comments[a.name] ?? ""}
+        saveAction={setAppCommentAction}
+      />
     ),
     source: (
       <div
@@ -225,7 +236,7 @@ export default async function AppsPage() {
     getN8nAutoCheck(),
   ]);
 
-  const [apps, recipes, addr, folders, folderAssignments, tsStatus, session] = await Promise.all([
+  const [apps, recipes, addr, folders, folderAssignments, tsStatus, session, comments] = await Promise.all([
     agent.apps.list().catch(() => []),
     // checkUpdates reaches out to Docker Hub for the n8n image tag (6s
     // timeout) — the single slowest thing on this page. Gated by n8n's own
@@ -240,6 +251,7 @@ export default async function AppsPage() {
     // when Tailscale is not installed.
     agent.tailscale.status().catch(() => null),
     getSession(),
+    listAppComments(),
   ]);
   const serverAddress = addr.domain ?? addr.ip ?? null;
   // Only the phase and the tailnet IP reach the client: the full status
@@ -370,6 +382,7 @@ export default async function AppsPage() {
                     a,
                     gitStatuses,
                     imageStatuses,
+                    comments,
                     { currentFolderId: f.id, folders: folderList },
                     autoCheck,
                   ),
@@ -395,6 +408,7 @@ export default async function AppsPage() {
                   a,
                   gitStatuses,
                   imageStatuses,
+                  comments,
                   { currentFolderId: null, folders: folderList },
                   autoCheck,
                 ),
@@ -416,7 +430,7 @@ export default async function AppsPage() {
               fallbackLabel="External"
               columns={columns}
               rows={externalApps.map((a) =>
-                buildAppRow(a, gitStatuses, imageStatuses, null, autoCheck),
+                buildAppRow(a, gitStatuses, imageStatuses, comments, null, autoCheck),
               )}
               empty="No external apps."
             />

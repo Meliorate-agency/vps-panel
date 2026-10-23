@@ -322,6 +322,7 @@ export async function deleteAppAction(
   const wipe = !!opts?.wipe;
   await agent.apps.delete(name, { wipe });
   db().prepare(`DELETE FROM apps WHERE name = ?`).run(name);
+  db().prepare(`DELETE FROM app_comments WHERE name = ?`).run(name);
   writeAudit({
     actorId: s.userId,
     action: "apps.delete",

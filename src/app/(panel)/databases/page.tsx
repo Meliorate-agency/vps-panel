@@ -286,7 +286,10 @@ export default async function DatabasesPage() {
             <CreatePgDbForm action={createPgDatabaseAction} roles={pgRoles} />
           </div>
 
+          {/* scrollX: four columns with two button groups do not fit a phone;
+              the card scrolls sideways instead of running off the page. */}
           <Table
+            scrollX
             columns={[
               { key: "name", label: "Postgres database" },
               { key: "owner", label: "Owner" },
@@ -338,6 +341,7 @@ export default async function DatabasesPage() {
           </div>
 
           <Table
+            scrollX
             columns={[
               { key: "user", label: "Postgres role" },
               { key: "flags", label: "Flags" },

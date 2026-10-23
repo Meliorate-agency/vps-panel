@@ -1,0 +1,44 @@
+.cell {
+  display: block;
+  width: 100%;
+  max-width: 240px;
+  padding: 4px 8px;
+  border: 1px dashed transparent;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text);
+  font: inherit;
+  font-size: 13px;
+  text-align: left;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  cursor: text;
+}
+
+.cell:hover,
+.cell:focus-visible {
+  border-color: var(--border);
+  background: var(--bg-elev-2);
+}
+
+.empty {
+  color: var(--text-dim);
+  font-style: italic;
+}
+
+.failed {
+  border-color: var(--danger, #ff4d6d);
+}
+
+.saving {
+  color: var(--text-dim);
+  font-style: normal;
+}
+
+.input {
+  width: 100%;
+  min-width: 160px;
+  padding: 4px 8px;
+  font-size: 13px;
+}

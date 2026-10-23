@@ -150,6 +150,15 @@ function applyMigrations(handle: Database.Database) {
       created_at    TEXT NOT NULL DEFAULT (datetime('now'))
     );
 
+    -- A free-text note per app, the Comment column on /apps. Keyed by name
+    -- rather than an apps column so external apps (no apps row) can have
+    -- one too; deleteAppAction removes it with the app.
+    CREATE TABLE IF NOT EXISTS app_comments (
+      name          TEXT PRIMARY KEY,
+      comment       TEXT NOT NULL,
+      updated_at    TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+
     -- 301 / 302 redirect rules, one row per (domain, source path, match mode).
     -- Source of truth for /redirects; the agent only renders the per-domain
     -- nginx include from the rows the panel sends it (lib/redirects.ts).
