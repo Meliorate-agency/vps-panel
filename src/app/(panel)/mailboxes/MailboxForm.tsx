@@ -1,6 +1,6 @@
 "use client";
 
-import { useActionState, useState } from "react";
+import { useActionState, useEffect, useRef, useState } from "react";
 import styles from "@/components/page.module.css";
 import localStyles from "./mailboxes.module.css";
 
@@ -26,6 +26,23 @@ export default function MailboxForm({
   const [state, formAction, pending] = useActionState<Result | null, FormData>(action, null);
   const [localpart, setLocalpart] = useState("");
   const [domain, setDomain] = useState(domains[0] ?? "");
+  const formRef = useRef<HTMLFormElement>(null);
+  const domainRef = useRef<HTMLSelectElement>(null);
+  // React 19 resets the form after the action; the <select> DOM snaps to the
+  // first domain while `domain` (and so the hidden email) stays, so the next
+  // mailbox would land on a domain the picker no longer shows. Re-apply it
+  // once the reset has landed, as DeployForm does.
+  useEffect(() => {
+    const form = formRef.current;
+    if (!form) return;
+    const onReset = () => {
+      queueMicrotask(() => {
+        if (domainRef.current) domainRef.current.value = domain;
+      });
+    };
+    form.addEventListener("reset", onReset);
+    return () => form.removeEventListener("reset", onReset);
+  }, [domain]);
 
   if (domains.length === 0) {
     return (
@@ -36,7 +53,7 @@ export default function MailboxForm({
   }
 
   return (
-    <form action={formAction}>
+    <form ref={formRef} action={formAction}>
       {/* Username gets its own row so the domain <select>'s open dropdown
           can lay out naturally without bleeding into a sibling cell. The
           inner flex uses `min-width: 0` + `flex: 1` on the children so the
@@ -63,6 +80,7 @@ export default function MailboxForm({
           />
           <span style={{ color: "var(--text-dim)", flexShrink: 0, userSelect: "none" }}>@</span>
           <select
+            ref={domainRef}
             className={styles.input}
             value={domain}
             onChange={(e) => setDomain(e.target.value)}
