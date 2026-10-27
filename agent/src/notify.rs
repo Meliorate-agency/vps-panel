@@ -1,9 +1,10 @@
 //! Operator notifications configured on /notifications (panel.db table
-//! `notifications`): email through the local Postfix and JSON webhooks
-//! (with `text` / `content` fields, so Slack and Discord webhooks work as
-//! is). Failed tasks, systemd units that enter the failed state and a nearly
-//! full root disk are reported. Before this nothing read that table: the
-//! page promised alerts that were never sent.
+//! `notifications`): email through the local Postfix, JSON webhooks (with
+//! `text` / `content` fields, so Slack and Discord webhooks work as is) and
+//! Telegram messages from the operator's own bot. Failed tasks, systemd
+//! units that enter the failed state and a nearly full root disk are
+//! reported. Before this nothing read that table: the page promised alerts
+//! that were never sent.
 
 use crate::db::PanelDb;
 use crate::error::{AgentError, AgentResult};
@@ -46,24 +47,77 @@ fn subscribes(events: &str, event: &str) -> bool {
     list.peek().is_none() || list.any(|e| e == event)
 }
 
-fn channels_for(db: &PanelDb, event: &str) -> Vec<(String, String)> {
+/// (channel, target, secret) of every channel subscribed to `event`. The
+/// secret is a Telegram channel's bot token, None for the others.
+fn channels_for(db: &PanelDb, event: &str) -> Vec<(String, String, Option<String>)> {
     db.with(|conn| {
-        let mut stmt = conn.prepare("SELECT channel, target, events FROM notifications")?;
+        let mut stmt = conn.prepare("SELECT channel, target, events, secret FROM notifications")?;
         let rows = stmt.query_map([], |r| {
-            Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, String>(2)?))
+            Ok((
+                r.get::<_, String>(0)?,
+                r.get::<_, String>(1)?,
+                r.get::<_, String>(2)?,
+                r.get::<_, Option<String>>(3)?,
+            ))
         })?;
         rows.collect::<Result<Vec<_>, _>>()
     })
     .unwrap_or_default()
     .into_iter()
-    .filter(|(_, _, events)| subscribes(events, event))
-    .map(|(channel, target, _)| (channel, target))
+    .filter(|(_, _, events, _)| subscribes(events, event))
+    .map(|(channel, target, _, secret)| (channel, target, secret))
     .collect()
+}
+
+fn is_plain_address(a: &str) -> bool {
+    a.contains('@') && !a.contains([',', ' ', '<', '>', '"', '\r', '\n'])
+}
+
+/// `notifications.email_from`: the mailbox notification email is sent as
+/// (From header and envelope sender), so the tenant domain's SPF and DKIM
+/// cover it and bounces land in that mailbox. Unset, Postfix sends as
+/// root@<myhostname>: no SPF record covers that name and its bounces are
+/// lost.
+fn email_from(db: &PanelDb) -> Option<String> {
+    db.with(|conn| {
+        conn.query_row(
+            "SELECT value FROM settings WHERE key = 'notifications.email_from'",
+            [],
+            |r| r.get::<_, String>(0),
+        )
+    })
+    .ok()
+    .map(|v| v.trim().to_string())
+    .filter(|v| is_plain_address(v))
+}
+
+/// `<digits>:<key>`, the form @BotFather hands out.
+fn is_bot_token(t: &str) -> bool {
+    t.split_once(':').is_some_and(|(id, key)| {
+        !id.is_empty()
+            && id.bytes().all(|b| b.is_ascii_digit())
+            && key.len() >= 20
+            && key.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
+    })
+}
+
+/// A numeric Telegram user ID (negative for a group).
+fn is_chat_id(t: &str) -> bool {
+    let digits = t.strip_prefix('-').unwrap_or(t);
+    (1..=20).contains(&digits.len()) && digits.bytes().all(|b| b.is_ascii_digit())
 }
 
 /// Deliver one message to one channel. Email success means Postfix accepted
 /// it for delivery.
-async fn send(channel: &str, target: &str, event: &str, subject: &str, body: &str) -> AgentResult<()> {
+async fn send(
+    channel: &str,
+    target: &str,
+    secret: Option<&str>,
+    from: Option<&str>,
+    event: &str,
+    subject: &str,
+    body: &str,
+) -> AgentResult<()> {
     let target = target.trim();
     if target.is_empty() || target.contains(['\r', '\n']) {
         return Err(AgentError::Invalid("invalid notification target".into()));
@@ -71,13 +125,51 @@ async fn send(channel: &str, target: &str, event: &str, subject: &str, body: &st
     let subject = format!("[{}] {}", host(), subject.replace(['\r', '\n'], " "));
     match channel {
         "email" => {
-            if !target.contains('@') || target.contains([',', ' ', '<', '>']) {
+            if !is_plain_address(target) {
                 return Err(AgentError::Invalid(format!("not an email address: {target}")));
             }
+            let from_line = from.map(|f| format!("From: \"{}\" <{f}>\n", host())).unwrap_or_default();
             let msg = format!(
-                "To: {target}\nSubject: {subject}\nContent-Type: text/plain; charset=utf-8\n\n{body}\n"
+                "{from_line}To: {target}\nSubject: {subject}\nMIME-Version: 1.0\nContent-Type: text/plain; charset=utf-8\n\n{body}\n"
             );
-            exec::run_with_input("sendmail", ["-t", "-oi"], &msg).await?;
+            let mut args = vec!["-t", "-oi"];
+            if let Some(f) = from {
+                args.extend(["-f", f]);
+            }
+            exec::run_with_input("sendmail", args, &msg).await?;
+        }
+        "telegram" => {
+            let token = secret.unwrap_or("").trim();
+            if !is_bot_token(token) {
+                return Err(AgentError::Invalid("missing or malformed Telegram bot token".into()));
+            }
+            if !is_chat_id(target) {
+                return Err(AgentError::Invalid(format!("not a Telegram user ID: {target}")));
+            }
+            // Telegram's limit is 4096 characters.
+            let text: String = format!("{subject}\n\n{body}").chars().take(4000).collect();
+            let payload = serde_json::json!({
+                "chat_id": target,
+                "text": text,
+                "disable_web_page_preview": true,
+            });
+            // The token is part of the URL, so the whole request reaches curl
+            // as a config on stdin: argv shows in every user's process list.
+            let config = format!(
+                "url = \"https://api.telegram.org/bot{token}/sendMessage\"\n\
+                 header = \"Content-Type: application/json\"\n\
+                 data-binary = \"{}\"\n",
+                payload.to_string().replace('\\', "\\\\").replace('"', "\\\"")
+            );
+            let out = exec::run_with_input("curl", ["-sS", "-m", "10", "-K", "-"], &config).await?;
+            // No -f: a refusal comes back as {"ok":false,"description":...},
+            // and "chat not found" (the user never pressed Start in the bot)
+            // is worth showing as is.
+            let resp: serde_json::Value = serde_json::from_str(&out.stdout).unwrap_or_default();
+            if resp["ok"] != true {
+                let why = resp["description"].as_str().unwrap_or("no answer from api.telegram.org");
+                return Err(AgentError::Other(anyhow::anyhow!("Telegram: {why}")));
+            }
         }
         "webhook" => {
             if !(target.starts_with("https://") || target.starts_with("http://")) {
@@ -123,12 +215,14 @@ pub fn notify(db: &PanelDb, event: &'static str, subject: String, body: String) 
     if channels.is_empty() {
         return;
     }
+    let from = email_from(db);
     let Ok(rt) = tokio::runtime::Handle::try_current() else {
         return;
     };
     rt.spawn(async move {
-        for (channel, target) in channels {
-            if let Err(e) = send(&channel, &target, event, &subject, &body).await {
+        for (channel, target, secret) in channels {
+            let sent = send(&channel, &target, secret.as_deref(), from.as_deref(), event, &subject, &body).await;
+            if let Err(e) = sent {
                 tracing::warn!(%channel, %target, error = %e, "notification not delivered");
             }
         }
@@ -258,14 +352,22 @@ pub async fn send_event(
 pub struct TestReq {
     pub channel: String,
     pub target: String,
+    /// A Telegram channel's bot token.
+    #[serde(default)]
+    pub secret: Option<String>,
 }
 
 /// POST /notifications/test - send a test message right away and report
 /// whether the channel accepted it.
-pub async fn test(Json(req): Json<TestReq>) -> AgentResult<Json<OkResponse>> {
+pub async fn test(
+    State(state): State<AppState>,
+    Json(req): Json<TestReq>,
+) -> AgentResult<Json<OkResponse>> {
     send(
         &req.channel,
         &req.target,
+        req.secret.as_deref(),
+        email_from(&state.panel_db).as_deref(),
         "test",
         "Test notification",
         &format!(
@@ -279,7 +381,21 @@ pub async fn test(Json(req): Json<TestReq>) -> AgentResult<Json<OkResponse>> {
 
 #[cfg(test)]
 mod tests {
-    use super::{event_for_task, parse_df_pct, subscribes};
+    use super::{event_for_task, is_bot_token, is_chat_id, parse_df_pct, subscribes};
+
+    #[test]
+    fn telegram_token_and_chat_id() {
+        // Shaped unlike a real token so secret scanners leave it alone.
+        assert!(is_bot_token("123:example_key-example_key"));
+        assert!(!is_bot_token("123456789"));
+        assert!(!is_bot_token("abc:example_key-example_key"));
+        assert!(!is_bot_token("123:short"));
+        assert!(!is_bot_token("123:example_key\"example_key"));
+        assert!(is_chat_id("123456789"));
+        assert!(is_chat_id("-1001234567890"));
+        assert!(!is_chat_id("@someone"));
+        assert!(!is_chat_id("-"));
+    }
 
     #[test]
     fn task_kinds_map_to_events() {

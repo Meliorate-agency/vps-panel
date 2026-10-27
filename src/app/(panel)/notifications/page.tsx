@@ -1,12 +1,16 @@
+import { agent } from "@/lib/agent";
 import { db } from "@/lib/db";
+import { getSetting } from "@/lib/settings";
 import Table from "@/components/Table/Table";
 import styles from "@/components/page.module.css";
 import {
   addNotificationAction,
   deleteNotificationAction,
+  setEmailFromAction,
   testNotificationAction,
 } from "@/server-actions/notifications";
 import { NOTIFICATION_EVENTS } from "@/lib/notificationEvents";
+import EmailFromForm from "./EmailFromForm";
 import NotificationForm from "./NotificationForm";
 import TestButton from "./TestButton";
 
@@ -19,12 +23,14 @@ type Row = {
   channel: string;
   target: string;
   events: string;
+  secret: string | null;
 };
 
-export default function NotificationsPage() {
+export default async function NotificationsPage() {
   const rows = db()
-    .prepare(`SELECT id, channel, target, events FROM notifications ORDER BY id DESC`)
+    .prepare(`SELECT id, channel, target, events, secret FROM notifications ORDER BY id DESC`)
     .all() as Row[];
+  const mailboxList = await agent.mail.listMailboxes().catch(() => null);
   return (
     <div>
       <div className={styles.head}>
@@ -34,7 +40,8 @@ export default function NotificationsPage() {
             Where the agent reports failed SSL orders and renewals, backups, deploys and other
             tasks, services that stop in the failed state, and a root disk at 90%. Email goes
             out through this server&apos;s Postfix; webhooks get JSON (Slack and Discord
-            webhook URLs work as is). Use Send test after adding a channel.
+            webhook URLs work as is); Telegram messages come from your own bot. Use Send test
+            after adding a channel.
           </div>
         </div>
       </div>
@@ -44,7 +51,18 @@ export default function NotificationsPage() {
         <NotificationForm action={addNotificationAction} />
       </div>
 
+      <div className={styles.section}>
+        <h2 className={styles.sectionTitle}>Email sender</h2>
+        <EmailFromForm
+          action={setEmailFromAction}
+          current={getSetting("notifications.email_from")}
+          mailboxes={(mailboxList?.mailboxes ?? []).map((m) => m.email.toLowerCase())}
+          server={mailboxList?.server ?? ""}
+        />
+      </div>
+
       <Table
+        scrollX
         columns={[
           { key: "channel", label: "Channel", width: "120px" },
           { key: "target", label: "Target" },
@@ -53,7 +71,16 @@ export default function NotificationsPage() {
         ]}
         rows={rows.map((r) => ({
           channel: <strong>{r.channel}</strong>,
-          target: <span className={styles.code}>{r.target}</span>,
+          target:
+            r.channel === "telegram" ? (
+              <span>
+                <span className={styles.code}>{r.target}</span>{" "}
+                {/* The part before ":" is the bot's public ID, not the secret. */}
+                <span className={styles.muted}>via bot {r.secret?.split(":")[0] ?? "?"}</span>
+              </span>
+            ) : (
+              <span className={styles.code}>{r.target}</span>
+            ),
           events: (
             <span className={styles.muted}>
               {r.events
@@ -65,12 +92,18 @@ export default function NotificationsPage() {
             </span>
           ),
           actions: (
-            <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
-              <TestButton action={testNotificationAction.bind(null, r.id)} />
+            <TestButton
+              action={testNotificationAction.bind(null, r.id)}
+              sentLabel={
+                r.channel === "email"
+                  ? "Handed to the mail server. Not arriving? Track delivery on Mailboxes shows the receiver's answer."
+                  : undefined
+              }
+            >
               <form action={deleteNotificationAction.bind(null, r.id)}>
                 <button type="submit" className={styles.btnDanger}>Remove</button>
               </form>
-            </div>
+            </TestButton>
           ),
         }))}
         empty="No notification channels yet."

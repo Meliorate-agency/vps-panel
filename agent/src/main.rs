@@ -153,6 +153,10 @@ fn ensure_agent_schema(db: &PanelDb) -> Result<()> {
         )
     })
     .context("ensure agent schema")?;
+    // notifications.secret holds a Telegram channel's bot token. The panel's
+    // migration adds it too; this one fails harmlessly when it already exists
+    // or the panel has not created the table yet.
+    let _ = db.with(|conn| conn.execute("ALTER TABLE notifications ADD COLUMN secret TEXT", []));
     Ok(())
 }
 

@@ -118,7 +118,8 @@ function applyMigrations(handle: Database.Database) {
       id        INTEGER PRIMARY KEY AUTOINCREMENT,
       channel   TEXT NOT NULL,
       target    TEXT NOT NULL,
-      events    TEXT NOT NULL
+      events    TEXT NOT NULL,
+      secret    TEXT
     );
 
     CREATE TABLE IF NOT EXISTS settings (
@@ -223,6 +224,17 @@ function applyMigrations(handle: Database.Database) {
   migrateSitesSchema(handle);
   migrateAppsSchema(handle);
   migrateUsersSchema(handle);
+  migrateNotificationsSchema(handle);
+}
+
+function migrateNotificationsSchema(handle: Database.Database) {
+  const cols = handle.prepare("PRAGMA table_info(notifications)").all() as ColumnInfo[];
+  if (cols.length === 0) return;
+  if (!cols.some((c) => c.name === "secret")) {
+    // A Telegram channel's bot token, kept out of `target` so the list and
+    // the audit log only ever show the user ID. The agent adds it too.
+    handle.exec("ALTER TABLE notifications ADD COLUMN secret TEXT");
+  }
 }
 
 function migrateUsersSchema(handle: Database.Database) {

@@ -507,9 +507,10 @@ export const agent = {
   },
 
   notifications: {
-    /** Send a test message to one channel now; rejects when delivery fails. */
-    test: (channel: string, target: string) =>
-      agentRequest<Ok>({ method: "POST", path: "/notifications/test", body: { channel, target } }),
+    /** Send a test message to one channel now; rejects when delivery fails.
+     *  `secret` is a Telegram channel's bot token. */
+    test: (channel: string, target: string, secret: string | null) =>
+      agentRequest<Ok>({ method: "POST", path: "/notifications/test", body: { channel, target, secret } }),
     /** Deliver an event the panel raises (My Networks) to the channels
      *  subscribed to it. The agent sends it in the background. */
     send: (event: string, subject: string, body: string) =>
