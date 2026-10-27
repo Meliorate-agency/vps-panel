@@ -54,7 +54,6 @@ export const dynamic = "force-dynamic";
 const buildColumns = (autoCheck: boolean) => [
   { key: "name", label: "Name" },
   { key: "comment", label: "Comment", width: "200px" },
-  { key: "source", label: "Source", width: "260px" },
   { key: "subdomain", label: "Subdomain" },
   { key: "port", label: "Port", width: "70px" },
   { key: "git", label: "Updates", width: "180px" },
@@ -89,7 +88,7 @@ function buildAppRow(
   return {
     name: (
       <Link href={`/apps/${encodeURIComponent(a.name)}`}>
-        <strong>{a.name}</strong>
+        <strong style={{ whiteSpace: "nowrap" }}>{a.name}</strong>
       </Link>
     ),
     comment: (
@@ -98,35 +97,6 @@ function buildAppRow(
         comment={comments[a.name] ?? ""}
         saveAction={setAppCommentAction}
       />
-    ),
-    source: (
-      <div
-        style={{
-          display: "flex",
-          gap: 6,
-          alignItems: "center",
-          flexWrap: "wrap",
-        }}
-      >
-        {isExternal ? (
-          <StatusBadge text="external" tone="warn" />
-        ) : isDocker ? (
-          <StatusBadge text="docker" tone="info" />
-        ) : (
-          <StatusBadge text="panel" tone="ok" />
-        )}
-        <span className={styles.code}>{(isImageApp ? a.image : a.source_dir) || "-"}</span>
-        {a.source_dir_state === "missing" && (
-          <span title="source_dir doesn't exist on disk">
-            <StatusBadge text="folder missing" tone="danger" />
-          </span>
-        )}
-        {a.source_dir_state === "empty" && (
-          <span title="source_dir exists but is empty">
-            <StatusBadge text="folder empty" tone="warn" />
-          </span>
-        )}
-      </div>
     ),
     subdomain: a.subdomain ? (
       <a
