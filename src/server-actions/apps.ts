@@ -63,82 +63,9 @@ export async function setAutoCheckUpdatesAction(
 }
 
 /**
- * Outcome of an on-demand update check. `updating` means the app was behind
- * and an update task was already spawned — the caller navigates to
- * /tasks/<id> to watch it. Every other kind is terminal information for the
- * operator; nothing was changed on the server.
- */
-export type CheckUpdateResult =
-  | { ok: true; kind: "updating"; taskId: string; behind: number }
-  | { ok: true; kind: "up_to_date" }
-  | { ok: true; kind: "no_git" }
-  | { ok: true; kind: "ahead"; ahead: number }
-  | { ok: true; kind: "diverged"; ahead: number; behind: number }
-  | { ok: false; error: string };
-
-/**
- * One-click "is there an update, and if so ship it" for a single app.
- * Runs the same `git fetch` comparison the page-load path does, then —
- * only when the app is strictly behind — kicks off the normal update task
- * (pull + reinstall + build + restart). Diverged history is reported rather
- * than updated, because `git pull --ff-only` would refuse anyway.
- */
-export async function checkAppUpdateAction(
-  name: string,
-): Promise<CheckUpdateResult> {
-  await requireAdmin();
-  // A Docker app from a registry has no git checkout: "behind" means the
-  // registry has a newer image than the one it runs. One built from Git is
-  // checked like a Node app.
-  let fromRegistry = false;
-  try {
-    const app = await agent.apps.get(name);
-    fromRegistry = app.runtime === "docker" && !app.docker_build;
-  } catch (e: unknown) {
-    return { ok: false, error: e instanceof Error ? e.message : String(e) };
-  }
-  if (fromRegistry) {
-    let image: DockerImageStatus;
-    try {
-      image = await agent.apps.imageStatus(name);
-    } catch (e: unknown) {
-      return { ok: false, error: e instanceof Error ? e.message : String(e) };
-    }
-    if (image.update_available === null) {
-      return { ok: false, error: image.error ?? "could not check the registry" };
-    }
-    if (!image.update_available) return { ok: true, kind: "up_to_date" };
-    const r = await updateAppAction(name);
-    if (!r.ok) return { ok: false, error: r.error };
-    return { ok: true, kind: "updating", taskId: r.taskId, behind: 1 };
-  }
-  let status;
-  try {
-    status = await agent.apps.gitStatus(name);
-  } catch (e: unknown) {
-    return { ok: false, error: e instanceof Error ? e.message : String(e) };
-  }
-
-  if (!status.has_repo) return { ok: true, kind: "no_git" };
-  if (status.error) return { ok: false, error: status.error };
-
-  const behind = status.behind ?? 0;
-  const ahead = status.ahead ?? 0;
-  if (behind > 0 && ahead > 0) return { ok: true, kind: "diverged", ahead, behind };
-  if (behind === 0 && ahead > 0) return { ok: true, kind: "ahead", ahead };
-  if (behind === 0) return { ok: true, kind: "up_to_date" };
-
-  // Behind with a clean fast-forward path — run the update now. Reuses
-  // updateAppAction so the audit row and error shape stay identical to the
-  // Update button's.
-  const r = await updateAppAction(name);
-  if (!r.ok) return { ok: false, error: r.error };
-  return { ok: true, kind: "updating", taskId: r.taskId, behind };
-}
-
-/**
- * Run one app's `git fetch` comparison again (Retry fetch in the Git
- * column's popover after a failed check). Only reports; nothing is pulled.
+ * Run one app's `git fetch` comparison: the Updates column's Check button
+ * when the page-load auto-check is off, and Retry fetch in its popover
+ * after a failed check. Only reports; nothing is pulled.
  */
 export async function refreshGitStatusAction(
   name: string,

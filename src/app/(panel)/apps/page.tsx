@@ -20,8 +20,8 @@ import {
   updateAppAction,
   getAutoCheckUpdates,
   setAutoCheckUpdatesAction,
-  checkAppUpdateAction,
   refreshGitStatusAction,
+  refreshImageStatusAction,
 } from "@/server-actions/apps";
 import {
   createAppFolderAction,
@@ -42,23 +42,21 @@ import ImageStatusBadge from "./ImageStatusBadge";
 import CommentCell from "./CommentCell";
 import { listAppComments, setAppCommentAction } from "@/server-actions/appComments";
 import AutoUpdateCheckToggle from "./AutoUpdateCheckToggle";
-import CheckUpdateButton from "./CheckUpdateButton";
+import CheckStatusCell from "./CheckStatusCell";
 import AppFolderSection from "./AppFolderSection";
 import MoveToFolderButton from "./MoveToFolderButton";
 import NewFolderButton from "./NewFolderButton";
 
 export const dynamic = "force-dynamic";
 
-/** Actions column needs more room for the extra Check button when the
- *  page-load auto-check is off. */
-const buildColumns = (autoCheck: boolean) => [
+const COLUMNS = [
   { key: "name", label: "Name" },
   { key: "comment", label: "Comment", width: "200px" },
   { key: "subdomain", label: "Subdomain" },
   { key: "port", label: "Port", width: "70px" },
   { key: "git", label: "Updates", width: "180px" },
   { key: "status", label: "Status", width: "160px" },
-  { key: "actions", label: "", width: autoCheck ? "150px" : "250px" },
+  { key: "actions", label: "", width: "150px" },
 ];
 
 /**
@@ -134,12 +132,14 @@ function buildAppRow(
     ) : isExternal ? (
       <span className={styles.muted}>—</span>
     ) : (
-      <span
-        className={styles.muted}
-        title="Auto-check on page load is off — use the Check button on this row"
-      >
-        not checked
-      </span>
+      <CheckStatusCell
+        appName={a.name}
+        imageApp={isImageApp}
+        docker={a.docker_build}
+        updateAction={updateAppAction}
+        refreshGitAction={refreshGitStatusAction}
+        refreshImageAction={refreshImageStatusAction}
+      />
     ),
     status: <StatusBadge text={statusText} />,
     actions: isExternal ? (
@@ -168,14 +168,6 @@ function buildAppRow(
       )
     ) : (
       <div style={{ display: "flex", gap: 6, justifyContent: "flex-end" }}>
-        {/* Only when the page-load auto-check is off — otherwise the Git
-            column's badge already offers the update popover. */}
-        {!autoCheck && (
-          <CheckUpdateButton
-            appName={a.name}
-            checkAction={checkAppUpdateAction}
-          />
-        )}
         <Link
           href={`/apps/${encodeURIComponent(a.name)}`}
           className={styles.btnGhost}
@@ -229,7 +221,6 @@ export default async function AppsPage() {
   const tailscale = recipes.some((r) => r.slug === "tailscale" && r.installed)
     ? { card: tailscaleCard(tsStatus), canManage: session?.role === "admin" }
     : null;
-  const columns = buildColumns(autoCheck);
 
   // For every panel-managed app, run `git fetch` in parallel and compare
   // local HEAD to upstream so we can show "up to date" vs "N behind" on
@@ -346,7 +337,7 @@ export default async function AppsPage() {
               <AppFolderSection
                 key={f.id}
                 folder={{ id: f.id, name: f.name, collapsed: f.collapsed }}
-                columns={columns}
+                columns={COLUMNS}
                 rows={folderApps.map((a) =>
                   buildAppRow(
                     a,
@@ -372,7 +363,7 @@ export default async function AppsPage() {
             <AppFolderSection
               folder={null}
               fallbackLabel="Ungrouped"
-              columns={columns}
+              columns={COLUMNS}
               rows={ungrouped.map((a) =>
                 buildAppRow(
                   a,
@@ -398,7 +389,7 @@ export default async function AppsPage() {
             <AppFolderSection
               folder={null}
               fallbackLabel="External"
-              columns={columns}
+              columns={COLUMNS}
               rows={externalApps.map((a) =>
                 buildAppRow(a, gitStatuses, imageStatuses, comments, null, autoCheck),
               )}
