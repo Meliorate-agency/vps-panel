@@ -56,8 +56,7 @@ export default async function NotificationsPage() {
         <EmailFromForm
           action={setEmailFromAction}
           current={getSetting("notifications.email_from")}
-          mailboxes={(mailboxList?.mailboxes ?? []).map((m) => m.email.toLowerCase())}
-          server={mailboxList?.server ?? ""}
+          mailboxes={mailboxList ? mailboxList.mailboxes.map((m) => m.email.toLowerCase()) : null}
         />
       </div>
 

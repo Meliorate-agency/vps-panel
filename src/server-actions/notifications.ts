@@ -98,9 +98,9 @@ export async function testNotificationAction(id: number): Promise<ActionResult> 
 
 /**
  * `notifications.email_from`: the mailbox notification email is sent as.
- * Empty = Postfix's default, root@<server hostname>. Only an existing
- * mailbox is accepted, so its domain's SPF and DKIM cover the message and
- * bounces have somewhere to land.
+ * Only an existing mailbox is accepted, so its domain's SPF and DKIM cover
+ * the message and bounces have somewhere to land. (Unset, the agent falls
+ * back to Postfix's root@<server hostname>, but that is never offered.)
  */
 export async function setEmailFromAction(
   _prev: ActionResult | null,
@@ -108,15 +108,14 @@ export async function setEmailFromAction(
 ): Promise<ActionResult> {
   const s = await requireAdmin();
   const from = String(fd.get("email_from") ?? "").trim().toLowerCase();
-  if (from) {
-    const list = await agent.mail.listMailboxes().catch(() => null);
-    if (!list) return { ok: false, error: "could not read the mailbox list from the agent" };
-    if (!list.mailboxes.some((m) => m.email.toLowerCase() === from)) {
-      return { ok: false, error: `${from} is not a mailbox on this server` };
-    }
+  if (!from) return { ok: false, error: "pick a mailbox" };
+  const list = await agent.mail.listMailboxes().catch(() => null);
+  if (!list) return { ok: false, error: "could not read the mailbox list from the agent" };
+  if (!list.mailboxes.some((m) => m.email.toLowerCase() === from)) {
+    return { ok: false, error: `${from} is not a mailbox on this server` };
   }
   setSetting("notifications.email_from", from);
-  writeAudit({ actorId: s.userId, action: "notifications.email_from", target: from || "(server default)", result: "ok" });
+  writeAudit({ actorId: s.userId, action: "notifications.email_from", target: from, result: "ok" });
   revalidatePath("/notifications");
   return { ok: true };
 }
