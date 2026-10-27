@@ -5,6 +5,7 @@ import { agent } from "@/lib/agent";
 import { requireAdmin } from "@/lib/auth";
 import { writeAudit } from "@/lib/audit";
 import { agentErrorMessage } from "@/lib/redirects";
+import { mailboxDomains } from "@/lib/mailboxDomains";
 import type { SslTaskResult } from "@/lib/sslTaskResult";
 import type { MailTrackResp } from "@/lib/agent";
 
@@ -26,6 +27,16 @@ export async function createMailboxAction(
     return { ok: false, error: "invalid email address" };
   }
   const domain = email.slice(atIdx + 1);
+  const allowed = mailboxDomains();
+  if (!allowed.includes(domain)) {
+    const parent = allowed.find((d) => domain.endsWith(`.${d}`));
+    return {
+      ok: false,
+      error: parent
+        ? `${domain} is a subdomain: create the mailbox on ${parent} instead.`
+        : `${domain} is not a domain on this server. Add it on the Domains page first.`,
+    };
+  }
 
   try {
     // Auto-register the domain as a mail domain if it isn't already.

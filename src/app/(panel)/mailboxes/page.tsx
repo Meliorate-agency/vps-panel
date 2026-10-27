@@ -1,6 +1,7 @@
 import Link from "next/link";
 import { agent, type MailAliasRow, type MailDomainRow } from "@/lib/agent";
 import { db } from "@/lib/db";
+import { mailboxDomains } from "@/lib/mailboxDomains";
 import ConfirmDeleteButton from "@/components/ConfirmDeleteButton/ConfirmDeleteButton";
 import StatusBadge from "@/components/StatusBadge/StatusBadge";
 import Table from "@/components/Table/Table";
@@ -29,18 +30,7 @@ export const dynamic = "force-dynamic";
 type MailboxListShape = { server: string; mailboxes: { id: number; email: string; quota_mb: number }[] };
 
 export default async function MailboxesPage() {
-  // All domains the user has set up locally (sites OR PowerDNS zones).
-  // Matches the source of truth used by the Domains tab.
-  const knownDomains = (
-    db()
-      .prepare(`
-        SELECT domain AS name FROM sites
-        UNION
-        SELECT name FROM domains
-        ORDER BY name ASC
-      `)
-      .all() as { name: string }[]
-  ).map((r) => r.name);
+  const knownDomains = mailboxDomains();
 
   const [mailboxResp, sysinfo, recipes, aliases, mailDomains] = await Promise.all([
     agent.mail
