@@ -82,8 +82,9 @@ export default async function AppDetailPage({
   // Project `.env*` files live inside the source dir. Skip the fetch when the
   // folder doesn't exist (the agent would just 404); the component falls back
   // to a client-side load + inline error if this comes back null.
+  // External apps get the deploy form's own editor, which loads by itself.
   const initialEnvFiles =
-    app.source_dir_state === "missing" || isDocker
+    app.source_dir_state === "missing" || isDocker || isExternal
       ? null
       : await agent.apps.listEnvFiles(name).catch(() => null);
 
@@ -115,15 +116,19 @@ export default async function AppDetailPage({
   }
 
   if (isExternal) {
+    // The panel writes the app row only on Deploy, so an app pulled /
+    // installed / built from the deploy form but not deployed yet lands here
+    // too. Without a unit of its own it is that, not someone else's app.
+    const notDeployed = !app.active;
     return (
       <div>
         <div className={styles.head}>
           <div>
             <h1 className={styles.title}>{app.name}</h1>
             <div className={styles.subtitle}>
-              <StatusBadge text="external" tone="warn" />{" "}
+              <StatusBadge text={notDeployed ? "not deployed" : "external"} tone="warn" />{" "}
               <span className={styles.code}>{app.source_dir}</span>{" "}
-              <StatusBadge text={app.sub || app.active || "no systemd unit"} />
+              {!notDeployed && <StatusBadge text={app.sub || app.active} />}
             </div>
           </div>
         </div>
@@ -143,13 +148,27 @@ export default async function AppDetailPage({
         >
           <span style={{ fontSize: 18, lineHeight: 1 }}>⚠️</span>
           <div>
-            <strong>This app was detected externally.</strong> The folder{" "}
-            <span className={styles.code}>{app.source_dir}</span> exists but
-            the panel didn&apos;t create it and doesn&apos;t manage its
-            systemd unit. Use the form below to bind it to panel management:
-            paste a repo URL, pick a routing slot, then run{" "}
-            <strong>Pull</strong> → <strong>Install</strong> →{" "}
-            <strong>Build</strong> → <strong>Deploy</strong>. Deploy writes a{" "}
+            {notDeployed ? (
+              <>
+                <strong>Not deployed yet.</strong> The code is in{" "}
+                <span className={styles.code}>{app.source_dir}</span> but
+                there is no service for it. Finish below:{" "}
+                <strong>Pull</strong> → <strong>Install</strong> →{" "}
+                <strong>Build</strong> → <strong>Deploy</strong> (any step can
+                be run again).
+              </>
+            ) : (
+              <>
+                <strong>This app was detected externally.</strong> The folder{" "}
+                <span className={styles.code}>{app.source_dir}</span> exists
+                but the panel didn&apos;t create it and doesn&apos;t manage
+                its systemd unit. Use the form below to bind it to panel
+                management: paste a repo URL, pick a routing slot, then run{" "}
+                <strong>Pull</strong> → <strong>Install</strong> →{" "}
+                <strong>Build</strong> → <strong>Deploy</strong>.
+              </>
+            )}{" "}
+            Deploy writes a{" "}
             <span className={styles.code}>
               vps-app-{app.name}.service
             </span>{" "}
@@ -164,8 +183,13 @@ export default async function AppDetailPage({
           </div>
         </div>
 
+        {/* The deploy form carries the Project env files editor itself
+            once the folder has code; a second one here showed every file
+            twice. */}
         <div className={styles.section}>
-          <h2 className={styles.sectionTitle}>Set up panel management</h2>
+          <h2 className={styles.sectionTitle}>
+            {notDeployed ? "Finish deploying" : "Set up panel management"}
+          </h2>
           <DeployForm
             action={deployAppAction}
             checkSourceState={checkAppSourceStateAction}
@@ -175,11 +199,6 @@ export default async function AppDetailPage({
             lockedName={app.name}
             initialRepoUrl={initialRepoUrl}
           />
-        </div>
-
-        <div className={styles.section}>
-          <h2 className={styles.sectionTitle}>Project env files</h2>
-          <EnvFilesEditor name={name} initialData={initialEnvFiles} />
         </div>
 
         <div className={styles.section}>

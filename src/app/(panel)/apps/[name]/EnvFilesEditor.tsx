@@ -27,8 +27,8 @@ type Props = {
   /** Server-fetched file list (detail page) so there's no load flash. When
    *  omitted (deploy form), the component fetches on mount. */
   initialData?: AppEnvFilesResp | null;
-  /** Deploy-form context: the app may not have a systemd unit yet, so a
-   *  "restart" can be a no-op. Tweaks the copy accordingly. */
+  /** Deploy-form context: there may be no systemd unit to restart yet, and
+   *  Deploy restarts the app anyway, so only plain Save / Create show. */
   preDeploy?: boolean;
 };
 
@@ -346,20 +346,22 @@ function FileCard({
               >
                 <button
                   type="button"
-                  className={styles.btnGhost}
+                  className={preDeploy ? styles.btn : styles.btnGhost}
                   disabled={saving}
                   onClick={() => save(false)}
                 >
                   {saving ? "Saving..." : "Save"}
                 </button>
-                <button
-                  type="button"
-                  className={styles.btn}
-                  disabled={saving}
-                  onClick={() => save(true)}
-                >
-                  {saving ? "Saving..." : "Save & restart"}
-                </button>
+                {!preDeploy && (
+                  <button
+                    type="button"
+                    className={styles.btn}
+                    disabled={saving}
+                    onClick={() => save(true)}
+                  >
+                    {saving ? "Saving..." : "Save & restart"}
+                  </button>
+                )}
               </div>
             </>
           )}
@@ -549,20 +551,22 @@ function CreateForm({
       >
         <button
           type="button"
-          className={styles.btnGhost}
+          className={preDeploy ? styles.btn : styles.btnGhost}
           disabled={saving}
           onClick={() => create(false)}
         >
           {saving ? "Creating..." : "Create"}
         </button>
-        <button
-          type="button"
-          className={styles.btn}
-          disabled={saving}
-          onClick={() => create(true)}
-        >
-          {saving ? "Creating..." : "Create & restart"}
-        </button>
+        {!preDeploy && (
+          <button
+            type="button"
+            className={styles.btn}
+            disabled={saving}
+            onClick={() => create(true)}
+          >
+            {saving ? "Creating..." : "Create & restart"}
+          </button>
+        )}
       </div>
     </div>
   );
@@ -573,9 +577,7 @@ function savedMessage(
   restarted: string | null,
   preDeploy: boolean,
 ): string {
-  if (!restart) return "Saved.";
+  if (!restart) return preDeploy ? "Saved. The next Build and Deploy use it." : "Saved.";
   if (restarted) return `Saved. Restarted ${restarted}.`;
-  return preDeploy
-    ? "Saved. No service to restart yet - it'll pick this up on Deploy."
-    : "Saved. No running service found to restart.";
+  return "Saved. No running service found to restart.";
 }
