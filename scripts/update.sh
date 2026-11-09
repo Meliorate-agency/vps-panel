@@ -545,6 +545,97 @@ EOF
 }
 enable_sieve || true
 
+# Standard folders and spam filing on boxes installed before them (install.sh
+# writes the same two files): Dovecot creates and subscribes Drafts, Sent,
+# Trash and Junk for every mailbox on its next login or delivery, and a global
+# Sieve script run before each mailbox's own filters files Rspamd's
+# `X-Spam: Yes` mail into Junk. Mail already stored does not move. Checked with
+# sievec and doveconf before Dovecot reloads; put back on failure. The binary
+# is recompiled on every update, in case a dovecot-sieve upgrade outdated it.
+# Idempotent, and never fails the update.
+enable_junk_folder() {
+  local conf=/etc/dovecot/conf.d/92-vps-panel-junk.conf
+  local dir=/etc/dovecot/sieve
+  local script=$dir/vps-panel-spam.sieve bin=$dir/vps-panel-spam.svbin
+  [[ -d /etc/dovecot/conf.d ]] && command -v doveconf >/dev/null 2>&1 \
+    && command -v sievec >/dev/null 2>&1 || return 0
+
+  local want_script want_conf
+  want_script="$(cat <<'EOF'
+# Managed by vps-panel: mail Rspamd tagged as spam goes to Junk. Runs before
+# each mailbox's own Sieve script; stop keeps that script (filters, Out of
+# Office) from acting on spam.
+require ["fileinto", "mailbox"];
+if header :is "X-Spam" "Yes" {
+  fileinto :create "Junk";
+  stop;
+}
+EOF
+)"
+  want_conf="$(cat <<'EOF'
+# Managed by vps-panel: standard folders for every mailbox, and spam into Junk.
+namespace inbox {
+  mailbox Drafts {
+    auto = subscribe
+    special_use = \Drafts
+  }
+  mailbox Sent {
+    auto = subscribe
+    special_use = \Sent
+  }
+  mailbox Trash {
+    auto = subscribe
+    special_use = \Trash
+  }
+  mailbox Junk {
+    auto = subscribe
+    special_use = \Junk
+  }
+}
+plugin {
+  sieve_before = /etc/dovecot/sieve/vps-panel-spam.sieve
+}
+EOF
+)"
+  if [[ "$(cat "$script" 2>/dev/null)" == "$want_script" \
+        && "$(cat "$conf" 2>/dev/null)" == "$want_conf" ]]; then
+    sievec "$script" >/dev/null 2>&1 && chmod 0644 "$bin" || true
+    return 0
+  fi
+
+  local backup_dir=/var/backups/vps-panel-config stamp f
+  stamp="$(date +%Y%m%d%H%M%S)"
+  install -d -m 0700 "$backup_dir"
+  for f in "$script" "$conf"; do
+    [[ -f "$f" ]] && cp -a "$f" "$backup_dir/$(basename "$f").bak-$stamp"
+  done
+  install -d -m 0755 "$dir"
+  printf '%s\n' "$want_script" > "$script"
+  printf '%s\n' "$want_conf" > "$conf"
+
+  local ok=1
+  sievec "$script" >/dev/null 2>&1 || ok=0
+  chmod 0644 "$script" "$conf" "$bin" 2>/dev/null || true
+  doveconf -n >/dev/null 2>&1 || ok=0
+  if [[ $ok -eq 1 ]]; then
+    systemctl reload dovecot || true
+    echo "dovecot: Junk folder for every mailbox; spam goes there"
+  else
+    echo "the Junk folder config failed its checks - putting it back" >&2
+    for f in "$script" "$conf"; do
+      if [[ -f "$backup_dir/$(basename "$f").bak-$stamp" ]]; then
+        cp -a "$backup_dir/$(basename "$f").bak-$stamp" "$f"
+      else
+        rm -f "$f"
+      fi
+    done
+    rm -f "$bin"
+    [[ -f "$script" ]] && sievec "$script" >/dev/null 2>&1 || true
+  fi
+  return 0
+}
+enable_junk_folder || true
+
 # Retire the nginx fail2ban jails: nothing in the panel's nginx uses basic
 # auth or limit_req, and nginx logs to files the systemd backend never reads,
 # so they could never ban anyone while showing up as protection. Dropping

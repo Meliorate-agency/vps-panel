@@ -627,6 +627,54 @@ plugin {
 EOF
 chmod 0644 /etc/dovecot/conf.d/91-vps-panel-sieve.conf
 
+# Standard folders and spam filing. Every mailbox gets Drafts, Sent, Trash and
+# Junk, created and subscribed on its first login or delivery, with the
+# special-use flags mail clients look for. Rspamd tags likely spam with
+# `X-Spam: Yes` (removing any copy the sender added) and a global Sieve script,
+# run before the mailbox's own filters, files it into Junk and stops there, so
+# those filters and Out of Office never act on spam. update.sh::enable_junk_folder
+# writes the same two files on boxes installed before this.
+install -d -m 0755 /etc/dovecot/sieve
+cat > /etc/dovecot/sieve/vps-panel-spam.sieve <<'EOF'
+# Managed by vps-panel: mail Rspamd tagged as spam goes to Junk. Runs before
+# each mailbox's own Sieve script; stop keeps that script (filters, Out of
+# Office) from acting on spam.
+require ["fileinto", "mailbox"];
+if header :is "X-Spam" "Yes" {
+  fileinto :create "Junk";
+  stop;
+}
+EOF
+cat > /etc/dovecot/conf.d/92-vps-panel-junk.conf <<'EOF'
+# Managed by vps-panel: standard folders for every mailbox, and spam into Junk.
+namespace inbox {
+  mailbox Drafts {
+    auto = subscribe
+    special_use = \Drafts
+  }
+  mailbox Sent {
+    auto = subscribe
+    special_use = \Sent
+  }
+  mailbox Trash {
+    auto = subscribe
+    special_use = \Trash
+  }
+  mailbox Junk {
+    auto = subscribe
+    special_use = \Junk
+  }
+}
+plugin {
+  sieve_before = /etc/dovecot/sieve/vps-panel-spam.sieve
+}
+EOF
+# Compiled here because LMTP runs as the mailbox user and cannot write the
+# binary into /etc/dovecot/sieve.
+sievec /etc/dovecot/sieve/vps-panel-spam.sieve
+chmod 0644 /etc/dovecot/sieve/vps-panel-spam.sieve /etc/dovecot/sieve/vps-panel-spam.svbin \
+  /etc/dovecot/conf.d/92-vps-panel-junk.conf
+
 # Warning delivery script. Invoked by Dovecot's quota plugin with two args:
 # the percentage threshold that was crossed (80 or 90) and the mailbox.
 # `noenforcing` on the dovecot-lda quota lets the warning itself be delivered
