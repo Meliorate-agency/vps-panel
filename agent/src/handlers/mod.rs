@@ -39,6 +39,7 @@ pub fn router(state: AppState) -> Router {
     Router::new()
         .route("/health", get(health::get))
         .route("/sysinfo", get(diag::sysinfo))
+        .route("/sysinfo/folders", get(diag::folder_sizes))
         // Apps
         .route("/apps", get(apps::list).post(apps::create))
         .route("/apps/{name}", get(apps::get).delete(apps::delete))

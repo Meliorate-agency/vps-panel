@@ -4,6 +4,7 @@ import HealthChart from "@/components/HealthChart/HealthChart";
 import Table from "@/components/Table/Table";
 import styles from "@/components/page.module.css";
 import grid from "./grid.module.css";
+import FolderBreakdown from "./FolderBreakdown";
 import { fetchLoadOne, fetchMemUsedPct } from "./samples";
 
 export const dynamic = "force-dynamic";
@@ -190,6 +191,7 @@ export default async function DashboardPage() {
         </div>
       )}
 
+      {info && <FolderBreakdown />}
     </div>
   );
 }

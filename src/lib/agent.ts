@@ -72,6 +72,14 @@ export function agentRequest<T = unknown>(opts: RequestOptions): Promise<T> {
 export const agent = {
   health: () => agentRequest<{ ok: boolean; version: string; now: string }>({ method: "GET", path: "/health" }),
   sysinfo: () => agentRequest<SysInfo>({ method: "GET", path: "/sysinfo" }),
+  /** How much of / each key folder takes. The agent runs `du` (slow on a big
+   *  disk) and serves the result for 10 minutes; `refresh` measures again. */
+  folderSizes: (refresh = false) =>
+    agentRequest<FolderSizes>({
+      method: "GET",
+      path: "/sysinfo/folders",
+      query: { refresh: refresh || undefined },
+    }),
 
   apps: {
     list: () => agentRequest<AppRow[]>({ method: "GET", path: "/apps" }),
@@ -1056,6 +1064,31 @@ export type SysInfo = {
   cpu_count: number;
   disk: { mount: string; total_bytes: number; free_bytes: number }[];
   net: { iface: string; rx_bytes: number; tx_bytes: number }[];
+};
+
+/** data = kept by people or apps, system = OS / panel / its tools,
+ *  cache = downloaded again when needed, leftover = left by builds/updates. */
+export type FolderKind = "data" | "system" | "cache" | "leftover";
+
+export type FolderSize = {
+  path: string;
+  label: string;
+  kind: FolderKind;
+  /** The listed folder this one sits in (its bytes are part of that one's). */
+  parent: string | null;
+  /** null when du failed or timed out. */
+  bytes: number | null;
+};
+
+export type FolderSizes = {
+  mount: string;
+  total_bytes: number;
+  /** df Used; total - used - avail is the filesystem's reserve for root. */
+  used_bytes: number;
+  avail_bytes: number;
+  measured_at: string;
+  took_ms: number;
+  folders: FolderSize[];
 };
 
 export type SwapArea = {

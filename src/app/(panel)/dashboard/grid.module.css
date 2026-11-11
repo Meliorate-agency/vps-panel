@@ -115,3 +115,65 @@
   margin: 0 8px;
   color: var(--text-dim);
 }
+
+/* "What uses the space on /" (FolderBreakdown). */
+.sectionHead {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+  margin-bottom: 12px;
+}
+
+.sectionHead > h2 {
+  margin: 0;
+}
+
+.sectionMeta {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-size: 12px;
+}
+
+.folderCell {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  min-width: 0;
+}
+
+.folderPath {
+  overflow-wrap: anywhere;
+}
+
+.folderConnector {
+  color: var(--text-dim);
+  font-family: var(--mono);
+  font-size: 12px;
+}
+
+.folderLabel {
+  color: var(--text-dim);
+  font-size: 12px;
+}
+
+.folderSize {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 12px;
+}
+
+.folderBar {
+  height: 6px;
+  background: var(--bg-elev-2);
+  border-radius: 3px;
+  overflow: hidden;
+}
+
+.folderBar > div {
+  height: 100%;
+  background: var(--accent);
+}

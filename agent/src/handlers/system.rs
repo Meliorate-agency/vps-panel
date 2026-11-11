@@ -722,7 +722,7 @@ async fn other_default_server() -> bool {
 /// the agent reads it at request time. Default fallback matches the documented
 /// convention (`/root/vps-panel-src`) for older installs that didn't have the
 /// var written by install.sh.
-fn repo_dir() -> String {
+pub(crate) fn repo_dir() -> String {
     std::env::var("REPO_DIR").unwrap_or_else(|_| "/root/vps-panel-src".to_string())
 }
 
