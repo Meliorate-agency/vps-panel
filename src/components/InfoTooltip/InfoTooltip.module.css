@@ -26,17 +26,26 @@
 }
 
 .wrap:hover .icon,
-.wrap:focus-within .icon {
+.wrap:focus .icon {
   color: var(--accent);
   border-color: var(--accent);
 }
 
+.wrap:focus {
+  outline: none;
+}
+
+.wrap:focus-visible .icon {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+
+/* Portaled to <body>; left/top are the icon's centre and top (or bottom,
+   with .below) in viewport coordinates. */
 .tooltip {
-  position: absolute;
-  bottom: calc(100% + 8px);
-  left: 50%;
-  transform: translateX(-50%);
-  z-index: 100;
+  position: fixed;
+  transform: translate(-50%, calc(-100% - 8px));
+  z-index: 1100;
   min-width: 180px;
   max-width: 280px;
   padding: 8px 10px;
@@ -53,24 +62,37 @@
   white-space: normal;
   overflow-wrap: break-word;
   pointer-events: none;
-  opacity: 0;
-  visibility: hidden;
-  transition: opacity 120ms ease, visibility 0s linear 120ms;
+  animation: tooltipIn 120ms ease;
 }
 
+.below {
+  transform: translate(-50%, 8px);
+}
+
+/* The arrow points at the icon even when the bubble was pushed in from the
+   viewport edge (--arrow-dx). */
 .tooltip::after {
   content: "";
   position: absolute;
   top: 100%;
-  left: 50%;
+  left: calc(50% + var(--arrow-dx, 0px));
   transform: translateX(-50%);
   border: 6px solid transparent;
   border-top-color: var(--border-strong);
 }
 
-.wrap:hover .tooltip,
-.wrap:focus-within .tooltip {
-  opacity: 1;
-  visibility: visible;
-  transition: opacity 120ms ease, visibility 0s linear 0s;
+.below::after {
+  top: auto;
+  bottom: 100%;
+  border-top-color: transparent;
+  border-bottom-color: var(--border-strong);
+}
+
+@keyframes tooltipIn {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
 }

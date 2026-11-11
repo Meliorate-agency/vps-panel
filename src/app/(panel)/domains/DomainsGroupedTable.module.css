@@ -1,13 +1,17 @@
+/* Domain names never wrap: a long subdomain widens its column and the table
+   scrolls inside its card (Table scrollX="content"). */
 .apexCell {
   display: inline-flex;
   align-items: center;
   gap: 6px;
+  white-space: nowrap;
 }
 
 .apexFlat {
   display: inline-flex;
   align-items: center;
   padding-left: 24px;
+  white-space: nowrap;
 }
 
 .chevron {
@@ -48,6 +52,7 @@
   align-items: center;
   gap: 8px;
   padding-left: 28px;
+  white-space: nowrap;
 }
 
 .connector {

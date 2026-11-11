@@ -1,6 +1,7 @@
 "use client";
 
 import { useState, useTransition } from "react";
+import { createPortal } from "react-dom";
 import styles from "@/components/page.module.css";
 import ConfirmDialog from "@/components/ConfirmDialog/ConfirmDialog";
 
@@ -52,79 +53,85 @@ export default function DomainDeleteButton({
         {pending ? "Deleting…" : buttonLabel}
       </button>
 
-      <ConfirmDialog
-        open={open}
-        title={`Delete ${zone} and everything under it?`}
-        confirmLabel={pending ? "Deleting…" : "Delete everything"}
-        cancelLabel="Cancel"
-        tone="danger"
-        pending={pending}
-        onConfirm={onConfirm}
-        onCancel={() => {
-          if (pending) return;
-          setOpen(false);
-        }}
-      >
-        <p>This will permanently remove:</p>
-        <ul>
-          <li>
-            PowerDNS zone <span className={styles.code}>{zone}</span> and{" "}
-            <strong>every record inside it</strong> (apex, www, mail, ns1, ns2,
-            MX, SPF, DMARC, DKIM, plus any subdomains you added).
-          </li>
-          <li>
-            The nginx vhost for <span className={styles.code}>{zone}</span>.
-          </li>
-          {subSiteCount > 0 && (
-            <li>
-              <strong>
-                {subSiteCount} sub-site
-                {subSiteCount === 1 ? "" : "s"}
-              </strong>{" "}
-              under <span className={styles.code}>{zone}</span> (their nginx
-              vhosts and panel SQLite rows).
-            </li>
-          )}
-        </ul>
-        <p>What stays intact:</p>
-        <ul>
-          <li>
-            Mailbox data and credentials under{" "}
-            <span className={styles.code}>/var/vmail/{zone}/</span> and the
-            virtual_users table. Mail won&apos;t deliver without DNS, but the
-            archive survives if you re-add the domain later.
-          </li>
-          <li>
-            DKIM private key at{" "}
-            <span className={styles.code}>/var/lib/rspamd/dkim/{zone}.default.key</span>.
-          </li>
-          <li>
-            Any Let&apos;s Encrypt cert at{" "}
-            <span className={styles.code}>/etc/vps-panel/certs/{zone}/</span> —
-            reused automatically if you re-add the domain.
-          </li>
-          <li>
-            Apps. If an app still routes through this domain or one of its
-            subdomains, nothing is deleted: remove the domain on the app&apos;s
-            page first.
-          </li>
-        </ul>
-        <div
-          style={{
-            marginTop: 12,
-            padding: "8px 10px",
-            background: "rgba(255, 80, 80, 0.08)",
-            border: "1px solid rgba(255, 80, 80, 0.32)",
-            borderRadius: 6,
-            fontSize: 12,
-          }}
-        >
-          This action cannot be undone from the UI. You can re-add the domain
-          from <span className={styles.code}>/domains</span> afterwards, but
-          the DNS zone&apos;s SOA serial and any custom records you added
-          manually will need to be recreated.
-        </div>
-      </ConfirmDialog>
+      {/* Portaled: in the Domains table the card's backdrop-filter would
+          otherwise place and clip the dialog's fixed backdrop. */}
+      {open &&
+        createPortal(
+          <ConfirmDialog
+            open={open}
+            title={`Delete ${zone} and everything under it?`}
+            confirmLabel={pending ? "Deleting…" : "Delete everything"}
+            cancelLabel="Cancel"
+            tone="danger"
+            pending={pending}
+            onConfirm={onConfirm}
+            onCancel={() => {
+              if (pending) return;
+              setOpen(false);
+            }}
+          >
+            <p>This will permanently remove:</p>
+            <ul>
+              <li>
+                PowerDNS zone <span className={styles.code}>{zone}</span> and{" "}
+                <strong>every record inside it</strong> (apex, www, mail, ns1, ns2,
+                MX, SPF, DMARC, DKIM, plus any subdomains you added).
+              </li>
+              <li>
+                The nginx vhost for <span className={styles.code}>{zone}</span>.
+              </li>
+              {subSiteCount > 0 && (
+                <li>
+                  <strong>
+                    {subSiteCount} sub-site
+                    {subSiteCount === 1 ? "" : "s"}
+                  </strong>{" "}
+                  under <span className={styles.code}>{zone}</span> (their nginx
+                  vhosts and panel SQLite rows).
+                </li>
+              )}
+            </ul>
+            <p>What stays intact:</p>
+            <ul>
+              <li>
+                Mailbox data and credentials under{" "}
+                <span className={styles.code}>/var/vmail/{zone}/</span> and the
+                virtual_users table. Mail won&apos;t deliver without DNS, but the
+                archive survives if you re-add the domain later.
+              </li>
+              <li>
+                DKIM private key at{" "}
+                <span className={styles.code}>/var/lib/rspamd/dkim/{zone}.default.key</span>.
+              </li>
+              <li>
+                Any Let&apos;s Encrypt cert at{" "}
+                <span className={styles.code}>/etc/vps-panel/certs/{zone}/</span> -
+                reused automatically if you re-add the domain.
+              </li>
+              <li>
+                Apps. If an app still routes through this domain or one of its
+                subdomains, nothing is deleted: remove the domain on the app&apos;s
+                page first.
+              </li>
+            </ul>
+            <div
+              style={{
+                marginTop: 12,
+                padding: "8px 10px",
+                background: "rgba(255, 80, 80, 0.08)",
+                border: "1px solid rgba(255, 80, 80, 0.32)",
+                borderRadius: 6,
+                fontSize: 12,
+              }}
+            >
+              This action cannot be undone from the UI. You can re-add the domain
+              from <span className={styles.code}>/domains</span> afterwards, but
+              the DNS zone&apos;s SOA serial and any custom records you added
+              manually will need to be recreated.
+            </div>
+          </ConfirmDialog>,
+          document.body,
+        )}
     </>
   );
 }

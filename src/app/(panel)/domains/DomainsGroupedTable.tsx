@@ -16,10 +16,10 @@ type Props = {
   columns: { key: string; label: string; width?: string }[];
   rows: GroupedRow[];
   empty?: string;
-  /** Forwarded to <Table>. When true, the table scrolls horizontally
-   *  inside its own purple card on mobile instead of pushing the page
-   *  layout. Domains rows have no popovers in cells — safe to enable. */
-  scrollX?: boolean;
+  /** Forwarded to <Table>. The table scrolls horizontally inside its own
+   *  card instead of pushing the page layout. Safe because the cells'
+   *  dialogs and tooltips are portaled to <body>, out of the clip. */
+  scrollX?: boolean | "always" | "content";
 };
 
 export default function DomainsGroupedTable({ columns, rows, empty, scrollX = false }: Props) {

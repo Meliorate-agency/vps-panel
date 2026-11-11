@@ -27,8 +27,11 @@ type Props = {
    * traps absolutely-positioned descendants. For tables that DO have
    * popovers (apps, mailboxes), set this true AND portal the popover to
    * document.body to escape the clip.
+   * "always": scroll at any width, and never squeeze the columns below their
+   * declared widths. "content": scroll at any width, but only once the
+   * columns have shrunk to their content (nowrap cells set how far).
    */
-  scrollX?: boolean | "always";
+  scrollX?: boolean | "always" | "content";
   /**
    * Show at most this many rows and scroll inside the card for the rest,
    * with the header pinned (long lists like the firewall's open ports).
@@ -70,7 +73,11 @@ export default function Table({
     <div
       className={[
         styles.wrap,
-        scrollX === "always" ? styles.wrapScrollXAlways : scrollX ? styles.wrapScrollX : "",
+        scrollX === "always" || scrollX === "content"
+          ? styles.wrapScrollXAlways
+          : scrollX
+            ? styles.wrapScrollX
+            : "",
         capped ? styles.wrapScrollY : "",
       ]
         .join(" ")

@@ -20,6 +20,7 @@ import { adoptZoneAction, deleteDomainAction } from "@/server-actions/domains";
 import { ensureMailSslAction } from "@/server-actions/mail";
 import AddDomainForm from "./AddDomainForm";
 import DomainDeleteButton from "./DomainDeleteButton";
+import SiteDeleteButton from "./SiteDeleteButton";
 import SslIssuingBadge from "./SslIssuingBadge";
 import SslTaskButton from "./SslTaskButton";
 
@@ -217,11 +218,12 @@ export default async function DomainsPage({
       </div>
 
       <DomainsGroupedTable
-        scrollX
+        // Domain names stay on one line; a row wider than the card scrolls
+        // inside it instead of running past the card and the page.
+        scrollX="content"
         columns={[
-          // Pin every column so the table has a real intrinsic width
-          // (~1170px) and triggers inner horizontal scroll on mobile
-          // instead of squeezing the SSL cell into multi-line wrap.
+          // Width hints: the table shrinks wrappable cells (Target) first,
+          // then scrolls; the SSL cell and the names never wrap.
           { key: "domain", label: "Domain", width: "260px" },
           { key: "mode", label: "Mode", width: "110px" },
           { key: "target", label: "Target", width: "240px" },
@@ -397,14 +399,7 @@ function buildGroupedRows({
                 />
               ) : (
                 r.mode !== null && (
-                  <form action={deleteSiteAction.bind(null, r.domain)}>
-                    <PendingButton
-                      className={styles.btnDanger}
-                      pendingLabel="Deleting..."
-                    >
-                      Delete
-                    </PendingButton>
-                  </form>
+                  <SiteDeleteButton domain={r.domain} action={deleteSiteAction} />
                 )
               )}
             </div>
@@ -477,14 +472,13 @@ function buildGroupedRows({
             </span>
           ),
           actions: canRemove ? (
-            <form action={removeAgentOnlySiteAction.bind(null, domain)}>
-              <PendingButton
-                className={styles.btnDanger}
-                pendingLabel="Removing..."
-              >
-                Remove from agent
-              </PendingButton>
-            </form>
+            <SiteDeleteButton
+              domain={domain}
+              action={removeAgentOnlySiteAction}
+              label="Remove from agent"
+              pendingLabel="Removing..."
+              title={`Remove ${domain} from the agent?`}
+            />
           ) : vhostKind === "app" ? (
             <Link
               href={`/apps`}

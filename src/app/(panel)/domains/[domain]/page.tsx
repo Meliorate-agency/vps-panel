@@ -31,6 +31,7 @@ import EnableDnsForm from "./EnableDnsForm";
 import AddDomainForm from "../AddDomainForm";
 import ReconcileButton from "./ReconcileButton";
 import DomainDeleteButton from "../DomainDeleteButton";
+import SiteDeleteButton from "../SiteDeleteButton";
 
 export const dynamic = "force-dynamic";
 
@@ -369,11 +370,13 @@ function RoutingEditor({
         action={updateSiteRouteAction.bind(null, site.domain)}
       />
       <div style={{ marginTop: 12 }}>
-        <form action={deleteSiteAction.bind(null, site.domain)}>
-          <button type="submit" className={styles.btnDanger}>
-            Remove HTTP routing
-          </button>
-        </form>
+        <SiteDeleteButton
+          domain={site.domain}
+          action={deleteSiteAction}
+          label="Remove HTTP routing"
+          pendingLabel="Removing..."
+          title={`Remove HTTP routing for ${site.domain}?`}
+        />
       </div>
     </div>
   );
