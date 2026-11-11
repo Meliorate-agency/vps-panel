@@ -428,7 +428,50 @@ export default function FileBrowser({
         <div>
           <h1 className={pageStyles.title}>{root.label}</h1>
           <div className={pageStyles.subtitle}>
-            <span className={pageStyles.code}>{listing.abs_path}</span>
+            {/* The path is the breadcrumb: click a part to go there, drop
+                onto one to move the dragged items into it. */}
+            <span className={`${pageStyles.code} ${styles.pathCrumbs}`}>
+              <button
+                type="button"
+                className={[styles.pathCrumb, dropTarget === "crumb:" ? styles.crumbDrop : ""]
+                  .join(" ")
+                  .trim()}
+                onClick={() => load("", true)}
+                disabled={pending || segments.length === 0}
+                onDragOver={(e) => allowDrop(e, "crumb:")}
+                onDragLeave={(e) => leaveDrop(e, "crumb:")}
+                onDrop={() => dropInto("")}
+              >
+                {root.path}
+              </button>
+              {segments.map((seg, i) => {
+                const target = segments.slice(0, i + 1).join("/");
+                const isLast = i === segments.length - 1;
+                return (
+                  <span key={target} className={styles.pathCrumbs}>
+                    {(i > 0 || !root.path.endsWith("/")) && (
+                      <span className={styles.pathSep}>/</span>
+                    )}
+                    <button
+                      type="button"
+                      className={[
+                        styles.pathCrumb,
+                        dropTarget === `crumb:${target}` ? styles.crumbDrop : "",
+                      ]
+                        .join(" ")
+                        .trim()}
+                      onClick={() => load(target, true)}
+                      disabled={pending || isLast}
+                      onDragOver={(e) => allowDrop(e, `crumb:${target}`)}
+                      onDragLeave={(e) => leaveDrop(e, `crumb:${target}`)}
+                      onDrop={() => dropInto(target)}
+                    >
+                      {seg}
+                    </button>
+                  </span>
+                );
+              })}
+            </span>
             {!root.writable && " · browse-only"}
           </div>
         </div>
@@ -443,52 +486,6 @@ export default function FileBrowser({
       {notice && <div className={pageStyles.notice}>{notice}</div>}
 
       <div className={styles.bar}>
-        <div className={styles.crumbs}>
-          <button
-            type="button"
-            className={[
-              styles.crumb,
-              segments.length === 0 ? styles.crumbCurrent : "",
-              dropTarget === "crumb:" ? styles.crumbDrop : "",
-            ]
-              .join(" ")
-              .trim()}
-            onClick={() => load("", true)}
-            disabled={pending || segments.length === 0}
-            onDragOver={(e) => allowDrop(e, "crumb:")}
-            onDragLeave={(e) => leaveDrop(e, "crumb:")}
-            onDrop={() => dropInto("")}
-          >
-            {root.path}
-          </button>
-          {segments.map((seg, i) => {
-            const target = segments.slice(0, i + 1).join("/");
-            const isLast = i === segments.length - 1;
-            return (
-              <span key={target} className={styles.crumbs}>
-                <span className={styles.crumbSep}>/</span>
-                <button
-                  type="button"
-                  className={[
-                    styles.crumb,
-                    isLast ? styles.crumbCurrent : "",
-                    dropTarget === `crumb:${target}` ? styles.crumbDrop : "",
-                  ]
-                    .join(" ")
-                    .trim()}
-                  onClick={() => load(target, true)}
-                  disabled={pending || isLast}
-                  onDragOver={(e) => allowDrop(e, `crumb:${target}`)}
-                  onDragLeave={(e) => leaveDrop(e, `crumb:${target}`)}
-                  onDrop={() => dropInto(target)}
-                >
-                  {seg}
-                </button>
-              </span>
-            );
-          })}
-        </div>
-
         <div className={styles.toolbar}>
           {listing.writable && (
             <>
