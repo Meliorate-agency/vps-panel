@@ -167,6 +167,18 @@
   white-space: nowrap;
 }
 
+/* Latency cell: the round trip, and the server's location under it. */
+.latency {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.place {
+  font-size: 11px;
+  color: var(--text-dim);
+}
+
 .addr {
   font-family: var(--mono);
   font-size: 11px;

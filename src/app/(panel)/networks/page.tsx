@@ -5,6 +5,7 @@ import { config } from "@/lib/config";
 import { getSetting } from "@/lib/settings";
 import { nodeIdentity, ownUrl } from "@/lib/networks/identity";
 import { HEARTBEAT_MS, type PeerStats } from "@/lib/networks/protocol";
+import { serverLocations, type ServerLocation } from "@/lib/networks/geo";
 import { ownStats } from "@/lib/networks/stats";
 import { listOpenInvites, networksView, type MemberView, type NetworkView } from "@/lib/networks/store";
 import {
@@ -53,9 +54,16 @@ function uptime(secs: number): string {
   return `${m} min`;
 }
 
-function memberRow(net: NetworkView, m: MemberView, now: number, mine: PeerStats | null) {
+function memberRow(
+  net: NetworkView,
+  m: MemberView,
+  now: number,
+  mine: PeerStats | null,
+  loc: ServerLocation | null,
+) {
   const stats = m.self ? mine : m.stats;
   const status = STATUS[m.status];
+  const rtt = m.self ? "" : m.rttMs !== null && !m.error && m.status !== "offline" ? `${m.rttMs} ms` : "-";
   return {
     status: <StatusBadge text={status.text} tone={status.tone} />,
     server: (
@@ -77,7 +85,17 @@ function memberRow(net: NetworkView, m: MemberView, now: number, mine: PeerStats
         )}
       </div>
     ),
-    latency: m.self ? "" : m.rttMs !== null && !m.error && m.status !== "offline" ? `${m.rttMs} ms` : "-",
+    // Location under the latency, from the IP the server's address resolves to.
+    latency: (
+      <div className={local.latency}>
+        {rtt && <span className={local.nowrap}>{rtt}</span>}
+        {loc && (
+          <span className={local.place} title={loc.detail}>
+            {loc.label}
+          </span>
+        )}
+      </div>
+    ),
     seen: m.self ? "" : <span className={local.nowrap}>{ago(m.lastSeen, now)}</span>,
     load: <span className={local.nowrap}>{stats ? `${stats.load1.toFixed(2)} / ${stats.cpus}` : "-"}</span>,
     mem: stats ? `${stats.mem}%` : "-",
@@ -96,7 +114,19 @@ function memberRow(net: NetworkView, m: MemberView, now: number, mine: PeerStats
   };
 }
 
-function NetworkCard({ net, now, mine, ownAddress }: { net: NetworkView; now: number; mine: PeerStats | null; ownAddress: string | null }) {
+function NetworkCard({
+  net,
+  now,
+  mine,
+  ownAddress,
+  locations,
+}: {
+  net: NetworkView;
+  now: number;
+  mine: PeerStats | null;
+  ownAddress: string | null;
+  locations: Map<string, ServerLocation | null>;
+}) {
   const others = net.members.filter((m) => !m.self);
   const online = others.filter((m) => m.status === "online").length;
   const self = net.members.find((m) => m.self);
@@ -147,7 +177,7 @@ function NetworkCard({ net, now, mine, ownAddress }: { net: NetworkView; now: nu
         columns={[
           { key: "status", label: "Status", width: "110px" },
           { key: "server", label: "Server", width: "260px" },
-          { key: "latency", label: "Latency", width: "90px" },
+          { key: "latency", label: "Latency", width: "150px" },
           { key: "seen", label: "Last seen", width: "110px" },
           { key: "load", label: "Load / CPUs", width: "120px" },
           { key: "mem", label: "Memory", width: "90px" },
@@ -155,7 +185,7 @@ function NetworkCard({ net, now, mine, ownAddress }: { net: NetworkView; now: nu
           { key: "uptime", label: "Uptime", width: "100px" },
           { key: "actions", label: "", width: "110px" },
         ]}
-        rows={net.members.map((m) => memberRow(net, m, now, mine))}
+        rows={net.members.map((m) => memberRow(net, m, now, mine, locations.get(m.url) ?? null))}
         rowKey={(_, i) => net.members[i].key}
       />
       {invites.length > 0 && (
@@ -182,6 +212,7 @@ export default async function NetworksPage() {
   const now = Date.now();
   const networks = networksView(now);
   const mine = networks.length > 0 ? await ownStats() : null;
+  const locations = serverLocations(networks.flatMap((n) => n.members.map((m) => m.url)));
 
   return (
     <ActionDialogs>
@@ -231,7 +262,9 @@ export default async function NetworksPage() {
           This server is not in a network yet. Create one, or join one with a code from another server.
         </div>
       ) : (
-        networks.map((net) => <NetworkCard key={net.id} net={net} now={now} mine={mine} ownAddress={own.url} />)
+        networks.map((net) => (
+          <NetworkCard key={net.id} net={net} now={now} mine={mine} ownAddress={own.url} locations={locations} />
+        ))
       )}
     </ActionDialogs>
   );
