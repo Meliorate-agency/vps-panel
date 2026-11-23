@@ -172,10 +172,19 @@ pub fn render(domain: &str, rules: &[RedirectRule]) -> AgentResult<String> {
                 )))
             }
         }
-        let key = (
-            r.match_mode.clone(),
-            prefix_source(&r.source_path).to_string(),
-        );
+        if loops_back(domain, r) {
+            return Err(AgentError::Invalid(format!(
+                "the {} redirect for {} points back at itself ({}): every visit would loop",
+                r.match_mode, r.source_path, r.target_url
+            )));
+        }
+        // `/blog/` and `/blog` are one prefix, but two different exact
+        // locations: both may have a rule.
+        let source = match r.match_mode.as_str() {
+            "prefix" => prefix_source(&r.source_path),
+            _ => r.source_path.as_str(),
+        };
+        let key = (r.match_mode.clone(), source.to_string());
         if seen.contains(&key) {
             return Err(AgentError::Invalid(format!(
                 "duplicate {} redirect for {}",
@@ -235,6 +244,43 @@ pub fn render(domain: &str, rules: &[RedirectRule]) -> AgentResult<String> {
 /// (whole-domain rule).
 fn prefix_source(p: &str) -> &str {
     p.trim_end_matches('/')
+}
+
+/// The path a target leads to on `domain` itself, without query or fragment;
+/// None when it goes to another host.
+fn same_site_path<'a>(domain: &str, target: &'a str) -> Option<&'a str> {
+    let with_host = target
+        .strip_prefix("https://")
+        .or_else(|| target.strip_prefix("http://"))
+        .or_else(|| target.strip_prefix("//"));
+    let rest = match with_host {
+        Some(after) => {
+            let host_end = after.find(['/', '?', '#']).unwrap_or(after.len());
+            if !after[..host_end].eq_ignore_ascii_case(domain) {
+                return None;
+            }
+            &after[host_end..]
+        }
+        None => target,
+    };
+    let path = &rest[..rest.find(['?', '#']).unwrap_or(rest.len())];
+    Some(if path.is_empty() { "/" } else { path })
+}
+
+/// A rule whose target is matched by the rule itself: `/` (prefix) to
+/// `https://<this domain>`, or `/shop` (prefix) to `/shop/new`. nginx accepts
+/// it and then answers every such request with a redirect to another one,
+/// which takes the site (or that path) down.
+fn loops_back(domain: &str, r: &RedirectRule) -> bool {
+    let Some(path) = same_site_path(domain, &r.target_url) else {
+        return false;
+    };
+    if r.match_mode == "exact" {
+        return path == r.source_path;
+    }
+    let source = prefix_source(&r.source_path);
+    let path = path.trim_end_matches('/');
+    path == source || path.starts_with(&format!("{source}/"))
 }
 
 /// Insert the include line after every `server_name <domain>;` that isn't
@@ -471,6 +517,64 @@ mod tests {
             ]
         )
         .is_err());
+    }
+
+    #[test]
+    fn exact_rules_with_and_without_a_trailing_slash_are_two_rules() {
+        let out = render(
+            "example.com",
+            &[
+                rule(1, "/a", "/b", 301, "exact"),
+                rule(2, "/a/", "/b", 301, "exact"),
+            ],
+        )
+        .unwrap();
+        assert!(out.contains("location = /a { return 301 \"/b\"; }"));
+        assert!(out.contains("location = /a/ { return 301 \"/b\"; }"));
+        // For a prefix they are the same rule.
+        assert!(render(
+            "example.com",
+            &[
+                rule(1, "/a", "/b", 301, "prefix"),
+                rule(2, "/a/", "/c", 301, "prefix")
+            ]
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn refuses_a_rule_that_redirects_to_itself() {
+        for (src, dst, mode) in [
+            ("/", "https://example.com", "prefix"),
+            ("/", "http://Example.com/", "prefix"),
+            ("/", "/new", "prefix"),
+            ("/shop", "/shop/new", "prefix"),
+            ("/shop/", "https://example.com/shop?x=1", "prefix"),
+            ("/", "//example.com/x", "prefix"),
+            ("/a", "/a", "exact"),
+            ("/a", "https://example.com/a#top", "exact"),
+            ("/", "https://example.com", "exact"),
+        ] {
+            assert!(
+                render("example.com", &[rule(1, src, dst, 301, mode)]).is_err(),
+                "{mode} {src} -> {dst} was accepted"
+            );
+        }
+        for (src, dst, mode) in [
+            ("/", "https://www.example.com", "prefix"),
+            ("/", "https://example.com.au/", "prefix"),
+            ("/", "//other.example.com/x", "prefix"),
+            ("/shop", "/shop-new", "prefix"),
+            ("/shop", "/", "prefix"),
+            ("/a", "/a/", "exact"),
+            ("/a", "/b", "exact"),
+            ("/", "/home", "exact"),
+        ] {
+            assert!(
+                render("example.com", &[rule(1, src, dst, 301, mode)]).is_ok(),
+                "{mode} {src} -> {dst} was refused"
+            );
+        }
     }
 
     #[test]
