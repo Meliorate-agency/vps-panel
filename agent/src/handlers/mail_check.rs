@@ -164,6 +164,7 @@ impl Dig {
             return Lookup::Failed(why);
         }
         let mut saw_empty = false;
+        let mut no_reply = 0;
         for resolver in RESOLVERS {
             let at = format!("@{resolver}");
             let mut args = vec!["+short", "+time=2", "+tries=1", at.as_str()];
@@ -188,14 +189,20 @@ impl Dig {
                         "dig is not installed on this server (apt install bind9-dnsutils)",
                     );
                 }
-                // No reply from this resolver, or dig gave up: ask the next.
-                Ok(Err(_)) | Err(_) => {}
+                // No reply from this resolver (dig exits with 9): ask the next.
+                Ok(Err(AgentError::Subprocess { code: 9, .. })) | Err(_) => no_reply += 1,
+                Ok(Err(_)) => {}
             }
         }
         if saw_empty {
             return Lookup::Empty;
         }
-        self.set_down("this server could not reach a public DNS resolver")
+        // No resolver answered at all: the rest of the run would only wait
+        // for the same timeouts. Anything else is about this one name.
+        if no_reply == RESOLVERS.len() {
+            return self.set_down("this server could not reach a public DNS resolver");
+        }
+        Lookup::Failed(format!("dig could not look up {name}"))
     }
 }
 
@@ -687,6 +694,17 @@ fn ipv6_address_item(addrs: &MailAddrs) -> MailCheckItem {
     const ID: &str = "address";
     const LABEL: &str = "Public IPv6 address";
     match (&addrs.ipv6, &addrs.ipv6_missing) {
+        // Kept because Postfix is pinned to it, though the lookup found no
+        // AAAA (mail_ip::mail_ipv6).
+        (Some(a), _) if addrs.facts.published.is_none() => item(
+            ID,
+            LABEL,
+            Status::Warn,
+            format!(
+                "{a} is on this server and Postfix sends over IPv6 from it, but this server found no AAAA record for the panel hostname {} just now.",
+                addrs.facts.host
+            ),
+        ),
         (Some(a), _) => item(
             ID,
             LABEL,
