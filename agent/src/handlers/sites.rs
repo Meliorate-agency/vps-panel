@@ -427,11 +427,18 @@ pub async fn update(
     }
 
     let needed_names = ssl_required_names(&domain, route.force_www_redirect);
-    let cert_ok = match existing_cert_paths(&domain) {
-        Some((cert_path, _)) => cert_covers_names(&cert_path, &needed_names).await,
-        None => false,
+    let (cert_ok, cert_covers_site) = match existing_cert_paths(&domain) {
+        Some((cert_path, _)) => (
+            cert_covers_names(&cert_path, &needed_names).await,
+            cert_covers_names(&cert_path, &[domain.clone()]).await,
+        ),
+        None => (false, false),
     };
-    let ssl_now = req.issue_ssl && cert_ok;
+    // A cert that covers the site but not yet www stays in use while the new
+    // one is ordered. Turning "Force www" on used to rewrite the vhost
+    // without SSL first, and when the order then failed (no DNS record for
+    // www) the site was left on plain HTTP with a valid cert on disk.
+    let ssl_now = req.issue_ssl && cert_covers_site;
 
     install_vhost_tested(&domain, &route, ssl_now).await?;
     exec::run("systemctl", ["reload", "nginx"]).await?;
