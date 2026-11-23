@@ -1785,12 +1785,14 @@ pub async fn create_system_user(
         )));
     }
 
-    // Pre-flight: confirm the agent can actually write under /home. If the
-    // systemd unit hardening (ProtectHome=read-only) hasn't been "punched
-    // through" by ReadWritePaths=/home, useradd would crash at step 2 with
+    // Pre-flight: confirm the agent can actually write under /home (it is
+    // read-only or full, or the agent still runs under an old unit file
+    // with ProtectHome=). Otherwise useradd would crash at step 2 with
     // exit 12 ("cannot create directory") AFTER it has already inserted the
-    // /etc/passwd entry — leaving a zombie user behind. Catch that upfront
-    // and return a clear, actionable error pointing at the deploy fix.
+    // /etc/passwd entry — leaving a zombie user behind. The message must
+    // not suggest adding ReadWritePaths= or any other sandbox option to
+    // the unit: those put the agent in a private mount namespace, and
+    // mounts made from the panel terminal then never reach the host.
     let probe = std::path::Path::new("/home").join(format!(".vps-panel-probe-{}", std::process::id()));
     match tokio::fs::write(&probe, b"ok").await {
         Ok(()) => {
@@ -1798,11 +1800,12 @@ pub async fn create_system_user(
         }
         Err(e) => {
             return Err(AgentError::Other(anyhow::anyhow!(
-                "/home is not writable from the agent ({e}). The systemd \
-                 unit needs `ReadWritePaths=/home` for useradd -m to work \
-                 under ProtectHome=read-only. Run `./scripts/update.sh` on \
-                 the host, or manually edit /etc/systemd/system/vps-panel-agent.service, \
-                 `systemctl daemon-reload`, and `systemctl restart vps-panel-agent`."
+                "/home is not writable from the agent ({e}), so the account's home \
+                 directory cannot be created. Check that /home exists, is not mounted \
+                 read-only and is not full. If the agent's unit file still has a \
+                 ProtectHome= line (an install that was never updated), run \
+                 `./scripts/update.sh` on the server: it installs the current unit, \
+                 which does not restrict /home."
             )));
         }
     }
