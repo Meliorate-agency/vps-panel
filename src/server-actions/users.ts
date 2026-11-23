@@ -187,23 +187,26 @@ export async function resetPanelUserPasswordAction(
  * account that can log in. Sessions for the deleted user are explicitly
  * marked revoked first so any open browser tab gets bounced on its next
  * request, even if the DELETE FROM sessions cascades silently.
+ *
+ * A refusal is returned, not thrown: Next replaces a thrown message in a
+ * production build, and the dialog promises the reason.
  */
-export async function deletePanelUserAction(userId: number): Promise<void> {
+export async function deletePanelUserAction(userId: number): Promise<ActionResult> {
   const s = await requireSession();
-  if (s.role !== "admin") throw new Error("admin role required");
-  if (userId === s.userId) throw new Error("cannot delete yourself");
+  if (s.role !== "admin") return { ok: false, error: "admin role required" };
+  if (userId === s.userId) return { ok: false, error: "cannot delete yourself" };
 
   const target = db()
     .prepare(`SELECT email, role FROM users WHERE id = ?`)
     .get(userId) as { email: string; role: string } | undefined;
-  if (!target) throw new Error("user not found");
+  if (!target) return { ok: false, error: "user not found" };
 
   if (target.role === "admin") {
     const others = db()
       .prepare(`SELECT COUNT(*) AS c FROM users WHERE role = 'admin' AND id != ?`)
       .get(userId) as { c: number };
     if (others.c === 0) {
-      throw new Error("cannot delete the last admin");
+      return { ok: false, error: "cannot delete the last admin" };
     }
   }
 
@@ -219,6 +222,7 @@ export async function deletePanelUserAction(userId: number): Promise<void> {
     message: `role=${target.role}`,
   });
   revalidatePath("/users");
+  return { ok: true };
 }
 
 // Reset the OS-level `root` password via the agent. Audit-logged. The actual
@@ -429,12 +433,12 @@ export async function setSystemUserPasswordAction(
 export async function deleteSystemUserAction(
   name: string,
   removeHome: boolean,
-): Promise<void> {
+): Promise<ActionResult> {
   const s = await requireSession();
-  if (s.role !== "admin") throw new Error("admin role required");
+  if (s.role !== "admin") return { ok: false, error: "admin role required" };
   const target = name.trim().toLowerCase();
-  if (!UNIX_NAME_RE.test(target)) throw new Error("invalid username");
-  if (target === "root") throw new Error("cannot delete root");
+  if (!UNIX_NAME_RE.test(target)) return { ok: false, error: "invalid username" };
+  if (target === "root") return { ok: false, error: "cannot delete root" };
 
   try {
     await agent.system.deleteUser(target, { removeHome });
@@ -446,6 +450,7 @@ export async function deleteSystemUserAction(
       message: `remove_home=${removeHome}`,
     });
     revalidatePath("/users");
+    return { ok: true };
   } catch (e: unknown) {
     const msg = e instanceof Error ? e.message : String(e);
     writeAudit({
@@ -455,6 +460,6 @@ export async function deleteSystemUserAction(
       result: "error",
       message: msg,
     });
-    throw new Error(msg);
+    return { ok: false, error: msg };
   }
 }

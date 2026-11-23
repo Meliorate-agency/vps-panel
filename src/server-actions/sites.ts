@@ -430,9 +430,25 @@ export async function siteFormDispatchAction(
   return createSiteAction(prev, fd);
 }
 
-export async function removeAgentOnlySiteAction(domain: string): Promise<void> {
+// The actions below that a button runs directly (Delete, Remove, Renew,
+// Retry, Install SSL) return a failure as `{ ok: false, error }`. Thrown, the
+// message is replaced by Next in a production build and the operator gets the
+// page's error screen instead of the agent's reason.
+export async function removeAgentOnlySiteAction(domain: string): Promise<ActionResult> {
   const s = await requireAdmin();
-  await agent.sites.delete(domain);
+  try {
+    await agent.sites.delete(domain);
+  } catch (e: unknown) {
+    const msg = e instanceof Error ? e.message : String(e);
+    writeAudit({
+      actorId: s.userId,
+      action: "sites.remove_agent_only",
+      target: domain,
+      result: "error",
+      message: msg,
+    });
+    return { ok: false, error: msg };
+  }
   writeAudit({
     actorId: s.userId,
     action: "sites.remove_agent_only",
@@ -440,9 +456,10 @@ export async function removeAgentOnlySiteAction(domain: string): Promise<void> {
     result: "ok",
   });
   revalidatePath("/domains");
+  return { ok: true };
 }
 
-export async function deleteSiteAction(domain: string): Promise<void> {
+export async function deleteSiteAction(domain: string): Promise<ActionResult> {
   const s = await requireAdmin();
   // Removing a bound slot would leave the app's unit listening for a vhost
   // that no longer exists. Unassign it on the app page first.
@@ -454,7 +471,19 @@ export async function deleteSiteAction(domain: string): Promise<void> {
       )}`,
     );
   }
-  await agent.sites.delete(domain);
+  try {
+    await agent.sites.delete(domain);
+  } catch (e: unknown) {
+    const msg = e instanceof Error ? e.message : String(e);
+    writeAudit({
+      actorId: s.userId,
+      action: "sites.delete",
+      target: domain,
+      result: "error",
+      message: msg,
+    });
+    return { ok: false, error: msg };
+  }
   db().prepare(`DELETE FROM sites WHERE domain = ?`).run(domain);
   // The agent already dropped the vhost + its redirects include; mirror that
   // in panel.db so /redirects does not show rules nothing serves.
@@ -467,6 +496,7 @@ export async function deleteSiteAction(domain: string): Promise<void> {
   });
   revalidatePath("/domains");
   revalidatePath(`/domains/${encodeURIComponent(domain)}`);
+  return { ok: true };
 }
 
 export async function updateSiteRouteAction(
@@ -566,7 +596,7 @@ export async function updateSiteRouteAction(
   return { ok: true };
 }
 
-export async function renewSslAction(domain: string): Promise<void> {
+export async function renewSslAction(domain: string): Promise<ActionResult> {
   const s = await requireAdmin();
   try {
     await agent.ssl.renew(domain);
@@ -588,10 +618,11 @@ export async function renewSslAction(domain: string): Promise<void> {
       result: "error",
       message: msg,
     });
-    throw new Error(msg);
+    return { ok: false, error: msg };
   }
   revalidatePath("/domains");
   revalidatePath(`/domains/${encodeURIComponent(domain)}`);
+  return { ok: true };
 }
 
 /**
@@ -627,7 +658,7 @@ export async function renewSslTaskAction(domain: string): Promise<SslTaskResult>
   }
 }
 
-export async function retrySslAction(domain: string): Promise<void> {
+export async function retrySslAction(domain: string): Promise<ActionResult> {
   const s = await requireAdmin();
   const conn = db();
   const row = conn
@@ -643,7 +674,7 @@ export async function retrySslAction(domain: string): Promise<void> {
         force_www_redirect: number;
       }
     | undefined;
-  if (!row) throw new Error("site not found");
+  if (!row) return { ok: false, error: "site not found" };
 
   try {
     const resp = await agent.sites.update(domain, {
@@ -683,6 +714,8 @@ export async function retrySslAction(domain: string): Promise<void> {
   }
   revalidatePath("/domains");
   revalidatePath(`/domains/${encodeURIComponent(domain)}`);
+  // A refused retry is on the row already (last_ssl_error, "failed" badge).
+  return { ok: true };
 }
 
 // One-click "Install SSL" for a DNS-only row (apex zone or A-record-in-managed-
@@ -691,19 +724,17 @@ export async function retrySslAction(domain: string): Promise<void> {
 // flips ssl_issued_at / last_ssl_error once it settles. force_www_redirect is
 // false on purpose so an apex install doesn't pre-claim the www. sibling — if
 // the operator wants www in the SAN list they use the full Add domain form.
-export async function installSslAction(domain: string): Promise<void> {
+export async function installSslAction(domain: string): Promise<ActionResult> {
   const s = await requireAdmin();
-  if (!FQDN_RE.test(domain)) throw new Error("invalid domain");
+  if (!FQDN_RE.test(domain)) return { ok: false, error: "invalid domain" };
 
   const collision = checkAppSubdomainCollision(domain);
-  if (collision && collision.ok === false) {
-    throw new Error(collision.error);
-  }
+  if (collision) return collision;
 
   const existing = db()
     .prepare(`SELECT 1 FROM sites WHERE domain = ?`)
     .get(domain);
-  if (existing) throw new Error("site already exists");
+  if (existing) return { ok: false, error: "site already exists" };
 
   await ensureDnsZone(s.userId, domain);
 
@@ -717,11 +748,14 @@ export async function installSslAction(domain: string): Promise<void> {
   );
   if (result.ok === false) {
     if ("conflict" in result && result.conflict === "agent_only") {
-      throw new Error(
-        "Domain already has an nginx vhost on the agent; use the Add domain form to Adopt or Replace.",
-      );
+      return {
+        ok: false,
+        error:
+          "Domain already has an nginx vhost on the agent; use the Add domain form to Adopt or Replace.",
+      };
     }
-    throw new Error(result.error);
+    return { ok: false, error: result.error };
   }
   revalidatePath("/domains");
+  return { ok: true };
 }

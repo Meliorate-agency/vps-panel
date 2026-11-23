@@ -4,6 +4,7 @@ import { db } from "@/lib/db";
 import Table from "@/components/Table/Table";
 import StatusBadge from "@/components/StatusBadge/StatusBadge";
 import PendingButton from "@/components/PendingButton/PendingButton";
+import ActionForm from "@/components/ActionForm/ActionForm";
 import ConfirmSubmitButton from "@/components/ConfirmSubmitButton/ConfirmSubmitButton";
 import styles from "@/components/page.module.css";
 import {
@@ -180,16 +181,16 @@ export default async function DomainDetailPage({
             <div style={{ display: "flex", gap: 6, alignItems: "flex-start" }}>
               <ReconcileButton zone={domain} action={reconcileZoneAction} />
               {dnsZone.dnssec === 0 && (
-                <form action={signZoneAction.bind(null, domain)}>
+                <ActionForm action={signZoneAction.bind(null, domain)}>
                   <button type="submit" className={styles.btnGhost}>
                     DNSSEC sign
                   </button>
-                </form>
+                </ActionForm>
               )}
               {dnsZone.dnssec === 1 && (
                 <StatusBadge text="DNSSEC signed" tone="ok" />
               )}
-              <form action={deleteZoneAction.bind(null, domain)}>
+              <ActionForm action={deleteZoneAction.bind(null, domain)}>
                 <ConfirmSubmitButton
                   className={styles.btnDanger}
                   message={`Disable DNS for ${domain}?\n\nDrops the PowerDNS zone and ALL its records (MX, SPF, DKIM, A). The nginx vhost is not touched.`}
@@ -197,7 +198,7 @@ export default async function DomainDetailPage({
                 >
                   Disable DNS
                 </ConfirmSubmitButton>
-              </form>
+              </ActionForm>
             </div>
           ) : null}
         </div>
@@ -406,14 +407,14 @@ function renderSslStatus(site: SiteRow, status: SiteStatus | null) {
       <div style={{ display: "inline-flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
         <StatusBadge text={`SSL · ${s.days_remaining}d`} tone="ok" />
         {dateLabel && <span className={styles.muted}>expires {dateLabel}</span>}
-        <form action={renewSslAction.bind(null, site.domain)}>
+        <ActionForm action={renewSslAction.bind(null, site.domain)}>
           <PendingButton
             className={styles.btnGhost}
             pendingLabel="Renewing..."
           >
             Renew
           </PendingButton>
-        </form>
+        </ActionForm>
       </div>
     );
   }
@@ -421,11 +422,11 @@ function renderSslStatus(site: SiteRow, status: SiteStatus | null) {
     return (
       <div style={{ display: "inline-flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
         <StatusBadge text="SSL expired" tone="danger" />
-        <form action={renewSslAction.bind(null, site.domain)}>
+        <ActionForm action={renewSslAction.bind(null, site.domain)}>
           <PendingButton className={styles.btnGhost} pendingLabel="Renewing...">
             Renew
           </PendingButton>
-        </form>
+        </ActionForm>
       </div>
     );
   }
@@ -436,7 +437,7 @@ function renderSslStatus(site: SiteRow, status: SiteStatus | null) {
   }
   if (site.ssl_requested === 1 && site.last_ssl_error !== null) {
     return (
-      <form
+      <ActionForm
         action={retrySslAction.bind(null, site.domain)}
         style={{ display: "inline-flex", gap: 6, alignItems: "center" }}
       >
@@ -450,7 +451,7 @@ function renderSslStatus(site: SiteRow, status: SiteStatus | null) {
         <span className={styles.muted} style={{ fontSize: 12, flexBasis: "100%" }}>
           {site.last_ssl_error}
         </span>
-      </form>
+      </ActionForm>
     );
   }
   return <StatusBadge text="SSL off" tone="muted" />;

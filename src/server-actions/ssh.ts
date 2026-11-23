@@ -135,23 +135,26 @@ export async function addSshKeyAction(
   }
 }
 
+// Returns the agent's refusal: thrown, its message is replaced by Next in a
+// production build and the delete dialog showed a generic text.
 export async function removeSshKeyAction(
   user: string,
   fp: string,
   purgeKeypair?: string,
-): Promise<void> {
+): Promise<ActionResult> {
   const s = await requireAdmin();
   try {
     await agent.ssh.remove(fp, user, purgeKeypair);
   } catch (e: unknown) {
+    const msg = e instanceof Error ? e.message : String(e);
     writeAudit({
       actorId: s.userId,
       action: "ssh.keys.remove",
       target: `${user}/${fp}`,
       result: "error",
-      message: e instanceof Error ? e.message : String(e),
+      message: msg,
     });
-    throw e;
+    return { ok: false, error: msg };
   }
   writeAudit({
     actorId: s.userId,
@@ -163,6 +166,7 @@ export async function removeSshKeyAction(
       : undefined,
   });
   revalidatePath("/ssh-keys");
+  return { ok: true };
 }
 
 export async function fetchSshPublicKeyAction(

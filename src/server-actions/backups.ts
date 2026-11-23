@@ -22,9 +22,22 @@ export async function runBackupAction(): Promise<RunBackupResult> {
   }
 }
 
-export async function restoreBackupAction(snapshot: string, target: string): Promise<{ taskId: string }> {
+/** Like runBackupAction, returns the refusal instead of throwing it. */
+export async function restoreBackupAction(snapshot: string, target: string): Promise<RunBackupResult> {
   const s = await requireAdmin();
-  const resp = await agent.backups.restore(snapshot, target);
-  writeAudit({ actorId: s.userId, action: "backups.restore", target: `${snapshot}->${target}`, result: "ok" });
-  return { taskId: resp.task_id };
+  try {
+    const resp = await agent.backups.restore(snapshot, target);
+    writeAudit({ actorId: s.userId, action: "backups.restore", target: `${snapshot}->${target}`, result: "ok" });
+    return { ok: true, taskId: resp.task_id };
+  } catch (e: unknown) {
+    const msg = e instanceof Error ? e.message : String(e);
+    writeAudit({
+      actorId: s.userId,
+      action: "backups.restore",
+      target: `${snapshot}->${target}`,
+      result: "error",
+      message: msg,
+    });
+    return { ok: false, error: msg };
+  }
 }

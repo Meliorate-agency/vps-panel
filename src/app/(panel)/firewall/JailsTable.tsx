@@ -2,6 +2,7 @@
 
 import { useState, useTransition } from "react";
 import ConfirmSubmitButton from "@/components/ConfirmSubmitButton/ConfirmSubmitButton";
+import ActionForm from "@/components/ActionForm/ActionForm";
 import styles from "@/components/page.module.css";
 import localStyles from "./jails.module.css";
 import type { JailRow, FailedByIp } from "@/lib/agent";
@@ -12,14 +13,18 @@ type FailedState =
   | { kind: "loaded"; rows: FailedByIp[] }
   | { kind: "error"; message: string };
 
+type Result = { ok: true } | { ok: false; error: string };
+
 type Props = {
   jails: JailRow[];
   /** Pre-bound by jail in the parent: `unbanIpAction.bind(null, jail, ip)`. */
-  unbanIpAction: (jail: string, ip: string) => Promise<void>;
+  unbanIpAction: (jail: string, ip: string) => Promise<Result>;
   /** Bulk unban + restart fail2ban for the given jail. */
-  unbanAllAction: (jail: string) => Promise<void>;
+  unbanAllAction: (jail: string) => Promise<Result>;
   /** Reads /var/log/fail2ban.log and counts attempts per IP for the jail. */
-  fetchFailedByIp: (jail: string) => Promise<FailedByIp[]>;
+  fetchFailedByIp: (
+    jail: string,
+  ) => Promise<{ ok: true; rows: FailedByIp[] } | { ok: false; error: string }>;
 };
 
 export default function JailsTable({
@@ -53,8 +58,15 @@ export default function JailsTable({
     setData((prev) => new Map(prev).set(name, { kind: "loading" }));
     startFetch(async () => {
       try {
-        const rows = await fetchFailedByIp(name);
-        setData((prev) => new Map(prev).set(name, { kind: "loaded", rows }));
+        const res = await fetchFailedByIp(name);
+        setData((prev) =>
+          new Map(prev).set(
+            name,
+            res.ok
+              ? { kind: "loaded", rows: res.rows }
+              : { kind: "error", message: res.error },
+          ),
+        );
       } catch (e) {
         setData((prev) =>
           new Map(prev).set(name, {
@@ -101,7 +113,7 @@ export default function JailsTable({
                     <span className={styles.muted}>
                       {j.banned.length} banned
                     </span>
-                    <form action={unbanAllAction.bind(null, j.name)}>
+                    <ActionForm action={unbanAllAction.bind(null, j.name)}>
                       <ConfirmSubmitButton
                         className={styles.btnDanger}
                         message={`Unban ALL ${j.banned.length} IP${j.banned.length === 1 ? "" : "s"} in jail "${j.name}" and restart fail2ban?\n\nThis is destructive — every currently-banned IP will be released immediately, and the in-memory failure counters will reset. Use when you've fixed a misconfigured client that caused an accidental lockout.`}
@@ -109,7 +121,7 @@ export default function JailsTable({
                       >
                         Unban all + restart
                       </ConfirmSubmitButton>
-                    </form>
+                    </ActionForm>
                   </>
                 ) : (
                   <span className={styles.muted}>no bans</span>
@@ -120,14 +132,14 @@ export default function JailsTable({
             {j.banned.length > 0 && (
               <div className={localStyles.banList}>
                 {j.banned.map((ip) => (
-                  <form key={ip} action={unbanIpAction.bind(null, j.name, ip)}>
+                  <ActionForm key={ip} action={unbanIpAction.bind(null, j.name, ip)}>
                     <ConfirmSubmitButton
                       className={styles.btnDanger}
                       message={`Unban ${ip} from ${j.name}?\n\nThe IP can immediately retry whatever got it banned.`}
                     >
                       {ip} unban
                     </ConfirmSubmitButton>
-                  </form>
+                  </ActionForm>
                 ))}
               </div>
             )}

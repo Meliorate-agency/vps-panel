@@ -40,16 +40,41 @@ export async function firewallPortAction(
   }
 }
 
-export async function unbanIpAction(jail: string, ip: string): Promise<void> {
-  const s = await requireAdmin();
-  await agent.firewall.unban(jail, ip);
-  writeAudit({ actorId: s.userId, action: "fail2ban.unban", target: `${jail}:${ip}`, result: "ok" });
-  revalidatePath("/firewall");
+// The button actions below return a failure as `{ ok: false, error }`. Thrown,
+// the message is replaced by Next in a production build and the operator gets
+// the page's error screen instead of the agent's reason.
+function failed(
+  actorId: number,
+  action: string,
+  target: string | undefined,
+  e: unknown,
+): ActionResult {
+  const msg = e instanceof Error ? e.message : String(e);
+  writeAudit({ actorId, action, target, result: "error", message: msg });
+  return { ok: false, error: msg };
 }
 
-export async function unbanAllAction(jail: string): Promise<void> {
+export async function unbanIpAction(jail: string, ip: string): Promise<ActionResult> {
   const s = await requireAdmin();
-  await agent.firewall.unbanAll(jail);
+  try {
+    await agent.firewall.unban(jail, ip);
+  } catch (e: unknown) {
+    return failed(s.userId, "fail2ban.unban", `${jail}:${ip}`, e);
+  }
+  writeAudit({ actorId: s.userId, action: "fail2ban.unban", target: `${jail}:${ip}`, result: "ok" });
+  revalidatePath("/firewall");
+  return { ok: true };
+}
+
+export async function unbanAllAction(jail: string): Promise<ActionResult> {
+  const s = await requireAdmin();
+  try {
+    await agent.firewall.unbanAll(jail);
+  } catch (e: unknown) {
+    // Some of the bans may be gone already.
+    revalidatePath("/firewall");
+    return failed(s.userId, "fail2ban.unban_all", jail, e);
+  }
   writeAudit({
     actorId: s.userId,
     action: "fail2ban.unban_all",
@@ -57,23 +82,39 @@ export async function unbanAllAction(jail: string): Promise<void> {
     result: "ok",
   });
   revalidatePath("/firewall");
+  return { ok: true };
 }
 
-export async function fetchFailedByIpAction(jail: string): Promise<FailedByIp[]> {
+export async function fetchFailedByIpAction(
+  jail: string,
+): Promise<{ ok: true; rows: FailedByIp[] } | { ok: false; error: string }> {
   await requireSession();
-  return agent.firewall.failedByIp(jail);
+  try {
+    return { ok: true, rows: await agent.firewall.failedByIp(jail) };
+  } catch (e: unknown) {
+    return { ok: false, error: e instanceof Error ? e.message : String(e) };
+  }
 }
 
-export async function enableUfwAction(): Promise<void> {
+export async function enableUfwAction(): Promise<ActionResult> {
   const s = await requireAdmin();
-  await agent.firewall.enable();
+  try {
+    await agent.firewall.enable();
+  } catch (e: unknown) {
+    return failed(s.userId, "firewall.enable", undefined, e);
+  }
   writeAudit({ actorId: s.userId, action: "firewall.enable", result: "ok" });
   revalidatePath("/firewall");
+  return { ok: true };
 }
 
-export async function restartFail2banAction(): Promise<void> {
+export async function restartFail2banAction(): Promise<ActionResult> {
   const s = await requireAdmin();
-  await agent.services.action("fail2ban", "restart");
+  try {
+    await agent.services.action("fail2ban", "restart");
+  } catch (e: unknown) {
+    return failed(s.userId, "fail2ban.restart", "service", e);
+  }
   writeAudit({
     actorId: s.userId,
     action: "fail2ban.restart",
@@ -81,6 +122,7 @@ export async function restartFail2banAction(): Promise<void> {
     result: "ok",
   });
   revalidatePath("/firewall");
+  return { ok: true };
 }
 
 // Toggle the fail2ban systemd unit on/off. Bind the current state into the
@@ -91,7 +133,7 @@ export async function restartFail2banAction(): Promise<void> {
 //
 // Stopping pairs with disable so the next reboot doesn't silently bring
 // fail2ban back; starting pairs with enable so it survives a reboot.
-export async function toggleFail2banAction(currentlyActive: boolean): Promise<void> {
+export async function toggleFail2banAction(currentlyActive: boolean): Promise<ActionResult> {
   const s = await requireAdmin();
   const target = currentlyActive ? "off" : "on";
   try {
@@ -109,14 +151,10 @@ export async function toggleFail2banAction(currentlyActive: boolean): Promise<vo
       result: "ok",
     });
   } catch (e: unknown) {
-    writeAudit({
-      actorId: s.userId,
-      action: "fail2ban.toggle",
-      target,
-      result: "error",
-      message: e instanceof Error ? e.message : String(e),
-    });
-    throw e;
+    // The first of the two steps may have gone through.
+    revalidatePath("/firewall");
+    return failed(s.userId, "fail2ban.toggle", target, e);
   }
   revalidatePath("/firewall");
+  return { ok: true };
 }

@@ -4,6 +4,7 @@ import { db } from "@/lib/db";
 import StatusBadge from "@/components/StatusBadge/StatusBadge";
 import InfoTooltip from "@/components/InfoTooltip/InfoTooltip";
 import PendingButton from "@/components/PendingButton/PendingButton";
+import ActionForm from "@/components/ActionForm/ActionForm";
 import styles from "@/components/page.module.css";
 import DomainsGroupedTable, {
   type GroupedRow,
@@ -549,14 +550,14 @@ function buildGroupedRows({
             </span>
           ),
           actions: (
-            <form action={adoptZoneAction.bind(null, domain)}>
+            <ActionForm action={adoptZoneAction.bind(null, domain)}>
               <PendingButton
                 className={styles.btnGhost}
                 pendingLabel="Adopting..."
               >
                 Adopt
               </PendingButton>
-            </form>
+            </ActionForm>
           ),
         };
         break;
@@ -606,14 +607,14 @@ function buildGroupedRows({
               external
             </span>
           ) : (
-            <form action={installSslAction.bind(null, d.domain)}>
+            <ActionForm action={installSslAction.bind(null, d.domain)}>
               <PendingButton
                 className={styles.btn}
                 pendingLabel="Installing..."
               >
                 Install SSL
               </PendingButton>
-            </form>
+            </ActionForm>
           ),
           dns: <StatusBadge text="in parent" tone="ok" />,
           actions: (
@@ -810,11 +811,11 @@ function renderSslCell(r: DomainRow, status: SiteStatus | undefined) {
     // issue_ssl=true and lets pollSslTaskAndReconcile flip the badge once the
     // cert lands.
     return (
-      <form action={installSslAction.bind(null, r.domain)}>
+      <ActionForm action={installSslAction.bind(null, r.domain)}>
         <PendingButton className={styles.btn} pendingLabel="Installing...">
           Install SSL
         </PendingButton>
-      </form>
+      </ActionForm>
     );
   }
   const s = status ?? {
@@ -847,7 +848,7 @@ function renderSslCell(r: DomainRow, status: SiteStatus | undefined) {
   }
   if (r.ssl_requested === 1 && r.last_ssl_error !== null) {
     return (
-      <form
+      <ActionForm
         action={retrySslAction.bind(null, r.domain)}
         style={{ display: "flex", gap: 6, alignItems: "center" }}
       >
@@ -867,7 +868,7 @@ function renderSslCell(r: DomainRow, status: SiteStatus | undefined) {
         >
           {r.last_ssl_error}
         </span>
-      </form>
+      </ActionForm>
     );
   }
   return <span className={styles.muted}>off</span>;

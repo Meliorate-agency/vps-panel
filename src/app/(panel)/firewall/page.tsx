@@ -2,6 +2,7 @@ import { agent } from "@/lib/agent";
 import Table from "@/components/Table/Table";
 import StatusBadge from "@/components/StatusBadge/StatusBadge";
 import PendingButton from "@/components/PendingButton/PendingButton";
+import ActionForm from "@/components/ActionForm/ActionForm";
 import styles from "@/components/page.module.css";
 import {
   enableUfwAction,
@@ -51,9 +52,9 @@ export default async function FirewallPage() {
             />
           </span>
           {status && !status.ufw_enabled && (
-            <form action={enableUfwAction}>
+            <ActionForm action={enableUfwAction}>
               <button type="submit" className={styles.btn}>Enable UFW</button>
-            </form>
+            </ActionForm>
           )}
         </p>
         {status && !status.ufw_enabled && (
@@ -145,7 +146,7 @@ export default async function FirewallPage() {
             </div>
           </div>
           <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
-            <form
+            <ActionForm
               action={toggleFail2banAction.bind(null, !!status?.fail2ban_active)}
             >
               {status?.fail2ban_active ? (
@@ -163,8 +164,8 @@ export default async function FirewallPage() {
                   Start fail2ban
                 </PendingButton>
               )}
-            </form>
-            <form action={restartFail2banAction}>
+            </ActionForm>
+            <ActionForm action={restartFail2banAction}>
               <ConfirmSubmitButton
                 className={styles.btnGhost}
                 message={
@@ -174,7 +175,7 @@ export default async function FirewallPage() {
               >
                 Restart fail2ban
               </ConfirmSubmitButton>
-            </form>
+            </ActionForm>
           </div>
         </div>
         <div style={{ marginTop: 16, marginBottom: 16 }}>

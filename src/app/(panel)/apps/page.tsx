@@ -2,6 +2,7 @@ import Link from "next/link";
 import { agent, type AppRow, type DockerImageStatus, type GitStatusResp } from "@/lib/agent";
 import StatusBadge from "@/components/StatusBadge/StatusBadge";
 import QuickInstallStrip from "@/components/QuickInstallStrip/QuickInstallStrip";
+import ActionForm from "@/components/ActionForm/ActionForm";
 import {
   quickInstallAction,
   setBindAction,
@@ -148,11 +149,11 @@ function buildAppRow(
     actions: isExternal ? (
       hasUnit ? (
         <div style={{ display: "flex", gap: 6 }}>
-          <form action={restartExternalAppAction.bind(null, a.name)}>
+          <ActionForm action={restartExternalAppAction.bind(null, a.name)}>
             <button type="submit" className={styles.btnGhost}>
               Restart
             </button>
-          </form>
+          </ActionForm>
           <Link
             href={`/apps/${encodeURIComponent(a.name)}`}
             className={styles.btnGhost}

@@ -248,7 +248,9 @@ export async function pgGrantAction(
   }
 }
 
-export async function deletePgRoleAction(user: string): Promise<void> {
+// Like the MariaDB ones, the delete actions return the refusal: a thrown
+// message does not survive a production build.
+export async function deletePgRoleAction(user: string): Promise<ActionResult> {
   const s = await requireAdmin();
   try {
     await agent.postgres.deleteRole(user);
@@ -267,12 +269,13 @@ export async function deletePgRoleAction(user: string): Promise<void> {
       result: "error",
       message: raw,
     });
-    throw new Error(friendlyPgError("drop_role", raw));
+    return { ok: false, error: friendlyPgError("drop_role", raw) };
   }
   revalidatePath("/databases");
+  return { ok: true };
 }
 
-export async function deletePgDatabaseAction(name: string): Promise<void> {
+export async function deletePgDatabaseAction(name: string): Promise<ActionResult> {
   const s = await requireAdmin();
   try {
     await agent.postgres.deleteDatabase(name);
@@ -291,9 +294,10 @@ export async function deletePgDatabaseAction(name: string): Promise<void> {
       result: "error",
       message: raw,
     });
-    throw new Error(friendlyPgError("drop_database", raw));
+    return { ok: false, error: friendlyPgError("drop_database", raw) };
   }
   revalidatePath("/databases");
+  return { ok: true };
 }
 
 export async function enablePgvectorAction(

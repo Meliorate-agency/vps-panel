@@ -18,7 +18,7 @@ type Props = {
     fd: FormData,
   ) => Promise<Result>;
   /** Bound to a specific userId on the page side. */
-  deleteAction: () => Promise<void>;
+  deleteAction: () => Promise<Result>;
 };
 
 /**
@@ -73,7 +73,11 @@ export default function PanelUserActions({
     setDeleteError(null);
     startDelete(async () => {
       try {
-        await deleteAction();
+        const res = await deleteAction();
+        if (!res.ok) {
+          setDeleteError(res.error);
+          return;
+        }
         // Server action calls revalidatePath; tell the router to swap in the
         // fresh server-rendered tree so the row disappears immediately.
         router.refresh();

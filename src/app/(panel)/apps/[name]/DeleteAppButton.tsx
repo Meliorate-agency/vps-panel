@@ -19,7 +19,10 @@ export default function DeleteAppButton({
 }: {
   appName: string;
   sourceDir: string;
-  deleteAction: (name: string, opts?: { wipe?: boolean }) => Promise<void>;
+  deleteAction: (
+    name: string,
+    opts?: { wipe?: boolean },
+  ) => Promise<{ ok: true } | { ok: false; error: string }>;
   /** Set for a Docker app: its image and data volume names, and the Git
    *  checkout it is built from (null for an image from a registry). */
   docker?: { image: string; volumes: string[]; checkout?: string | null };
@@ -33,9 +36,13 @@ export default function DeleteAppButton({
     setError(null);
     startTransition(async () => {
       try {
-        await deleteAction(appName, { wipe });
-        // deleteAppAction redirects to /apps — if we get here, the redirect
-        // hasn't fired (likely an error before agent call).
+        // deleteAppAction redirects to /apps once the app is gone; what comes
+        // back here is the agent's refusal.
+        const res = await deleteAction(appName, { wipe });
+        if (!res.ok) {
+          setError(res.error);
+          return;
+        }
         setOpen(false);
       } catch (e) {
         // redirect() throws a special "NEXT_REDIRECT" error to navigate.

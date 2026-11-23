@@ -148,12 +148,14 @@ export async function updateRedirectAction(
   return { ok: true };
 }
 
-export async function deleteRedirectAction(id: number): Promise<void> {
+// Returns the agent's refusal for the delete dialog: thrown, its message is
+// replaced by Next in a production build.
+export async function deleteRedirectAction(id: number): Promise<RedirectActionResult> {
   const s = await requireAdmin();
   const row = getRedirect(id);
   if (!row) {
     revalidatePath("/redirects");
-    return;
+    return { ok: true };
   }
   const target = `${row.domain}${row.source_path}`;
   db().prepare(`DELETE FROM redirects WHERE id = ?`).run(id);
@@ -172,7 +174,7 @@ export async function deleteRedirectAction(id: number): Promise<void> {
         .run(row.id, row.domain, row.source_path, row.target_url, row.code, row.match_mode, row.created_at);
       const msg = agentErrorMessage(e);
       writeAudit({ actorId: s.userId, action: "redirects.delete", target, result: "error", message: msg });
-      throw new Error(msg);
+      return { ok: false, error: msg };
     }
   }
   writeAudit({
@@ -183,4 +185,5 @@ export async function deleteRedirectAction(id: number): Promise<void> {
     message: `${row.code} ${row.match_mode} -> ${row.target_url}`,
   });
   revalidatePath("/redirects");
+  return { ok: true };
 }

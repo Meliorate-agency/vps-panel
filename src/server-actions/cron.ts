@@ -26,9 +26,18 @@ export async function createCronAction(
   }
 }
 
-export async function deleteCronAction(id: string): Promise<void> {
+// Returns the agent's refusal: thrown, its message is replaced by Next in a
+// production build and the operator gets the page's error screen.
+export async function deleteCronAction(id: string): Promise<ActionResult> {
   const s = await requireAdmin();
-  await agent.cron.delete(id);
+  try {
+    await agent.cron.delete(id);
+  } catch (e: unknown) {
+    const msg = e instanceof Error ? e.message : String(e);
+    writeAudit({ actorId: s.userId, action: "cron.delete", target: id, result: "error", message: msg });
+    return { ok: false, error: msg };
+  }
   writeAudit({ actorId: s.userId, action: "cron.delete", target: id, result: "ok" });
   revalidatePath("/cron");
+  return { ok: true };
 }

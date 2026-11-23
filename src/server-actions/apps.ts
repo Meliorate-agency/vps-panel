@@ -242,13 +242,24 @@ export async function refreshImageStatusAction(name: string): Promise<ActionResu
   }
 }
 
+/**
+ * Redirects to /apps once the app is gone. A refusal from the agent comes
+ * back as `{ ok: false, error }` for the dialog: thrown, its message is
+ * replaced by Next in a production build.
+ */
 export async function deleteAppAction(
   name: string,
   opts?: { wipe?: boolean },
-): Promise<void> {
+): Promise<ActionResult> {
   const s = await requireAdmin();
   const wipe = !!opts?.wipe;
-  await agent.apps.delete(name, { wipe });
+  try {
+    await agent.apps.delete(name, { wipe });
+  } catch (e: unknown) {
+    const msg = e instanceof Error ? e.message : String(e);
+    writeAudit({ actorId: s.userId, action: "apps.delete", target: name, result: "error", message: msg });
+    return { ok: false, error: msg };
+  }
   db().prepare(`DELETE FROM apps WHERE name = ?`).run(name);
   db().prepare(`DELETE FROM app_comments WHERE name = ?`).run(name);
   writeAudit({
@@ -469,11 +480,20 @@ export async function updateAppAction(
 // endpoint can't reach them. Route through the generic systemd action
 // endpoint instead, which accepts any unit name with the start|stop|restart
 // whitelist.
-export async function restartExternalAppAction(name: string): Promise<void> {
+export async function restartExternalAppAction(name: string): Promise<ActionResult> {
   const s = await requireAdmin();
-  await agent.services.action(`${name}.service`, "restart");
+  try {
+    await agent.services.action(`${name}.service`, "restart");
+  } catch (e: unknown) {
+    const msg = e instanceof Error ? e.message : String(e);
+    writeAudit({ actorId: s.userId, action: "apps.restart_external", target: name, result: "error", message: msg });
+    // A refused restart can still leave the unit in another state.
+    revalidatePath("/apps");
+    return { ok: false, error: msg };
+  }
   writeAudit({ actorId: s.userId, action: "apps.restart_external", target: name, result: "ok" });
   revalidatePath("/apps");
+  return { ok: true };
 }
 
 /**

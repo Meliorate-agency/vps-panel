@@ -161,7 +161,10 @@ export async function grantAction(
   }
 }
 
-export async function deleteDbUserAction(user: string, host: string): Promise<void> {
+// The delete actions return the refusal instead of throwing it: Next replaces
+// a thrown server-action error's message in a production build, so the dialog
+// showed a generic text in place of "User ... does not exist".
+export async function deleteDbUserAction(user: string, host: string): Promise<ActionResult> {
   const s = await requireAdmin();
   try {
     await agent.databases.deleteUser(user, host);
@@ -175,12 +178,13 @@ export async function deleteDbUserAction(user: string, host: string): Promise<vo
       result: "error",
       message: raw,
     });
-    throw new Error(friendlyDbError("drop_user", raw));
+    return { ok: false, error: friendlyDbError("drop_user", raw) };
   }
   revalidatePath("/databases");
+  return { ok: true };
 }
 
-export async function deleteDatabaseAction(name: string): Promise<void> {
+export async function deleteDatabaseAction(name: string): Promise<ActionResult> {
   const s = await requireAdmin();
   try {
     await agent.databases.deleteDatabase(name);
@@ -194,9 +198,10 @@ export async function deleteDatabaseAction(name: string): Promise<void> {
       result: "error",
       message: raw,
     });
-    throw new Error(friendlyDbError("drop_database", raw));
+    return { ok: false, error: friendlyDbError("drop_database", raw) };
   }
   revalidatePath("/databases");
+  return { ok: true };
 }
 
 /**

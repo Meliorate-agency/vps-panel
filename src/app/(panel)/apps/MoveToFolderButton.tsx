@@ -10,7 +10,9 @@ type Props = {
   currentFolderId: number | null;
   folders: { id: number; name: string }[];
   /** Bound action that takes (folderId | null) and updates apps.folder_id. */
-  moveAction: (folderId: number | null) => Promise<void>;
+  moveAction: (
+    folderId: number | null,
+  ) => Promise<{ ok: true } | { ok: false; error: string }>;
 };
 
 /**
@@ -32,6 +34,7 @@ export default function MoveToFolderButton({
   const router = useRouter();
   const [open, setOpen] = useState(false);
   const [pending, startTransition] = useTransition();
+  const [error, setError] = useState<string | null>(null);
   const wrapRef = useRef<HTMLDivElement>(null);
   const popRef = useRef<HTMLDivElement>(null);
   // See GitStatusBadge for the rationale on portal + position:fixed —
@@ -76,13 +79,19 @@ export default function MoveToFolderButton({
 
   const pick = (folderId: number | null) => {
     startTransition(async () => {
+      setError(null);
       try {
-        await moveAction(folderId);
+        const res = await moveAction(folderId);
+        if (!res.ok) {
+          // The popover stays open with the reason, so the operator can
+          // try a different bucket.
+          setError(res.error);
+          return;
+        }
         router.refresh();
         setOpen(false);
       } catch {
-        // Server-side audit captures the error; UI just keeps the popover
-        // open so the operator can try a different bucket.
+        setError("Could not move the app.");
       }
     });
   };
@@ -171,6 +180,11 @@ export default function MoveToFolderButton({
               }}
             >
               No folders yet. Use <strong>+ New folder</strong> on /apps.
+            </div>
+          )}
+          {error && (
+            <div role="alert" style={{ padding: "6px 8px", color: "var(--danger)", fontSize: 11 }}>
+              {error}
             </div>
           )}
         </div>,

@@ -4,6 +4,7 @@ import { useMemo, useState } from "react";
 import Table from "@/components/Table/Table";
 import StatusBadge from "@/components/StatusBadge/StatusBadge";
 import ConfirmSubmitButton from "@/components/ConfirmSubmitButton/ConfirmSubmitButton";
+import ActionForm from "@/components/ActionForm/ActionForm";
 import styles from "@/components/page.module.css";
 import { serviceActionExec } from "@/server-actions/services";
 
@@ -53,7 +54,7 @@ export default function ServicesView({ services }: { services: Service[] }) {
       description: <span className={styles.muted}>{s.description}</span>,
       actions: (
         <div style={{ display: "flex", gap: 4 }}>
-          <form action={serviceActionExec.bind(null, s.unit, "restart")}>
+          <ActionForm action={serviceActionExec.bind(null, s.unit, "restart")}>
             <ConfirmSubmitButton
               className={styles.btnGhost}
               message={`Restart ${s.unit}?\n\nBriefly interrupts whatever this service is handling.`}
@@ -61,8 +62,8 @@ export default function ServicesView({ services }: { services: Service[] }) {
             >
               Restart
             </ConfirmSubmitButton>
-          </form>
-          <form action={serviceActionExec.bind(null, s.unit, "stop")}>
+          </ActionForm>
+          <ActionForm action={serviceActionExec.bind(null, s.unit, "stop")}>
             <ConfirmSubmitButton
               className={styles.btnGhost}
               message={`Stop ${s.unit}?\n\nStopping critical services (nginx, vps-panel, vps-panel-agent, mariadb) will take the panel offline.`}
@@ -70,7 +71,7 @@ export default function ServicesView({ services }: { services: Service[] }) {
             >
               Stop
             </ConfirmSubmitButton>
-          </form>
+          </ActionForm>
         </div>
       ),
     };

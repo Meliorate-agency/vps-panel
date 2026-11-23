@@ -146,23 +146,26 @@ export async function deleteAppFolderAction(folderId: number): Promise<void> {
 /**
  * Move (or unassign) an app to/from a folder. `folderId === null` puts the
  * app back in "Ungrouped". Validates folder existence so a stale UI doesn't
- * insert dangling references.
+ * insert dangling references. A refusal is returned for the picker to show:
+ * thrown, its message is replaced by Next in a production build.
  */
 export async function setAppFolderAction(
   appName: string,
   folderId: number | null,
-): Promise<void> {
+): Promise<ActionResult> {
   const s = await requireSession();
   if (folderId !== null) {
     const exists = db()
       .prepare(`SELECT id FROM app_folders WHERE id = ?`)
       .get(folderId) as { id: number } | undefined;
-    if (!exists) throw new Error("folder not found");
+    if (!exists) return { ok: false, error: "folder not found" };
   }
   const app = db()
     .prepare(`SELECT name FROM apps WHERE name = ?`)
     .get(appName) as { name: string } | undefined;
-  if (!app) throw new Error("app not found (only panel-managed apps can be foldered)");
+  if (!app) {
+    return { ok: false, error: "app not found (only panel-managed apps can be foldered)" };
+  }
   db()
     .prepare(`UPDATE apps SET folder_id = ? WHERE name = ?`)
     .run(folderId, appName);
@@ -174,6 +177,7 @@ export async function setAppFolderAction(
     message: folderId === null ? "(none)" : `folder=${folderId}`,
   });
   revalidatePath("/apps");
+  return { ok: true };
 }
 
 /**

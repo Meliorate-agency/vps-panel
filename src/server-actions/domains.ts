@@ -18,13 +18,24 @@ export type ActionResult<T = undefined> =
   | { ok: true; data?: T }
   | { ok: false; error: string };
 
-export async function deleteZoneAction(zone: string): Promise<void> {
+// The actions a button runs directly (Disable DNS, Adopt, DNSSEC sign, the
+// record and cascade deletes) return a failure as `{ ok: false, error }`:
+// thrown, the message is replaced by Next in a production build and the
+// operator gets the page's error screen instead of the agent's reason.
+export async function deleteZoneAction(zone: string): Promise<ActionResult> {
   const s = await requireAdmin();
-  await agent.dns.deleteZone(zone);
+  try {
+    await agent.dns.deleteZone(zone);
+  } catch (e: unknown) {
+    const msg = e instanceof Error ? e.message : String(e);
+    writeAudit({ actorId: s.userId, action: "dns.zones.delete", target: zone, result: "error", message: msg });
+    return { ok: false, error: msg };
+  }
   db().prepare(`DELETE FROM domains WHERE name = ?`).run(zone);
   writeAudit({ actorId: s.userId, action: "dns.zones.delete", target: zone, result: "ok" });
   revalidatePath("/domains");
   revalidatePath(`/domains/${encodeURIComponent(zone)}`);
+  return { ok: true };
 }
 
 function isDuplicateZoneError(msg: string): boolean {
@@ -67,7 +78,7 @@ export async function enableZoneAction(
   }
 }
 
-export async function adoptZoneAction(zone: string): Promise<void> {
+export async function adoptZoneAction(zone: string): Promise<ActionResult> {
   const s = await requireAdmin();
   const name = zone.trim().toLowerCase();
   const zones = await agent.dns.listZones().catch(() => []);
@@ -80,12 +91,13 @@ export async function adoptZoneAction(zone: string): Promise<void> {
       result: "error",
       message: "zone not present in PowerDNS",
     });
-    throw new Error("zone not present in PowerDNS");
+    return { ok: false, error: "zone not present in PowerDNS" };
   }
   db().prepare(`INSERT OR IGNORE INTO domains (name) VALUES (?)`).run(name);
   writeAudit({ actorId: s.userId, action: "dns.zones.adopt", target: name, result: "ok" });
   revalidatePath("/domains");
   revalidatePath(`/domains/${encodeURIComponent(name)}`);
+  return { ok: true };
 }
 
 export async function adoptZoneActionForm(
@@ -94,12 +106,7 @@ export async function adoptZoneActionForm(
 ): Promise<ActionResult> {
   const name = String(fd.get("zone") ?? "").trim().toLowerCase();
   if (!name) return { ok: false, error: "zone name required" };
-  try {
-    await adoptZoneAction(name);
-    return { ok: true };
-  } catch (e: unknown) {
-    return { ok: false, error: e instanceof Error ? e.message : String(e) };
-  }
+  return adoptZoneAction(name);
 }
 
 export async function reconcileZoneAction(
@@ -130,7 +137,7 @@ export async function reconcileZoneAction(
   }
 }
 
-export async function deleteDomainAction(zone: string): Promise<void> {
+export async function deleteDomainAction(zone: string): Promise<ActionResult> {
   const s = await requireAdmin();
   const target = zone.trim().toLowerCase();
 
@@ -191,8 +198,16 @@ export async function deleteDomainAction(zone: string): Promise<void> {
         // vhost wasn't on disk for some reason; treat as missing, keep going
         // so we still purge the SQLite row.
       } else {
-        siteResult = "error";
-        throw e;
+        const msg = e instanceof Error ? e.message : String(e);
+        writeAudit({
+          actorId: s.userId,
+          action: "domain.delete_cascade",
+          target,
+          result: "error",
+          message: `sites_deleted=${sitesDeleted} site ${domain}: ${msg}`,
+        });
+        revalidatePath("/domains");
+        return { ok: false, error: `Could not remove the site ${domain}: ${msg}` };
       }
     }
   }
@@ -208,8 +223,16 @@ export async function deleteDomainAction(zone: string): Promise<void> {
     if (e instanceof AgentError && e.status === 404) {
       dnsResult = "missing";
     } else {
-      dnsResult = "error";
-      throw e;
+      const msg = e instanceof Error ? e.message : String(e);
+      writeAudit({
+        actorId: s.userId,
+        action: "domain.delete_cascade",
+        target,
+        result: "error",
+        message: `sites_deleted=${sitesDeleted} site=${siteResult} dns zone: ${msg}`,
+      });
+      revalidatePath("/domains");
+      return { ok: false, error: `Could not remove the DNS zone ${target}: ${msg}` };
     }
   }
 
@@ -239,14 +262,22 @@ export async function deleteDomainAction(zone: string): Promise<void> {
   });
   revalidatePath("/domains");
   revalidatePath(`/domains/${encodeURIComponent(target)}`);
+  return { ok: true };
 }
 
-export async function signZoneAction(zone: string): Promise<void> {
+export async function signZoneAction(zone: string): Promise<ActionResult> {
   const s = await requireAdmin();
-  await agent.dns.signZone(zone);
+  try {
+    await agent.dns.signZone(zone);
+  } catch (e: unknown) {
+    const msg = e instanceof Error ? e.message : String(e);
+    writeAudit({ actorId: s.userId, action: "dns.zones.sign", target: zone, result: "error", message: msg });
+    return { ok: false, error: msg };
+  }
   db().prepare(`UPDATE domains SET dnssec = 1 WHERE name = ?`).run(zone);
   writeAudit({ actorId: s.userId, action: "dns.zones.sign", target: zone, result: "ok" });
   revalidatePath(`/domains/${encodeURIComponent(zone)}`);
+  return { ok: true };
 }
 
 export async function createRecordAction(
@@ -318,9 +349,16 @@ export async function updateRecordAction(
   }
 }
 
-export async function deleteRecordAction(zone: string, id: number): Promise<void> {
+export async function deleteRecordAction(zone: string, id: number): Promise<ActionResult> {
   const s = await requireAdmin();
-  await agent.dns.deleteRecord(id);
+  try {
+    await agent.dns.deleteRecord(id);
+  } catch (e: unknown) {
+    const msg = e instanceof Error ? e.message : String(e);
+    writeAudit({ actorId: s.userId, action: "dns.records.delete", target: `${zone}/#${id}`, result: "error", message: msg });
+    return { ok: false, error: msg };
+  }
   writeAudit({ actorId: s.userId, action: "dns.records.delete", target: `${zone}/#${id}`, result: "ok" });
   revalidatePath(`/domains/${encodeURIComponent(zone)}`);
+  return { ok: true };
 }

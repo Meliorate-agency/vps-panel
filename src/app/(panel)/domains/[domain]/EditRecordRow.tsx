@@ -50,13 +50,14 @@ export default function EditRecordRow({
   record: RecordShape;
   zone: string;
   updateAction: (prev: Result | null, fd: FormData) => Promise<Result>;
-  deleteAction: () => Promise<void>;
+  deleteAction: () => Promise<Result>;
 }) {
   const [state, formAction, pending] = useActionState<Result | null, FormData>(
     updateAction,
     null,
   );
   const [deletePending, startDelete] = useTransition();
+  const [deleteError, setDeleteError] = useState<string | null>(null);
   const [, startSave] = useTransition();
   const isSoa = record.type.toUpperCase() === "SOA";
   const typeOptions = isSoa
@@ -203,7 +204,9 @@ export default function EditRecordRow({
     );
     if (!ok) return;
     startDelete(async () => {
-      await deleteAction();
+      setDeleteError(null);
+      const res = await deleteAction();
+      if (!res.ok) setDeleteError(res.error);
     });
   }
 
@@ -250,6 +253,11 @@ export default function EditRecordRow({
           <path d="M14 11v6" />
         </svg>
       </button>
+      {deleteError && (
+        <span role="alert" className={styles.error} style={{ fontSize: 11, margin: 0 }}>
+          {deleteError}
+        </span>
+      )}
 
       {open && (isMobile || pos) && typeof document !== "undefined" &&
         createPortal(

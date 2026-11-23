@@ -57,7 +57,11 @@ export default function KeyActionsMenu({
   /** Third arg: keypair name to also purge from disk (files + config Host
    *  block). Only ever passed when the row has a `keypairName` and the
    *  operator ticked the checkbox in the delete dialog. */
-  deleteAction: (user: string, fp: string, purgeKeypair?: string) => Promise<void>;
+  deleteAction: (
+    user: string,
+    fp: string,
+    purgeKeypair?: string,
+  ) => Promise<{ ok: true } | { ok: false; error: string }>;
 }) {
   const [menuOpen, setMenuOpen] = useState(false);
   const [modal, setModal] = useState<ModalKind>({ kind: "none" });
@@ -134,11 +138,15 @@ export default function KeyActionsMenu({
     setDeleteError(null);
     startDelete(async () => {
       try {
-        await deleteAction(
+        const res = await deleteAction(
           user,
           fingerprint,
           keypairName && (purgeFiles || !authorized) ? keypairName : undefined,
         );
+        if (!res.ok) {
+          setDeleteError(res.error);
+          return;
+        }
         setModal({ kind: "none" });
       } catch (e) {
         setDeleteError(e instanceof Error ? e.message : String(e));

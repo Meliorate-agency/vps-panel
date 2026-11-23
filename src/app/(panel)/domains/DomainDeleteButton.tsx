@@ -18,6 +18,9 @@ import ConfirmDialog from "@/components/ConfirmDialog/ConfirmDialog";
  * `subSiteCount` lets the dialog list how many sub-sites the cascade will
  * pull down — purely informational. The action itself re-queries SQLite at
  * delete time so a stale UI count never causes wrong behaviour.
+ *
+ * The action returns `{ ok: false, error }` when a step of the cascade is
+ * refused; the reason is shown in the dialog, which stays open.
  */
 export default function DomainDeleteButton({
   zone,
@@ -27,17 +30,23 @@ export default function DomainDeleteButton({
   buttonClassName,
 }: {
   zone: string;
-  action: (zone: string) => Promise<void>;
+  action: (zone: string) => Promise<{ ok: true } | { ok: false; error: string }>;
   subSiteCount?: number;
   buttonLabel?: string;
   buttonClassName?: string;
 }) {
   const [open, setOpen] = useState(false);
   const [pending, start] = useTransition();
+  const [error, setError] = useState<string | null>(null);
 
   const onConfirm = () => {
     start(async () => {
-      await action(zone);
+      setError(null);
+      const res = await action(zone);
+      if (!res.ok) {
+        setError(res.error);
+        return;
+      }
       setOpen(false);
     });
   };
@@ -47,7 +56,10 @@ export default function DomainDeleteButton({
       <button
         type="button"
         className={buttonClassName ?? styles.btnDanger}
-        onClick={() => setOpen(true)}
+        onClick={() => {
+          setError(null);
+          setOpen(true);
+        }}
         disabled={pending}
       >
         {pending ? "Deleting…" : buttonLabel}
@@ -129,6 +141,11 @@ export default function DomainDeleteButton({
               the DNS zone&apos;s SOA serial and any custom records you added
               manually will need to be recreated.
             </div>
+            {error && (
+              <div className={styles.error} style={{ marginTop: 12 }}>
+                {error}
+              </div>
+            )}
           </ConfirmDialog>,
           document.body,
         )}

@@ -11,6 +11,9 @@ import styles from "@/components/page.module.css";
  * dialog is portaled to <body>: inside the Domains table card, whose
  * backdrop-filter is the containing block of its fixed backdrop, it would be
  * placed and clipped by the card instead of the viewport.
+ *
+ * The action returns `{ ok: false, error }` when the agent refuses; the reason
+ * is shown in the dialog, which stays open.
  */
 export default function SiteDeleteButton({
   domain,
@@ -21,7 +24,7 @@ export default function SiteDeleteButton({
   className,
 }: {
   domain: string;
-  action: (domain: string) => Promise<void>;
+  action: (domain: string) => Promise<{ ok: true } | { ok: false; error: string }>;
   label?: string;
   pendingLabel?: string;
   /** Dialog heading; "Delete <domain>?" by default. */
@@ -30,10 +33,16 @@ export default function SiteDeleteButton({
 }) {
   const [open, setOpen] = useState(false);
   const [pending, start] = useTransition();
+  const [error, setError] = useState<string | null>(null);
 
   const onConfirm = () =>
     start(async () => {
-      await action(domain);
+      setError(null);
+      const res = await action(domain);
+      if (!res.ok) {
+        setError(res.error);
+        return;
+      }
       setOpen(false);
     });
 
@@ -42,7 +51,10 @@ export default function SiteDeleteButton({
       <button
         type="button"
         className={className ?? styles.btnDanger}
-        onClick={() => setOpen(true)}
+        onClick={() => {
+          setError(null);
+          setOpen(true);
+        }}
         disabled={pending}
       >
         {pending ? pendingLabel : label}
@@ -76,6 +88,11 @@ export default function SiteDeleteButton({
               Website files and the SSL certificate stay on disk, so adding the domain again
               picks them up.
             </p>
+            {error && (
+              <div className={styles.error} style={{ marginTop: 12 }}>
+                {error}
+              </div>
+            )}
           </ConfirmDialog>,
           document.body,
         )}

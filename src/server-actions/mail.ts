@@ -176,11 +176,20 @@ export async function createAliasAction(
   }
 }
 
-export async function deleteAliasAction(id: number, label: string): Promise<void> {
+// Returns the agent's refusal for the Remove dialog: thrown, its message is
+// replaced by Next in a production build.
+export async function deleteAliasAction(id: number, label: string): Promise<ActionResult> {
   const s = await requireAdmin();
-  await agent.mail.deleteAlias(id);
+  try {
+    await agent.mail.deleteAlias(id);
+  } catch (e: unknown) {
+    const msg = agentErrorMessage(e);
+    writeAudit({ actorId: s.userId, action: "mail.aliases.delete", target: label, result: "error", message: msg });
+    return { ok: false, error: msg };
+  }
   writeAudit({ actorId: s.userId, action: "mail.aliases.delete", target: label, result: "ok" });
   revalidatePath("/mailboxes");
+  return { ok: true };
 }
 
 /** Track delivery: what Postfix did with mail to or from one address. */

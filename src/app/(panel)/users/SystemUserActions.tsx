@@ -15,7 +15,7 @@ type Props = {
   resetAction: (prev: Result | null, fd: FormData) => Promise<Result>;
   /** Bound to `name` on the page side. Takes a `removeHome` arg the dialog
    *  toggles via a checkbox. */
-  deleteAction: (removeHome: boolean) => Promise<void>;
+  deleteAction: (removeHome: boolean) => Promise<Result>;
 };
 
 /**
@@ -68,7 +68,11 @@ export default function SystemUserActions({
     setDeleteError(null);
     startDelete(async () => {
       try {
-        await deleteAction(removeHome);
+        const res = await deleteAction(removeHome);
+        if (!res.ok) {
+          setDeleteError(res.error);
+          return;
+        }
         router.refresh();
         setDeleteOpen(false);
         setRemoveHome(false);
