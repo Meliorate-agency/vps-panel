@@ -1,4 +1,5 @@
 import Link from "next/link";
+import { requireSession } from "@/lib/auth";
 import {
   formatAuditTs,
   getPanelTimezone,
@@ -34,6 +35,20 @@ export default async function AuditPage({
 }: {
   searchParams: Promise<{ day?: string }>;
 }) {
+  // Every Terminal command is in here word for word (passwords typed on a
+  // command line included), with targets and error text: admins only, like
+  // the logs and task logs.
+  const s = await requireSession();
+  if (s.role !== "admin") {
+    return (
+      <div className={styles.head}>
+        <div>
+          <h1 className={styles.title}>Audit log</h1>
+          <div className={styles.subtitle}>Only admins can read the audit log.</div>
+        </div>
+      </div>
+    );
+  }
   const sp = await searchParams;
   const tz = getPanelTimezone();
   const today = todayInTz();
