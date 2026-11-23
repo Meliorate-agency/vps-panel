@@ -1308,29 +1308,70 @@ pub(crate) async fn verify_public_dns(
     state: &AppState,
     domain: &str,
 ) -> Result<(), String> {
+    check_public_dns(state, domain).await.map(|_| ())
+}
+
+/// `verify_public_dns`, plus a warning for the task log when the name
+/// reaches this server but something about its records can still make the
+/// certificate order fail.
+async fn check_public_dns(state: &AppState, domain: &str) -> Result<Option<String>, String> {
     let expected_v4 = crate::server_ip::resolve_ipv4(None, &state.config.panel_host).await;
     let expected_v6 = crate::server_ip::resolve_ipv6(None, &state.config.panel_host).await;
+    let own_v6 = own_ipv6s(expected_v6.as_deref()).await;
     let v4_resolved = dig_public(domain, "A").await;
     let v6_resolved = dig_public(domain, "AAAA").await;
+    judge_public_dns(
+        domain,
+        &v4_resolved,
+        &v6_resolved,
+        expected_v4.as_deref(),
+        expected_v6.as_deref(),
+        &own_v6,
+        &state.config.panel_host,
+    )
+}
 
+/// Every IPv6 address a name may carry and still reach this server: the
+/// ones on its interfaces (nginx listens on all of them) and the panel
+/// hostname's AAAA.
+async fn own_ipv6s(expected_v6: Option<&str>) -> Vec<String> {
+    let mut own = crate::server_ip::ipv6s_on_interfaces().await;
+    if let Some(v6) = expected_v6 {
+        if !own.iter().any(|a| a == v6) {
+            own.push(v6.to_string());
+        }
+    }
+    own
+}
+
+/// What the certificate preflight makes of a name's public A and AAAA
+/// records. Err: the name does not reach this server. Ok(Some(warning)): it
+/// does, but an AAAA record points somewhere else. Let's Encrypt validates
+/// over IPv6 first when a name has an AAAA and only falls back to IPv4 when
+/// nothing answers there, so with another machine at that address the order
+/// fails although the A record is right. Only a warning, not a refusal: with
+/// a dead address behind the AAAA the order does succeed over IPv4, and
+/// certificates that renew that way today must keep renewing.
+fn judge_public_dns(
+    domain: &str,
+    v4_resolved: &[String],
+    v6_resolved: &[String],
+    expected_v4: Option<&str>,
+    expected_v6: Option<&str>,
+    own_v6: &[String],
+    panel_host: &str,
+) -> Result<Option<String>, String> {
     if v4_resolved.is_empty() && v6_resolved.is_empty() {
         return Err(format!(
             "no public A or AAAA record for {domain} (queried 1.1.1.1). \
              Add an A record at the authoritative DNS provider for the parent \
              zone, pointing to {}, then retry SSL.",
-            expected_v4
-                .as_deref()
-                .or(expected_v6.as_deref())
-                .unwrap_or(&state.config.panel_host)
+            expected_v4.or(expected_v6).unwrap_or(panel_host)
         ));
     }
 
-    let v4_match = expected_v4
-        .as_ref()
-        .map_or(false, |w| v4_resolved.iter().any(|got| got == w));
-    let v6_match = expected_v6
-        .as_ref()
-        .map_or(false, |w| v6_resolved.iter().any(|got| got == w));
+    let v4_match = expected_v4.is_some_and(|w| v4_resolved.iter().any(|got| got == w));
+    let v6_match = v6_resolved.iter().any(|got| own_v6.contains(got));
 
     if !v4_match && !v6_match {
         return Err(format!(
@@ -1339,7 +1380,28 @@ pub(crate) async fn verify_public_dns(
              Update the record at your DNS provider before retrying."
         ));
     }
-    Ok(())
+    if !v6_resolved.is_empty() && !v6_match {
+        return Ok(Some(format!(
+            "{domain} has an AAAA record ({}) that is not an address of this server. \
+             Let's Encrypt checks over IPv6 first when a name has one: if another machine \
+             answers there, the order fails. Remove that AAAA record{}.",
+            v6_resolved.join(", "),
+            match own_v6.first() {
+                Some(v6) => format!(", or point it at {v6}"),
+                None => String::new(),
+            }
+        )));
+    }
+    Ok(None)
+}
+
+/// Is this A or AAAA content one of this server's addresses?
+fn is_own_address(content: &str, own_v4: &[String], own_v6: &[String]) -> bool {
+    match content.trim().parse::<std::net::IpAddr>() {
+        Ok(std::net::IpAddr::V4(ip)) => own_v4.contains(&ip.to_string()),
+        Ok(std::net::IpAddr::V6(ip)) => own_v6.contains(&ip.to_string()),
+        Err(_) => false,
+    }
 }
 
 /// Symmetric to `ensure_subdomain_records`. When a site is deleted and the
@@ -1350,6 +1412,11 @@ pub(crate) async fn verify_public_dns(
 /// Never deletes the apex (some other site/feature may still need it) and
 /// never touches records when the parent zone is external. Returns the
 /// number of rows removed (0 when nothing matched, which is a no-op success).
+///
+/// Only records that point at this server go. `ensure_subdomain_records`
+/// leaves a name alone that the operator pointed at another host; deleting
+/// the leftover site here used to remove that A record too and take the
+/// other host's name out of DNS.
 ///
 /// MX-target guard: if any MX record in the same zone has this hostname as
 /// its content (e.g. zone `foo.com` has `MX 10 mail.foo.com` and the caller
@@ -1387,13 +1454,26 @@ pub(crate) async fn cleanup_subdomain_records(
         );
         return Ok(0);
     }
-    conn.exec_drop(
-        "DELETE FROM records \
-         WHERE domain_id = ? AND name = ? AND type IN ('A', 'AAAA')",
-        (zone_id, &domain_norm),
-    )
-    .await?;
-    Ok(conn.affected_rows())
+    let expected_v4 = crate::server_ip::resolve_ipv4(None, &state.config.panel_host).await;
+    let expected_v6 = crate::server_ip::resolve_ipv6(None, &state.config.panel_host).await;
+    let mut own_v4 = crate::server_ip::ipv4s_on_interfaces().await;
+    own_v4.extend(expected_v4);
+    let own_v6 = own_ipv6s(expected_v6.as_deref()).await;
+    let rows: Vec<(u64, Option<String>)> = conn
+        .exec(
+            "SELECT id, content FROM records \
+             WHERE domain_id = ? AND name = ? AND type IN ('A', 'AAAA')",
+            (zone_id, &domain_norm),
+        )
+        .await?;
+    let mut removed = 0;
+    for (id, content) in rows {
+        if is_own_address(content.as_deref().unwrap_or(""), &own_v4, &own_v6) {
+            conn.exec_drop("DELETE FROM records WHERE id = ?", (id,)).await?;
+            removed += conn.affected_rows();
+        }
+    }
+    Ok(removed)
 }
 
 /// One-call orchestrator for SSL issuance paths: auto-create records when we
@@ -1427,12 +1507,59 @@ pub(crate) async fn preflight_acme_dns(
             "preflight: warning, could not write {domain} record to PowerDNS: {e}"
         )),
     }
-    verify_public_dns(state, domain).await
+    if let Some(warning) = check_public_dns(state, domain).await? {
+        task.log(format!("preflight: warning, {warning}"));
+    }
+    Ok(())
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{format_spf, txt_has_prefix};
+    use super::{format_spf, is_own_address, judge_public_dns, txt_has_prefix};
+
+    fn list(items: &[&str]) -> Vec<String> {
+        items.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn the_cert_preflight_wants_the_name_here_and_warns_about_a_stray_aaaa() {
+        let v4 = "198.51.100.127";
+        let own6 = list(&["2001:db8:1::1", "2001:db8:1::2"]);
+        let judge = |a: &[&str], aaaa: &[&str]| {
+            judge_public_dns(
+                "shop.example.com",
+                &list(a),
+                &list(aaaa),
+                Some(v4),
+                Some("2001:db8:1::1"),
+                &own6,
+                "panel.example.com",
+            )
+        };
+        assert_eq!(judge(&[v4], &[]), Ok(None));
+        assert_eq!(judge(&[v4], &["2001:db8:1::1"]), Ok(None));
+        // Any address of this server will do: nginx listens on all of them.
+        assert_eq!(judge(&[], &["2001:db8:1::2"]), Ok(None));
+        assert!(judge(&[], &[]).unwrap_err().contains("no public A or AAAA record"));
+        assert!(judge(&["203.0.113.50"], &[]).unwrap_err().contains("but this server is"));
+        assert!(judge(&["203.0.113.50"], &["2001:db8:ffff::1"]).is_err());
+        // The A record is right, an old AAAA still points at another machine.
+        let warning = judge(&[v4], &["2001:db8:ffff::1"]).unwrap().unwrap();
+        assert!(warning.contains("AAAA record (2001:db8:ffff::1)"), "{warning}");
+        assert!(warning.contains("or point it at 2001:db8:1::1"), "{warning}");
+    }
+
+    #[test]
+    fn only_records_that_point_here_are_this_servers() {
+        let v4 = list(&["198.51.100.127", "10.0.0.5"]);
+        let v6 = list(&["2001:db8:1::1"]);
+        assert!(is_own_address("198.51.100.127", &v4, &v6));
+        assert!(is_own_address(" 2001:DB8:1:0::1 ", &v4, &v6));
+        assert!(!is_own_address("203.0.113.50", &v4, &v6));
+        assert!(!is_own_address("2001:db8:ffff::1", &v4, &v6));
+        assert!(!is_own_address("", &v4, &v6));
+        assert!(!is_own_address("198.51.100.127", &[], &[]));
+    }
 
     #[test]
     fn spf_names_each_address_the_server_has() {
