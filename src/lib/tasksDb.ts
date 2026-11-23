@@ -67,32 +67,27 @@ function tzDayToRfc3339Range(
  * Distinct calendar days (in the configured tz) that have at least one
  * task. Newest first. Powers the prev/next pager on /tasks.
  *
- * Implementation: pull distinct UTC dates first (cheap, capped at one row
- * per day), then for each, fetch min+max started_at and convert both to
- * tz-day. That keeps DST-straddling UTC days from dropping a local-tz
- * bucket.
+ * Implementation: for every UTC date with tasks, its first and last
+ * started_at, both converted to tz-day. That keeps DST-straddling UTC days
+ * from dropping a local-tz bucket.
+ *
+ * The UTC dates are walked on the index on `started_at`
+ * (idx_tasks_started_at), newest first, one index lookup per step, the same
+ * way listAuditDays does it. Grouping by substr(started_at, 1, 10) read the
+ * whole table, build logs included, once per date on each visit to /tasks.
  */
 export function listTaskDays(): string[] {
   const tz = getPanelTimezone();
-  const utcDays = db()
-    .prepare(
-      `SELECT DISTINCT substr(started_at, 1, 10) AS day
-         FROM tasks
-        ORDER BY day DESC`,
-    )
-    .all() as { day: string }[];
-  if (utcDays.length === 0) return [];
-
+  const firstFrom = db().prepare(`SELECT MIN(started_at) AS ts FROM tasks WHERE started_at >= ?`);
+  const lastBefore = db().prepare(`SELECT MAX(started_at) AS ts FROM tasks WHERE started_at < ?`);
   const tzDays = new Set<string>();
-  const stmt = db().prepare(
-    `SELECT MIN(started_at) AS first_ts, MAX(started_at) AS last_ts
-       FROM tasks
-      WHERE substr(started_at, 1, 10) = ?`,
-  );
-  for (const { day } of utcDays) {
-    const row = stmt.get(day) as { first_ts: string; last_ts: string };
-    tzDays.add(toTzDay(new Date(row.first_ts), tz));
-    tzDays.add(toTzDay(new Date(row.last_ts), tz));
+  let last = (db().prepare(`SELECT MAX(started_at) AS ts FROM tasks`).get() as { ts: string | null }).ts;
+  while (last) {
+    const utcDay = last.slice(0, 10);
+    const first = (firstFrom.get(utcDay) as { ts: string }).ts;
+    tzDays.add(toTzDay(new Date(first), tz));
+    tzDays.add(toTzDay(new Date(last), tz));
+    last = (lastBefore.get(utcDay) as { ts: string | null }).ts;
   }
   return [...tzDays].sort().reverse();
 }

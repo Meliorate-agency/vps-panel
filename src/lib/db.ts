@@ -57,6 +57,9 @@ function applyMigrations(handle: Database.Database) {
       finished_at  TEXT,
       log_blob     TEXT NOT NULL DEFAULT ''
     );
+    -- /tasks: the days that have tasks and one day's tasks (lib/tasksDb.ts),
+    -- and the agent's newest-200 list, without reading every build log.
+    CREATE INDEX IF NOT EXISTS idx_tasks_started_at ON tasks (started_at);
 
     -- Per-folder command history for /terminal. The UNIQUE index is the whole
     -- design: recording a command is an upsert that bumps last_used_at, so a
@@ -87,6 +90,8 @@ function applyMigrations(handle: Database.Database) {
       result        TEXT NOT NULL,
       message       TEXT
     );
+    -- /audit: the days that have entries and one day's entries (lib/audit.ts).
+    CREATE INDEX IF NOT EXISTS idx_audit_log_ts ON audit_log (ts);
 
     CREATE TABLE IF NOT EXISTS apps (
       name          TEXT PRIMARY KEY,

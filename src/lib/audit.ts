@@ -175,33 +175,30 @@ export function tzMidnightUtcMs(day: string, tz: string): number {
  * entry, newest first. Powers the audit page's "prev/next day with entries"
  * pager.
  *
- * Implementation: SQL DISTINCTs by UTC date first to cap the rows we walk,
- * then JS re-groups by local-tz date so a single UTC date that straddles
- * two local dates produces both buckets correctly.
+ * Implementation: for every UTC date with entries, its first and last
+ * entry, re-grouped in JS by local-tz date so a single UTC date that
+ * straddles two local dates produces both buckets correctly.
+ *
+ * The UTC dates are walked on the index on `ts` (idx_audit_log_ts), newest
+ * first: the last entry of a date, the first one of that date, then the last
+ * entry before it. Each step is one index lookup. Grouping by
+ * substr(ts, 1, 10) read the whole table once for the list of dates and once
+ * more for every date in it, on each visit to /audit.
  */
 export function listAuditDays(): string[] {
   const tz = getPanelTimezone();
-  const utcDays = db()
-    .prepare(
-      `SELECT DISTINCT substr(ts, 1, 10) AS day
-         FROM audit_log
-        ORDER BY day DESC`,
-    )
-    .all() as { day: string }[];
-  if (utcDays.length === 0) return [];
-
-  // For each UTC day, pull min+max ts so DST straddles don't lose a local-tz
-  // day. Cheap: 2 rows per UTC day.
+  const firstFrom = db().prepare(`SELECT MIN(ts) AS ts FROM audit_log WHERE ts >= ?`);
+  const lastBefore = db().prepare(`SELECT MAX(ts) AS ts FROM audit_log WHERE ts < ?`);
   const tzDays = new Set<string>();
-  const stmt = db().prepare(
-    `SELECT MIN(ts) AS first_ts, MAX(ts) AS last_ts
-       FROM audit_log
-      WHERE substr(ts, 1, 10) = ?`,
-  );
-  for (const { day } of utcDays) {
-    const row = stmt.get(day) as { first_ts: string; last_ts: string };
-    tzDays.add(toTzDay(parseUtcTimestamp(row.first_ts), tz));
-    tzDays.add(toTzDay(parseUtcTimestamp(row.last_ts), tz));
+  let last = (db().prepare(`SELECT MAX(ts) AS ts FROM audit_log`).get() as { ts: string | null }).ts;
+  while (last) {
+    // "YYYY-MM-DD" sorts before every timestamp of that date and after
+    // every one of the dates before it.
+    const utcDay = last.slice(0, 10);
+    const first = (firstFrom.get(utcDay) as { ts: string }).ts;
+    tzDays.add(toTzDay(parseUtcTimestamp(first), tz));
+    tzDays.add(toTzDay(parseUtcTimestamp(last), tz));
+    last = (lastBefore.get(utcDay) as { ts: string | null }).ts;
   }
   return [...tzDays].sort().reverse();
 }
