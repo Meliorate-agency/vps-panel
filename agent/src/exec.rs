@@ -99,15 +99,44 @@ where
         .spawn()
         .map_err(AgentError::Io)?;
 
-    if let Some(mut stdin) = child.stdin.take() {
+    // The input is written while the output is read. Writing all of it first
+    // deadlocked with a child that fills its stdout pipe before it has read
+    // everything: each side waited for the other to empty a full pipe.
+    let stdin = child.stdin.take();
+    let write = async move {
         use tokio::io::AsyncWriteExt;
-        stdin
-            .write_all(stdin_data.as_bytes())
-            .await
-            .map_err(AgentError::Io)?;
+        if let Some(mut stdin) = stdin {
+            stdin.write_all(stdin_data.as_bytes()).await?;
+            stdin.shutdown().await?;
+        }
+        Ok::<(), std::io::Error>(())
+    };
+    tokio::pin!(write);
+    let collected = collect(cmd, child);
+    tokio::pin!(collected);
+    let mut written: Option<std::io::Result<()>> = None;
+    let out = loop {
+        tokio::select! {
+            // The writer first, so `written` is only None below when the
+            // write was really still blocked.
+            biased;
+            r = &mut write, if written.is_none() => written = Some(r),
+            out = &mut collected => break out,
+        }
+    };
+    // A command that failed says why on stderr, which is worth more than the
+    // broken pipe its early exit gave the writer.
+    let out = out?;
+    match written {
+        Some(Ok(())) => Ok(out),
+        Some(Err(e)) => Err(AgentError::Io(e)),
+        // Still writing when the command exited, as the old write_all would
+        // have been: it failed with EPIPE.
+        None => Err(AgentError::Io(std::io::Error::new(
+            std::io::ErrorKind::BrokenPipe,
+            format!("{cmd} exited before it had read all of its input"),
+        ))),
     }
-
-    collect(cmd, child).await
 }
 
 /// Read stdout and stderr to the end (or until DRAIN_AFTER_EXIT after the
@@ -263,7 +292,7 @@ fn take_line(buf: &mut Vec<u8>) -> String {
 
 #[cfg(all(test, unix))]
 mod tests {
-    use super::{run, run_envs, run_streaming};
+    use super::{run, run_envs, run_streaming, run_with_input};
     use std::time::{Duration, Instant};
 
     #[tokio::test]
@@ -313,6 +342,30 @@ mod tests {
         // One the caller passes explicitly still arrives.
         let out = run_envs("sh", show, [("RESTIC_PASSWORD", "explicit")]).await.unwrap();
         assert_eq!(out.stdout.trim(), "none explicit");
+    }
+
+    #[tokio::test]
+    async fn input_larger_than_a_pipe_does_not_deadlock_with_the_output() {
+        // cat fills its stdout pipe (64 KiB) long before it has read 1 MiB.
+        let input = "0123456789abcdef".repeat(64 * 1024);
+        let out = tokio::time::timeout(Duration::from_secs(20), run_with_input("cat", [""; 0], &input))
+            .await
+            .expect("run_with_input hung")
+            .unwrap();
+        assert_eq!(out.stdout.len(), input.len());
+        assert_eq!(out.stdout, input);
+    }
+
+    #[tokio::test]
+    async fn a_failed_command_with_unread_input_reports_its_own_error() {
+        let input = "x".repeat(1024 * 1024);
+        let err = run_with_input("sh", ["-c", "echo refused >&2; exit 4"], &input).await.unwrap_err();
+        assert!(err.to_string().contains("refused"), "{err}");
+        // One that succeeds without reading it all is still an error, as before.
+        assert!(run_with_input("true", [""; 0], &input).await.is_err());
+        // And a small input it never reads is fine, as before.
+        let out = run_with_input("sh", ["-c", "sleep 0.3; echo ok"], "tiny").await.unwrap();
+        assert_eq!(out.stdout.trim(), "ok");
     }
 
     #[tokio::test]
