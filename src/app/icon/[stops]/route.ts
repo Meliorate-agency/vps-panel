@@ -13,7 +13,14 @@ export const runtime = "nodejs";
 
 export async function GET(_req: Request, { params }: { params: Promise<{ stops: string }> }) {
   const { stops } = await params;
-  const m = STOPS_RE.exec(decodeURIComponent(stops).toLowerCase());
+  let name: string;
+  try {
+    name = decodeURIComponent(stops);
+  } catch {
+    // A stray "%" (/icon/%zz) is not an icon either; it used to answer 500.
+    return new Response("not an icon", { status: 404 });
+  }
+  const m = STOPS_RE.exec(name.toLowerCase());
   if (!m) return new Response("not an icon", { status: 404 });
   const [, glow, accent, deep] = m;
   // Same mark as components/BoltMark and the sidebar logo.
