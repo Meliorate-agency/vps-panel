@@ -299,14 +299,15 @@ async fn spawn_ssl_task(state: &AppState, domain: String, route: RouteSpec) -> S
         // Pre-flight DNS for every SAN so ACME doesn't spend 60s timing out
         // on a missing record. Also auto-creates the record in PowerDNS when
         // the parent zone is panel-managed.
-        let mut preflight_failed = false;
+        let mut preflight_failed = Vec::new();
         for name in &names {
             if let Err(e) = crate::handlers::dns::preflight_acme_dns(&state_clone, name, &task).await {
                 task.log(format!("ssl preflight failed for {name}: {e}"));
-                preflight_failed = true;
+                preflight_failed.push(format!("{name}: {e}"));
             }
         }
-        if preflight_failed {
+        if !preflight_failed.is_empty() {
+            crate::handlers::ssl::log_preflight_failures(&preflight_failed, &task);
             task.finish(false);
             return;
         }

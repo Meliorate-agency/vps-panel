@@ -200,14 +200,28 @@ pub(crate) async fn ensure_mail_acme_helpers(state: &AppState, names: &[String],
 /// instead of timing out inside `instant-acme`. Returns false to abort.
 async fn run_acme_preflight(state: &AppState, names: &[String], task: &TaskHandle) -> bool {
     ensure_mail_acme_helpers(state, names, task).await;
-    let mut ok = true;
+    let mut failed = Vec::new();
     for name in names {
         if let Err(e) = crate::handlers::dns::preflight_acme_dns(state, name, task).await {
             task.log(format!("ssl preflight failed for {name}: {e}"));
-            ok = false;
+            failed.push(format!("{name}: {e}"));
         }
     }
-    ok
+    log_preflight_failures(&failed, task);
+    failed.is_empty()
+}
+
+/// The panel shows a failed task's last log line as the reason. The checks
+/// log per name, so when an earlier name failed and a later one passed, the
+/// last line was the later name's "points at this server". Say what failed
+/// once more at the end.
+pub(crate) fn log_preflight_failures(failed: &[String], task: &TaskHandle) {
+    if !failed.is_empty() {
+        task.log(format!(
+            "no certificate was ordered, DNS is not ready: {}",
+            failed.join(" | ")
+        ));
+    }
 }
 
 pub async fn issue_for(
