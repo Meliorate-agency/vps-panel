@@ -171,6 +171,9 @@ pub async fn list_databases(State(state): State<AppState>) -> AgentResult<Json<V
             .map(|name| {
                 let mut users = by_db.remove(&name).unwrap_or_default();
                 users.sort_by(|a, b| a.user.cmp(&b.user).then_with(|| a.host.cmp(&b.host)));
+                // One chip per user@host, also when it holds the grant under
+                // both spellings of the name (`my_app` and `my\_app`).
+                users.dedup_by(|a, b| a.user == b.user && a.host == b.host);
                 DatabaseRow { name, users }
             })
             .collect(),
@@ -191,6 +194,25 @@ fn unescape_grant_db(db: &str) -> String {
         }
     }
     out
+}
+
+/// A database name as `GRANT ... ON <name>.*` has to spell it. MariaDB reads
+/// `_` and `%` in that position as LIKE wildcards: a grant on `shop_1` also
+/// opened `shopa1` and `shop11` to the user. Escaped, it covers that one
+/// database, and lands in `mysql.db` as `shop\_1` (what phpMyAdmin writes).
+fn grant_db_pattern(db: &str) -> String {
+    let mut out = String::with_capacity(db.len() + 2);
+    for c in db.chars() {
+        if matches!(c, '_' | '%' | '\\') {
+            out.push('\\');
+        }
+        out.push(c);
+    }
+    out
+}
+
+fn is_no_such_grant(e: &mysql_async::Error) -> bool {
+    matches!(e, mysql_async::Error::Server(s) if s.code == 1141)
 }
 
 pub async fn create_user(
@@ -300,10 +322,26 @@ pub async fn grant(
         return Err(AgentError::Invalid("invalid privileges spec".into()));
     }
     let mut conn = state.mariadb.pool().get_conn().await?;
+    let mut on = grant_db_pattern(&req.database);
+    if on != req.database {
+        // A grant made before the name was escaped sits in mysql.db under
+        // the plain name. It is extended in place: MariaDB applies only the
+        // most specific row, so a second, escaped row with fewer privileges
+        // would take away what the old one gives.
+        let held: Vec<String> = conn
+            .exec(
+                "SELECT Db FROM mysql.db WHERE Db IN (?, ?) AND User = ? AND Host = ?",
+                (on.as_str(), req.database.as_str(), req.user.as_str(), host.as_str()),
+            )
+            .await?;
+        if !held.contains(&on) && held.contains(&req.database) {
+            on = req.database.clone();
+        }
+    }
     conn.query_drop(format!(
         "GRANT {} ON `{}`.* TO '{}'@'{}'",
         req.privileges,
-        escape(&req.database),
+        escape(&on),
         escape(&req.user),
         escape(&host)
     ))
@@ -339,30 +377,53 @@ pub async fn revoke(
     let host = req.host.unwrap_or_else(default_host);
     validate_host(&host)?;
     let mut conn = state.mariadb.pool().get_conn().await?;
-    conn.query_drop(format!(
-        "REVOKE ALL PRIVILEGES ON `{}`.* FROM '{}'@'{}'",
-        escape(&req.database),
-        escape(&req.user),
-        escape(&host)
-    ))
-    .await?;
-    // REVOKE ALL PRIVILEGES leaves the mysql.db row behind when the user
-    // also held GRANT OPTION; clearing that needs its own REVOKE, which
-    // errors with 1141 when the user never had it — swallow exactly that.
-    if let Err(e) = conn
-        .query_drop(format!(
-            "REVOKE GRANT OPTION ON `{}`.* FROM '{}'@'{}'",
-            escape(&req.database),
-            escape(&req.user),
-            escape(&host)
-        ))
-        .await
-    {
-        let no_such_grant =
-            matches!(&e, mysql_async::Error::Server(s) if s.code == 1141);
-        if !no_such_grant {
-            return Err(e.into());
+    // The chip shows the plain name; the grant behind it is stored escaped
+    // (`my\_app`: this panel, phpMyAdmin) or plain (`my_app`: older panel
+    // grants, the mysql CLI). REVOKE only finds the spelling it is given, so
+    // an escaped grant could be shown but never removed. Try both; 1141 (no
+    // such grant) is the answer only when neither is there.
+    let mut spellings = vec![grant_db_pattern(&req.database)];
+    if spellings[0] != req.database {
+        spellings.push(req.database.clone());
+    }
+    let mut revoked = false;
+    let mut missing: Option<mysql_async::Error> = None;
+    for db in &spellings {
+        if let Err(e) = conn
+            .query_drop(format!(
+                "REVOKE ALL PRIVILEGES ON `{}`.* FROM '{}'@'{}'",
+                escape(db),
+                escape(&req.user),
+                escape(&host)
+            ))
+            .await
+        {
+            if !is_no_such_grant(&e) {
+                return Err(e.into());
+            }
+            missing.get_or_insert(e);
+            continue;
         }
+        revoked = true;
+        // REVOKE ALL PRIVILEGES leaves the mysql.db row behind when the user
+        // also held GRANT OPTION; clearing that needs its own REVOKE, which
+        // errors with 1141 when the user never had it — swallow exactly that.
+        if let Err(e) = conn
+            .query_drop(format!(
+                "REVOKE GRANT OPTION ON `{}`.* FROM '{}'@'{}'",
+                escape(db),
+                escape(&req.user),
+                escape(&host)
+            ))
+            .await
+        {
+            if !is_no_such_grant(&e) {
+                return Err(e.into());
+            }
+        }
+    }
+    if let (false, Some(e)) = (revoked, missing) {
+        return Err(e.into());
     }
     conn.query_drop("FLUSH PRIVILEGES").await?;
     Ok(Json(crate::ipc::OkResponse::default()))
@@ -1009,4 +1070,22 @@ fn random_password() -> String {
     let mut bytes = [0u8; 24];
     rand::thread_rng().fill_bytes(&mut bytes);
     base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn grant_names_are_escaped_and_read_back() {
+        assert_eq!(grant_db_pattern("shop_1"), r"shop\_1");
+        assert_eq!(grant_db_pattern("a%b"), r"a\%b");
+        assert_eq!(grant_db_pattern("plain"), "plain");
+        // What the Granted-users column reads back from mysql.db.
+        for name in ["shop_1", "a_b_c", "plain", "app-prod", "100%"] {
+            assert_eq!(unescape_grant_db(&grant_db_pattern(name)), name);
+        }
+        // A grant stored unescaped still shows under its database.
+        assert_eq!(unescape_grant_db("shop_1"), "shop_1");
+    }
 }
