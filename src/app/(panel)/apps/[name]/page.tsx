@@ -390,7 +390,8 @@ export default async function AppDetailPage({
         <div
           style={{
             display: "grid",
-            gridTemplateColumns: "1fr 1fr",
+            // Side by side while both fit, one above the other on a phone.
+            gridTemplateColumns: "repeat(auto-fit, minmax(min(100%, 280px), 1fr))",
             gap: 16,
             alignItems: "stretch",
           }}
@@ -411,7 +412,7 @@ export default async function AppDetailPage({
 
           <div className={styles.section} style={{ marginBottom: 0 }}>
             <h2 className={styles.sectionTitle}>Logs</h2>
-            <p className={styles.muted}>
+            <p className={styles.muted} style={{ overflowWrap: "anywhere" }}>
               The container&apos;s output, live at{" "}
               <a href={`/logs?unit=vps-app-${encodeURIComponent(name)}.service`}>
                 /logs?unit=vps-app-{name}.service
@@ -552,7 +553,8 @@ export default async function AppDetailPage({
       <div
         style={{
           display: "grid",
-          gridTemplateColumns: "1fr 1fr",
+          // Side by side while both fit, one above the other on a phone.
+          gridTemplateColumns: "repeat(auto-fit, minmax(min(100%, 280px), 1fr))",
           gap: 16,
           alignItems: "stretch",
         }}
@@ -568,7 +570,7 @@ export default async function AppDetailPage({
 
         <div className={styles.section} style={{ marginBottom: 0 }}>
           <h2 className={styles.sectionTitle}>Logs</h2>
-          <p className={styles.muted}>
+          <p className={styles.muted} style={{ overflowWrap: "anywhere" }}>
             Live tail at{" "}
             <a href={`/logs?unit=vps-app-${encodeURIComponent(name)}.service`}>
               /logs?unit=vps-app-{name}.service
