@@ -1,6 +1,6 @@
 "use client";
 
-import { useActionState, useState } from "react";
+import { useActionState, useEffect, useRef, useState, useTransition } from "react";
 import styles from "@/components/page.module.css";
 
 // Mirror of the agent's RESERVED_USERS list in agent/src/handlers/databases.rs.
@@ -36,8 +36,24 @@ export default function CreateUserForm({
   const host = hostMode === "custom" ? customHost : hostMode;
   const userIsReserved = RESERVED_USERS.includes(user.trim().toLowerCase());
 
+  // Submitted by hand rather than through <form action>: React resets a form
+  // after its action ran, which showed the Host select as "localhost" again
+  // while the hidden host field kept "%" - the next user was created for any
+  // host under a form that said local only.
+  const passwordRef = useRef<HTMLInputElement>(null);
+  const [, startTransition] = useTransition();
+  function onSubmit(e: React.FormEvent<HTMLFormElement>) {
+    e.preventDefault();
+    const fd = new FormData(e.currentTarget);
+    startTransition(() => formAction(fd));
+  }
+  // The typed password is in the notice now; don't leave it for the next user.
+  useEffect(() => {
+    if (state?.ok && passwordRef.current) passwordRef.current.value = "";
+  }, [state]);
+
   return (
-    <form action={formAction}>
+    <form onSubmit={onSubmit}>
       <div className={styles.formRow}>
         <label className={styles.field}>
           User
@@ -82,6 +98,7 @@ export default function CreateUserForm({
         <label className={styles.field}>
           Password (optional)
           <input
+            ref={passwordRef}
             name="password"
             className={styles.input}
             type="text"
