@@ -224,23 +224,40 @@ pub async fn list(State(state): State<AppState>) -> AgentResult<Json<Vec<AppRow>
     .await?;
     let mut rows = Vec::new();
     let mut seen_source_dirs: std::collections::HashSet<String> = std::collections::HashSet::new();
+    // (name, ActiveState, SubState)
+    let mut units: Vec<(String, String, String)> = Vec::new();
     for line in out.stdout.lines() {
         let mut parts = line.split_whitespace();
         let unit = parts.next().unwrap_or("");
         let _load = parts.next();
         let active = parts.next().unwrap_or("").to_string();
         let sub = parts.next().unwrap_or("").to_string();
-        if !unit.starts_with(VPS_APP_PREFIX) {
+        let Some(name) = app_name_of_unit(unit) else {
+            continue;
+        };
+        units.push((name.to_string(), active, sub));
+    }
+    // list-units only has the units systemd keeps in memory, and it drops a
+    // unit that is stopped and disabled: an app after Stop, one taken off its
+    // domain, a deploy that did not come up. Those left the list (a Docker
+    // app) or turned into an "external" folder with no controls (a Node app).
+    // The unit files on disk are every app the panel deployed.
+    for name in app_units_on_disk().await {
+        if units.iter().any(|(n, _, _)| *n == name) {
             continue;
         }
-        let name = unit
-            .strip_prefix(VPS_APP_PREFIX)
-            .and_then(|s| s.strip_suffix(".service"))
-            .unwrap_or("")
-            .to_string();
-        if name.is_empty() {
-            continue;
-        }
+        let unit = format!("{VPS_APP_PREFIX}{name}.service");
+        let shown = exec::run("systemctl", ["show", &unit, "--no-pager"])
+            .await
+            .map(|o| o.stdout)
+            .unwrap_or_default();
+        units.push((
+            name,
+            field(&shown, "ActiveState=").unwrap_or_else(|| "inactive".to_string()),
+            field(&shown, "SubState=").unwrap_or_else(|| "dead".to_string()),
+        ));
+    }
+    for (name, active, sub) in units {
         let (subdomain, port, source_dir) = lookup_app(&state, &name).await.unwrap_or_default();
         if !source_dir.is_empty() {
             seen_source_dirs.insert(source_dir.clone());
@@ -307,6 +324,31 @@ pub async fn list(State(state): State<AppState>) -> AgentResult<Json<Vec<AppRow>
 
     rows.sort_by(|a, b| a.name.cmp(&b.name));
     Ok(Json(rows))
+}
+
+/// `vps-app-<name>.service` -> `<name>`, for a name the panel could have
+/// deployed.
+fn app_name_of_unit(unit: &str) -> Option<&str> {
+    let name = unit.strip_prefix(VPS_APP_PREFIX)?.strip_suffix(".service")?;
+    validate_name(name).is_ok().then_some(name)
+}
+
+/// Names of the app units installed in /etc/systemd/system, loaded or not.
+async fn app_units_on_disk() -> Vec<String> {
+    let mut names = Vec::new();
+    let Ok(mut entries) = tokio::fs::read_dir("/etc/systemd/system").await else {
+        return names;
+    };
+    while let Ok(Some(entry)) = entries.next_entry().await {
+        let file_name = entry.file_name();
+        let Some(name) = file_name.to_str().and_then(app_name_of_unit) else {
+            continue;
+        };
+        if entry.path().is_file() {
+            names.push(name.to_string());
+        }
+    }
+    names
 }
 
 fn runtime_label(docker: bool) -> String {
@@ -3061,5 +3103,14 @@ mod tests {
         // A Docker app's file is still every line as it is.
         assert_eq!(parse_app_env("A=\"x y\"\nC=a\\nb\n", true), vec![kv("A", "\"x y\""), kv("C", "a\\nb")]);
         assert_eq!(render_app_env(&[kv("A", "\"x\"\ny")], true), "A=\"x\"\\ny\n");
+    }
+
+    #[test]
+    fn app_units_are_recognised_by_name() {
+        assert_eq!(app_name_of_unit("vps-app-shop.service"), Some("shop"));
+        assert_eq!(app_name_of_unit("vps-app-shop-test.service"), Some("shop-test"));
+        for other in ["vps-app-.service", "vps-app-.service.d", "nginx.service", "vps-app-shop.service.bak", "vps-app-Shop.service"] {
+            assert_eq!(app_name_of_unit(other), None, "{other}");
+        }
     }
 }
