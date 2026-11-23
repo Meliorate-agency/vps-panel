@@ -518,11 +518,12 @@ postconf -e "milter_default_action = accept"
 # (agent/src/handlers/mail_ip.rs; the operator chooses the protocol in the
 # panel). A re-run keeps what was chosen since: the preference when main.cf
 # has one, and IPv6 sending when the agent switched it on (smtp_bind_address6
-# is set then).
+# is set then). Not on a server without any IPv4 address: limited to IPv4 it
+# could not send at all.
 if [[ -z "$(postconf -nh smtp_address_preference 2>/dev/null || true)" ]]; then
   postconf -e "smtp_address_preference = ipv4"
 fi
-if [[ -z "$(postconf -nh smtp_bind_address6 2>/dev/null || true)" ]]; then
+if [[ -n "$PUBLIC_IP" && -z "$(postconf -nh smtp_bind_address6 2>/dev/null || true)" ]]; then
   for svc in smtp relay; do
     if [[ -n "$(postconf -M "$svc/unix" 2>/dev/null || true)" ]]; then
       postconf -P "$svc/unix/inet_protocols=ipv4"
