@@ -668,7 +668,9 @@ pub struct ImportSqlAccepted {
 /// not filtered here. The reserved-DB check below catches the honest mistake
 /// (a dump whose header targets `mysql`/`pdns`/...), it is not a boundary: a
 /// hostile dump could switch databases mid-file where no cheap scan would
-/// see it.
+/// see it. What a dump cannot do is make the client, which is root, run
+/// programs or read files of this machine: its own commands are switched off
+/// (see `client_guard`) and it sends no local file.
 pub async fn import_sql(
     State(state): State<AppState>,
     Json(req): Json<ImportSql>,
@@ -864,18 +866,46 @@ fn mariadb_socket_path(url: &str) -> String {
         .unwrap_or_else(|| "/var/run/mysqld/mysqld.sock".to_string())
 }
 
+/// The client with what every run of it gets. `\e` / `edit` starts $EDITOR
+/// (vi when unset) on the statement so far, with the rest of the dump still
+/// on its stdin: the dump then types into vi, `:!command` included, and the
+/// sandbox mode allows `\e`. `true` as the editor makes it do nothing. The
+/// agent's own secrets stay out of the client's environment, as in exec.rs.
+fn client_command(bin: &str) -> Command {
+    let mut cmd = Command::new(bin);
+    cmd.env("EDITOR", "true").env("VISUAL", "true");
+    for name in crate::exec::AGENT_SECRET_ENV {
+        cmd.env_remove(name);
+    }
+    cmd
+}
+
 /// Ubuntu's mariadb-client ships the binary as `mariadb` with a `mysql`
-/// compat symlink; other setups only have `mysql`. Try both.
-fn spawn_mariadb_client(args: &[String]) -> std::io::Result<tokio::process::Child> {
+/// compat symlink; other setups only have `mysql`. Returns the one that is
+/// there and whether it has a sandbox mode (`--sandbox`, MariaDB 10.11.8+):
+/// asked of the binary itself, an older one answers "unknown option". Only a
+/// yes is remembered, because the client can be updated under a running
+/// agent.
+async fn find_mariadb_client() -> std::io::Result<(&'static str, bool)> {
+    static SANDBOX_CLIENT: std::sync::OnceLock<&'static str> = std::sync::OnceLock::new();
+    if let Some(bin) = SANDBOX_CLIENT.get() {
+        return Ok((bin, true));
+    }
     for bin in ["mariadb", "mysql"] {
-        match Command::new(bin)
-            .args(args)
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
+        match client_command(bin)
+            .args(["--sandbox", "--version"])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .await
         {
-            Ok(c) => return Ok(c),
+            Ok(status) => {
+                if status.success() {
+                    let _ = SANDBOX_CLIENT.set(bin);
+                }
+                return Ok((bin, status.success()));
+            }
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
             Err(e) => return Err(e),
         }
@@ -884,6 +914,65 @@ fn spawn_mariadb_client(args: &[String]) -> std::io::Result<tokio::process::Chil
         std::io::ErrorKind::NotFound,
         "neither `mariadb` nor `mysql` client binary found — install mariadb-client",
     ))
+}
+
+/// The option that keeps a dump from running the client's own commands,
+/// which act on this machine as root: `\!` / `system` (a shell command) and
+/// `\.` / `source` (another file as SQL). They work anywhere in the input,
+/// also in the middle of a line and inside `/*! */`, so no filter over the
+/// dump's text can be trusted to find them (where a string ends depends on
+/// the sql_mode the dump itself sets). The client refuses them itself:
+///
+/// - `--sandbox` where the client has it: those commands stop the import
+///   with "Not allowed in the sandbox mode", everything else is as before.
+///   Dumps from mariadb-dump 10.11.8+ ask for the same in their first line.
+/// - `--binary-mode` on an older client (and Oracle's `mysql`), which rejects
+///   `--sandbox`: every client command except DELIMITER and `\C` is off and
+///   stops the import as an unknown command or a syntax error. It also stops
+///   translating `\r\n` and accepts NUL bytes, which only makes the import
+///   closer to the file.
+///
+/// A dump without such commands imports as it did before, with either.
+fn client_guard(sandbox: bool) -> &'static str {
+    if sandbox {
+        "--sandbox"
+    } else {
+        "--binary-mode"
+    }
+}
+
+/// The first line of every dump written by mariadb-dump 10.11.8+. A client
+/// that knows it enters the sandbox mode; an older one stops right there with
+/// "Unknown command '\-'".
+const SANDBOX_COMMENT: &[u8] = br"/*M!999999\- enable the sandbox mode */";
+
+/// The start of a dump as a client without a sandbox mode has to get it:
+/// without that comment. Only the comment goes, not its line, so the line
+/// numbers in the client's errors stay those of the file.
+fn without_sandbox_comment(head: &[u8]) -> &[u8] {
+    head.strip_prefix(SANDBOX_COMMENT).unwrap_or(head)
+}
+
+/// Reads until `buf` is full or the file ends.
+async fn read_up_to(file: &mut tokio::fs::File, buf: &mut [u8]) -> std::io::Result<usize> {
+    let mut read = 0usize;
+    while read < buf.len() {
+        let n = file.read(&mut buf[read..]).await?;
+        if n == 0 {
+            break;
+        }
+        read += n;
+    }
+    Ok(read)
+}
+
+fn spawn_mariadb_client(bin: &str, args: &[String]) -> std::io::Result<tokio::process::Child> {
+    client_command(bin)
+        .args(args)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
 }
 
 /// Events flowing from the pump / output-drain tasks back to the task log.
@@ -922,7 +1011,7 @@ fn spawn_line_drain(
 /// Map the most common import failures to a one-line fix. The raw client
 /// error (with its line number) is already in the log; these just save the
 /// operator a search.
-fn import_error_hints(output: &[String]) -> Vec<String> {
+fn import_error_hints(output: &[String], sandbox: bool) -> Vec<String> {
     let joined = output.join("\n");
     let mut hints = Vec::new();
     if joined.contains("max_allowed_packet") || joined.contains("server has gone away") {
@@ -931,13 +1020,46 @@ fn import_error_hints(output: &[String]) -> Vec<String> {
                 .to_string(),
         );
     }
+    if joined.contains("Not allowed in the sandbox mode") {
+        hints.push(
+            "Hint: the dump has a client command that runs a program or reads or writes a file on this server (`system` or `\\!`, `source` or `\\.`, `tee`). An import does not run those. Remove that line (the error above has its number) and import again."
+                .to_string(),
+        );
+    }
+    if joined.contains("disabled the local infile capability") {
+        hints.push(
+            "Hint: the dump has a LOAD DATA LOCAL INFILE statement, which makes the client send a file from this server to the database. An import does not do that; a dump carries its rows as INSERT statements."
+                .to_string(),
+        );
+    }
+    // The comment at the very start is taken out for a client that does not
+    // know it, so this is one further down.
     if joined.contains("Unknown command '\\-'") {
         hints.push(
-            "Hint: the dump starts with the MariaDB 10.11.8+ sandbox-mode line and this server's client is too old to understand it. Update mariadb-client and retry."
+            "Hint: the dump has the MariaDB 10.11.8+ sandbox-mode line after its first line (two dumps joined into one file?) and this server's client is too old to understand it. Update mariadb-client and retry."
+                .to_string(),
+        );
+    } else if !sandbox && names_client_command(&joined) {
+        hints.push(
+            "Hint: this server's MariaDB client is older than 10.11.8, so the import runs with the client's own commands switched off, and the dump uses one. Update mariadb-client and retry, or remove that line (the error above has its number)."
                 .to_string(),
         );
     }
     hints
+}
+
+/// True when the client reported one of its own one-letter commands as
+/// unknown (`Unknown command '\g'.`), which is what `--binary-mode` makes of
+/// them. A stray backslash (`'\\'`, `'\0'`) is reported the same way and is
+/// not one.
+fn names_client_command(output: &str) -> bool {
+    const MARK: &str = "Unknown command '\\";
+    output.match_indices(MARK).any(|(at, _)| {
+        output[at + MARK.len()..]
+            .chars()
+            .next()
+            .is_some_and(|c| "?!.#cdeGghnPpqRrsTtuWw".contains(c))
+    })
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -965,6 +1087,21 @@ async fn run_import_task(
     } else {
         format!("Headerless dump — statements run against `{db}`.")
     });
+
+    // Before the DROP below: without a client there is nothing to import.
+    let (client, sandbox) = match find_mariadb_client().await {
+        Ok(found) => found,
+        Err(e) => {
+            task.log(format!("could not start the mariadb client: {e}"));
+            task.finish(false);
+            return;
+        }
+    };
+    if !sandbox {
+        task.log(
+            "This server's MariaDB client is older than 10.11.8 and has no sandbox mode: importing with the client's own commands switched off (--binary-mode).",
+        );
+    }
 
     // Pre-steps through the pool (same connection identity as the CLI).
     if drop_first || (!dump_defines_db && create_target) {
@@ -1013,6 +1150,11 @@ async fn run_import_task(
         "root".into(),
         "--default-character-set=utf8mb4".into(),
         "--max-allowed-packet=1G".into(),
+        client_guard(sandbox).into(),
+        // LOAD DATA LOCAL INFILE has the client send any file root can read
+        // (/etc/shadow, the panel's .env) into a table the dump names; both
+        // sides allow it by default, the sandbox mode too.
+        "--local-infile=0".into(),
     ];
     if !dump_defines_db {
         // Only headerless dumps get a database argument. A dump with its own
@@ -1021,7 +1163,7 @@ async fn run_import_task(
         args.push(db.clone());
     }
 
-    let mut child = match spawn_mariadb_client(&args) {
+    let mut child = match spawn_mariadb_client(client, &args) {
         Ok(c) => c,
         Err(e) => {
             task.log(format!("could not start the mariadb client: {e}"));
@@ -1047,6 +1189,17 @@ async fn run_import_task(
             let mut buf = vec![0u8; 256 * 1024];
             let mut written: u64 = 0;
             let mut last_progress: u64 = 0;
+            if !sandbox {
+                // The sandbox comment, when the dump starts with one, is not
+                // passed on: this client would stop at it.
+                let n = read_up_to(&mut file, &mut buf[..SANDBOX_COMMENT.len()])
+                    .await
+                    .map_err(|e| e.to_string())?;
+                if let Err(e) = stdin.write_all(without_sandbox_comment(&buf[..n])).await {
+                    return Err(format!("client stopped reading input: {e}"));
+                }
+                written += n as u64;
+            }
             loop {
                 let n = file.read(&mut buf).await.map_err(|e| e.to_string())?;
                 if n == 0 {
@@ -1134,7 +1287,7 @@ async fn run_import_task(
             if let Some(Err(e)) = &pump_result {
                 task.log(format!("(input feed stopped early: {e})"));
             }
-            for hint in import_error_hints(&client_output) {
+            for hint in import_error_hints(&client_output, sandbox) {
                 task.log(hint);
             }
             task.finish(false);
@@ -1260,5 +1413,168 @@ mod tests {
         assert_eq!(quote_ident("we`ird 't"), "`we``ird 't`");
         assert_eq!(quote_account(r"it's\me", "%.example"), r"`it's\me`@`%.example`");
         assert_eq!(quote_account("", "localhost"), "''@`localhost`");
+    }
+
+    #[test]
+    fn the_client_is_told_not_to_run_its_own_commands() {
+        assert_eq!(client_guard(true), "--sandbox");
+        assert_eq!(client_guard(false), "--binary-mode");
+        // The editor a dump could start with `\e`, and the agent's secrets.
+        let cmd = client_command("mariadb");
+        let env: Vec<(String, Option<String>)> = cmd
+            .as_std()
+            .get_envs()
+            .map(|(k, v)| {
+                (k.to_string_lossy().into_owned(), v.map(|v| v.to_string_lossy().into_owned()))
+            })
+            .collect();
+        assert!(env.contains(&("EDITOR".to_string(), Some("true".to_string()))));
+        assert!(env.contains(&("VISUAL".to_string(), Some("true".to_string()))));
+        assert!(env.contains(&("AGENT_TOKEN".to_string(), None)));
+    }
+
+    #[test]
+    fn the_sandbox_comment_is_taken_out_for_a_client_that_does_not_know_it() {
+        let dump = b"/*M!999999\\- enable the sandbox mode */ \n-- MariaDB dump 10.19\nUSE `shop`;\n";
+        // The rest of line 1 stays, so line numbers do not move.
+        assert_eq!(
+            without_sandbox_comment(dump),
+            b" \n-- MariaDB dump 10.19\nUSE `shop`;\n"
+        );
+        let plain = b"-- MySQL dump 10.13\nUSE `shop`;\n";
+        assert_eq!(without_sandbox_comment(plain), plain);
+        // Only at the very start.
+        let later = b"\n/*M!999999\\- enable the sandbox mode */ \n";
+        assert_eq!(without_sandbox_comment(later), later);
+        assert_eq!(without_sandbox_comment(b""), b"");
+    }
+
+    #[test]
+    fn a_refused_client_command_gets_a_hint() {
+        let hints = |line: &str, sandbox: bool| import_error_hints(&[line.to_string()], sandbox);
+        let refused = hints("ERROR at line 7: Not allowed in the sandbox mode", true);
+        assert_eq!(refused.len(), 1);
+        assert!(refused[0].contains("does not run those"));
+        // --binary-mode reports the command as unknown.
+        let old = hints(r"ERROR at line 7: Unknown command '\!'.", false);
+        assert_eq!(old.len(), 1);
+        assert!(old[0].contains("older than 10.11.8"));
+        // A stray backslash is not a client command, with either client.
+        assert!(hints(r"ERROR at line 7: Unknown command '\\'.", false).is_empty());
+        assert!(hints(r"ERROR at line 7: Unknown command '\!'.", true).is_empty());
+        let joined = hints(r"ERROR at line 90: Unknown command '\-'.", false);
+        assert_eq!(joined.len(), 1);
+        assert!(joined[0].contains("after its first line"));
+        assert!(hints("ERROR 1064 (42000) at line 3: You have an error in your SQL syntax", true).is_empty());
+        let local = hints(
+            "ERROR 4166 (HY000) at line 2: The used command is not allowed because the MariaDB server or client has disabled the local infile capability",
+            true,
+        );
+        assert_eq!(local.len(), 1);
+        assert!(local[0].contains("LOAD DATA LOCAL INFILE"));
+    }
+
+    /// Dumps with `\!`, `system`, `source` and `\e` through the real client:
+    /// none may run, and a dump from mariadb-dump still imports.
+    #[tokio::test]
+    #[ignore = "needs the mariadb client and a server it may create and drop `import_guard_test` on (IMPORT_TEST_SOCKET=/run/mysqld/mysqld.sock cargo test -- --ignored)"]
+    async fn client_commands_in_a_dump_do_not_run() {
+        use crate::ipc::tasks::{TaskStatus, TaskTracker};
+        let socket = std::env::var("IMPORT_TEST_SOCKET").expect("IMPORT_TEST_SOCKET");
+        let dir = tempfile::tempdir().unwrap();
+        let panel_db = crate::db::PanelDb::open(&dir.path().join("panel.db")).unwrap();
+        panel_db
+            .with(|c| {
+                c.execute_batch(
+                    "CREATE TABLE tasks (id TEXT PRIMARY KEY, kind TEXT NOT NULL, status TEXT NOT NULL,
+                     started_at TEXT NOT NULL, finished_at TEXT, log_blob TEXT NOT NULL DEFAULT '');",
+                )
+            })
+            .unwrap();
+        let tasks = TaskTracker::new(panel_db);
+        let mariadb =
+            crate::db::MariaDb::connect(&format!("mysql://root@localhost:3306/mysql?socket={socket}")).unwrap();
+        let (client, sandbox) = find_mariadb_client().await.unwrap();
+        eprintln!("client: {client}, sandbox mode: {sandbox}");
+
+        let ran = dir.path().join("ran");
+        let marker = ran.display();
+        let other = dir.path().join("other.sql");
+        std::fs::write(&other, format!("\\! touch {marker}\n")).unwrap();
+        let use_db = "CREATE DATABASE IF NOT EXISTS import_guard_test;\nUSE import_guard_test;\n";
+        // After `\e`, vi would read what follows as keystrokes; the newlines
+        // push the `:!` past what the client has already read.
+        let padding = "\n".repeat(70_000);
+        let hostile: Vec<(&str, String)> = vec![
+            ("line start", format!("{use_db}\\! touch {marker}\n")),
+            ("mid line", format!("{use_db}SELECT 1 \\! touch {marker}\n")),
+            ("after a statement", format!("{use_db}SELECT 1; system touch {marker}\n")),
+            ("versioned comment", format!("{use_db}/*!50000 \\! touch {marker} */;\n")),
+            ("named", format!("{use_db}  SYSTEM touch {marker}\n")),
+            (
+                "string end moved by sql_mode",
+                format!("{use_db}SET sql_mode='NO_BACKSLASH_ESCAPES';\nSELECT 'a\\'; \\! touch {marker} #';\n"),
+            ),
+            ("another charset", format!("{use_db}\\C gbk\nSELECT 1 \u{81}\\\\! touch {marker}\n")),
+            ("source", format!("{use_db}source {}\n", other.display())),
+            (
+                "a local file",
+                format!(
+                    "{use_db}CREATE TABLE IF NOT EXISTS leak (l TEXT);\nLOAD DATA LOCAL INFILE '{}' INTO TABLE leak;\n",
+                    other.display()
+                ),
+            ),
+            ("editor", format!("{use_db}SELECT 1\n\\e\n{padding}:!touch {marker}\n:q!\n")),
+        ];
+        for (what, sql) in hostile {
+            let dump = dir.path().join("hostile.sql");
+            // The charset case needs the raw byte 0x81, not U+0081 as UTF-8.
+            let bytes: Vec<u8> = sql.chars().flat_map(|c| {
+                if c == '\u{81}' { vec![0x81] } else { c.to_string().into_bytes() }
+            }).collect();
+            std::fs::write(&dump, &bytes).unwrap();
+            let task = tasks.create("db:import:import_guard_test");
+            let id = task.id.clone();
+            run_import_task(
+                task, mariadb.clone(), dump, bytes.len() as u64, socket.clone(),
+                "import_guard_test".into(), true, true, false, false,
+            )
+            .await;
+            let state = tasks.get(&id).unwrap();
+            assert!(!ran.exists(), "{what}: the command ran\n{}", state.log.join("\n"));
+            assert!(matches!(state.status, TaskStatus::Failed), "{what}: {}", state.log.join("\n"));
+        }
+
+        let dumped = "/*M!999999\\- enable the sandbox mode */ \n-- MariaDB dump 10.19\n\
+            DROP DATABASE IF EXISTS import_guard_test;\nCREATE DATABASE import_guard_test;\nUSE `import_guard_test`;\n\
+            CREATE TABLE notes (id INT PRIMARY KEY, body TEXT);\n\
+            INSERT INTO notes VALUES (1,'it\\'s; system is fine \\\\! \\\\. C:\\\\Code'),(2,'a\\\\');\n\
+            DELIMITER ;;\nCREATE PROCEDURE p() BEGIN SELECT 1; END ;;\nDELIMITER ;\n";
+        for sql in [dumped.to_string(), dumped.replace('\n', "\r\n")] {
+            let dump = dir.path().join("dumped.sql");
+            std::fs::write(&dump, &sql).unwrap();
+            let task = tasks.create("db:import:import_guard_test");
+            let id = task.id.clone();
+            run_import_task(
+                task, mariadb.clone(), dump, sql.len() as u64, socket.clone(),
+                "import_guard_test".into(), true, true, false, false,
+            )
+            .await;
+            let state = tasks.get(&id).unwrap();
+            assert!(matches!(state.status, TaskStatus::Succeeded), "{}", state.log.join("\n"));
+            let mut conn = mariadb.pool().get_conn().await.unwrap();
+            let body: Option<String> = conn
+                .query_first("SELECT body FROM import_guard_test.notes WHERE id = 1")
+                .await
+                .unwrap();
+            assert_eq!(body.as_deref(), Some(r"it's; system is fine \! \. C:\Code"));
+            let routines: Option<u64> = conn
+                .query_first("SELECT COUNT(*) FROM information_schema.ROUTINES WHERE ROUTINE_SCHEMA = 'import_guard_test'")
+                .await
+                .unwrap();
+            assert_eq!(routines, Some(1));
+        }
+        let mut conn = mariadb.pool().get_conn().await.unwrap();
+        conn.query_drop("DROP DATABASE IF EXISTS import_guard_test").await.unwrap();
     }
 }
