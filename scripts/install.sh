@@ -403,6 +403,22 @@ if [[ -z "$PUBLIC_IP" ]]; then
 else
   PDNS_LOCAL_ADDRESS="$PUBLIC_IP,127.0.0.1"
 fi
+# IPv6 too. Once the server has a published IPv6 address, zones get AAAA
+# records for their own ns1/ns2 (agent/src/handlers/dns.rs), and a name server
+# announced over IPv6 has to answer there: pdns did not. `::` is every IPv6
+# address the server has or gets later, and cannot collide with
+# systemd-resolved, which listens on IPv4 only. Not on a kernel without IPv6.
+if [[ -e /proc/net/if_inet6 ]]; then
+  PDNS_LOCAL_ADDRESS="$PDNS_LOCAL_ADDRESS,::"
+fi
+
+# dig, for the DNS checks the agent runs before it orders a certificate and
+# for the mail checks. Minimal images come without it, and then every such
+# check failed as "no public A or AAAA record".
+if ! command -v dig >/dev/null 2>&1; then
+  DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends bind9-dnsutils \
+    || warn "could not install bind9-dnsutils (dig); certificate and mail DNS checks need it"
+fi
 
 cat > /etc/powerdns/pdns.conf <<EOF
 launch=gmysql
@@ -423,7 +439,15 @@ default-soa-content=ns1.@ hostmaster.@ 0 10800 3600 604800 3600
 EOF
 chmod 0640 /etc/powerdns/pdns.conf
 chown root:pdns /etc/powerdns/pdns.conf
-systemctl restart pdns
+# Something else on [::]:53 must not leave the server without DNS: fall back
+# to IPv4 only.
+if ! systemctl restart pdns; then
+  if [[ "$PDNS_LOCAL_ADDRESS" == *",::" ]]; then
+    warn "pdns did not start with an IPv6 listener; using IPv4 only"
+    sed -i "s|^local-address=.*|local-address=${PDNS_LOCAL_ADDRESS%,::}|" /etc/powerdns/pdns.conf
+  fi
+  systemctl restart pdns
+fi
 
 #-------------------------------------------------- Postfix
 log "configuring Postfix"
@@ -452,7 +476,12 @@ postconf -e "mynetworks = 127.0.0.0/8 [::ffff:127.0.0.0]/104 [::1]/128"
 postconf -e "mailbox_size_limit = 0"
 postconf -e "recipient_delimiter = +"
 postconf -e "inet_interfaces = all"
-postconf -e "inet_protocols = all"
+# Both protocols, unless main.cf already says which (the postfix package
+# writes "all"): a re-run used to put "all" back over an operator's choice.
+# What Postfix SENDS over is decided further down, not here.
+if [[ -z "$(postconf -nh inet_protocols 2>/dev/null || true)" ]]; then
+  postconf -e "inet_protocols = all"
+fi
 postconf -e "virtual_transport = lmtp:unix:private/dovecot-lmtp"
 postconf -e "virtual_mailbox_domains = mysql:/etc/postfix/mysql-virtual-mailbox-domains.cf"
 postconf -e "virtual_mailbox_maps = mysql:/etc/postfix/mysql-virtual-mailbox-maps.cf"
@@ -474,14 +503,29 @@ postconf -e "non_smtpd_milters = inet:127.0.0.1:11332"
 postconf -e "milter_protocol = 6"
 postconf -e "milter_default_action = accept"
 
-# Prefer IPv4 for outbound delivery. Most VPS providers set IPv4 PTR correctly
-# but get the IPv6 PTR wrong (or leave it unset) on day one; that combined
-# with Gmail's strict policy on IPv6 senders means dual-stack postfix bounces
-# 5.7.25 "missing PTR" on the very first send. After the operator confirms
-# their v6 PTR matches the forward DNS (test with `dig -x <v6>`), they can
-# flip back to dual-stack manually:
-#     postconf -e "smtp_address_preference = any"
-postconf -e "smtp_address_preference = ipv4"
+# Outgoing mail: IPv4 first, and at first IPv4 only. Most VPS providers set the
+# IPv4 PTR correctly but leave the IPv6 one unset, and Gmail answers mail from
+# an IPv6 address without a matching PTR with a permanent 5.7.25. Preferring
+# IPv4 was not enough: when a destination greylists or is slow over IPv4,
+# Postfix falls back to IPv6 within the same delivery, from an address no
+# AAAA, SPF or PTR record vouches for, and the mail bounces. So the sending
+# services are limited to IPv4 here (receiving still uses inet_protocols
+# above), and the agent lifts that once the server has a published IPv6
+# address that passes its check, pinning Postfix to that address
+# (agent/src/handlers/mail_ip.rs; the operator chooses the protocol in the
+# panel). A re-run keeps what was chosen since: the preference when main.cf
+# has one, and IPv6 sending when the agent switched it on (smtp_bind_address6
+# is set then).
+if [[ -z "$(postconf -nh smtp_address_preference 2>/dev/null || true)" ]]; then
+  postconf -e "smtp_address_preference = ipv4"
+fi
+if [[ -z "$(postconf -nh smtp_bind_address6 2>/dev/null || true)" ]]; then
+  for svc in smtp relay; do
+    if [[ -n "$(postconf -M "$svc/unix" 2>/dev/null || true)" ]]; then
+      postconf -P "$svc/unix/inet_protocols=ipv4"
+    fi
+  done
+fi
 
 cat > /etc/postfix/mysql-virtual-mailbox-domains.cf <<EOF
 user = mail

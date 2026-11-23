@@ -682,6 +682,55 @@ EOF
 }
 enable_junk_folder || true
 
+# dig, on boxes that came without it (minimal images; install.sh installs it
+# now). The agent looks records up with it before it orders a certificate, and
+# for the mail checks: without dig every such check failed as "no public A or
+# AAAA record". Never fails the update.
+ensure_dig() {
+  command -v dig >/dev/null 2>&1 && return 0
+  if DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+       bind9-dnsutils >/dev/null 2>&1; then
+    echo "installed bind9-dnsutils (dig)"
+  else
+    echo "could not install bind9-dnsutils (dig); certificate and mail DNS checks need it" >&2
+  fi
+  return 0
+}
+ensure_dig || true
+
+# PowerDNS answers over IPv6 too, on boxes installed before it did (install.sh
+# writes the same line now). It was bound to the public IPv4 and 127.0.0.1
+# only, while a zone gets AAAA records for its own ns1/ns2 once the server has
+# a published IPv6 address: name servers announced over IPv6 that did not
+# answer there. `::` is every IPv6 address the server has or gets, and cannot
+# collide with systemd-resolved (IPv4 only). Only a local-address line of the
+# shape install.sh wrote is changed, and only while pdns is running, so the
+# result can be checked: pdns is restarted to open the new socket, and if it
+# does not come up the old line is put back and pdns restarted again.
+# Idempotent, and never fails the update.
+pdns_listen_ipv6() {
+  local conf=/etc/powerdns/pdns.conf
+  [[ -f "$conf" && -e /proc/net/if_inet6 ]] || return 0
+  local cur
+  cur="$(sed -n 's/^local-address=//p' "$conf" | tail -1)"
+  [[ "$cur" =~ ^[0-9.]+,127\.0\.0\.1$ ]] || return 0
+  systemctl is-active --quiet pdns || return 0
+  local backup_dir=/var/backups/vps-panel-config stamp
+  stamp="$(date +%Y%m%d%H%M%S)"
+  install -d -m 0700 "$backup_dir"
+  cp -a "$conf" "$backup_dir/pdns.conf.bak-$stamp"
+  sed -i "s|^local-address=.*|local-address=$cur,::|" "$conf"
+  if systemctl restart pdns && systemctl is-active --quiet pdns; then
+    echo "pdns: answers over IPv6 too now"
+  else
+    echo "pdns did not start with an IPv6 listener - putting pdns.conf back" >&2
+    cp -a "$backup_dir/pdns.conf.bak-$stamp" "$conf"
+    systemctl restart pdns || true
+  fi
+  return 0
+}
+pdns_listen_ipv6 || true
+
 # Retire the nginx fail2ban jails: nothing in the panel's nginx uses basic
 # auth or limit_req, and nginx logs to files the systemd backend never reads,
 # so they could never ban anyone while showing up as protection. Dropping
