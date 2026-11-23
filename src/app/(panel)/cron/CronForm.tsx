@@ -1,7 +1,7 @@
 "use client";
 
-import { useActionState } from "react";
 import styles from "@/components/page.module.css";
+import { useFormActionState } from "@/lib/useFormActionState";
 
 type Result = { ok: true } | { ok: false; error: string };
 
@@ -14,17 +14,14 @@ type Props = {
 };
 
 export default function CronForm({ action, users }: Props) {
-  const [state, formAction, pending] = useActionState<Result | null, FormData>(
-    action,
-    null,
-  );
+  const [state, formAction, pending, formRef] = useFormActionState<Result | null>(action, null);
 
   // Fallback so the dropdown is always usable even if the agent's
   // /system/users call failed during page render.
   const choices = users.length > 0 ? users : [{ name: "root", uid: 0, home: "/root" }];
 
   return (
-    <form action={formAction}>
+    <form ref={formRef} action={formAction}>
       <div className={styles.formRow}>
         <label className={styles.field}>
           Schedule

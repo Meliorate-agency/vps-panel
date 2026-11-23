@@ -1,7 +1,7 @@
 "use client";
 
-import { useActionState } from "react";
 import styles from "@/components/page.module.css";
+import { useFormActionState } from "@/lib/useFormActionState";
 
 type Result = { ok: true } | { ok: false; error: string };
 
@@ -10,9 +10,9 @@ export default function CreateDbForm({
 }: {
   action: (prev: Result | null, fd: FormData) => Promise<Result>;
 }) {
-  const [state, formAction, pending] = useActionState<Result | null, FormData>(action, null);
+  const [state, formAction, pending, formRef] = useFormActionState<Result | null>(action, null);
   return (
-    <form action={formAction} style={{ display: "flex", gap: 8, alignItems: "flex-end" }}>
+    <form ref={formRef} action={formAction} style={{ display: "flex", gap: 8, alignItems: "flex-end" }}>
       <label className={styles.field} style={{ flex: 1 }}>
         Name
         <input name="name" className={styles.input} required placeholder="myapp_prod" />

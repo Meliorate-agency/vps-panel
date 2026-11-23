@@ -1,11 +1,12 @@
 "use client";
 
-import { useActionState, useState } from "react";
+import { useState } from "react";
 import styles from "@/components/page.module.css";
 import StatusBadge from "@/components/StatusBadge/StatusBadge";
 import Table from "@/components/Table/Table";
 import type { MailTrackResp, MailTrackStatus } from "@/lib/agent";
 import localStyles from "./mailboxes.module.css";
+import { useFormActionState } from "@/lib/useFormActionState";
 
 type Result = { ok: true; data?: MailTrackResp } | { ok: false; error: string };
 
@@ -33,16 +34,17 @@ export default function TrackDelivery({
 }: {
   action: (prev: Result | null, fd: FormData) => Promise<Result>;
 }) {
-  const [state, formAction, pending] = useActionState<Result | null, FormData>(action, null);
-  // Controlled, so the searched address stays in the field: React resets an
-  // uncontrolled form after its action runs.
+  // Both fields are controlled, so the searched address and period stay:
+  // React resets a form after its action runs, and the hook's ref puts the
+  // Period picker back on the picked value instead of the first option.
+  const [state, formAction, pending, formRef] = useFormActionState<Result | null>(action, null);
   const [address, setAddress] = useState("");
   const [days, setDays] = useState("3");
   const resp = state?.ok ? state.data : undefined;
 
   return (
     <div>
-      <form action={formAction} className={localStyles.trackForm}>
+      <form ref={formRef} action={formAction} className={localStyles.trackForm}>
         <label className={styles.field} style={{ flex: "2 1 220px" }}>
           Address
           <input

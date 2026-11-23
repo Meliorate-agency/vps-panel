@@ -1,7 +1,8 @@
 "use client";
 
-import { useActionState, useEffect } from "react";
+import { useEffect } from "react";
 import styles from "@/components/page.module.css";
+import { useFormActionState } from "@/lib/useFormActionState";
 import type { ActionResult } from "@/server-actions/networks";
 
 export default function CreateNetworkForm({
@@ -14,12 +15,12 @@ export default function CreateNetworkForm({
   /** Called after the network was created (it shows up below). */
   onDone?: () => void;
 }) {
-  const [state, formAction, pending] = useActionState<ActionResult | null, FormData>(action, null);
+  const [state, formAction, pending, formRef] = useFormActionState<ActionResult | null>(action, null);
   useEffect(() => {
     if (state?.ok) onDone?.();
   }, [state, onDone]);
   return (
-    <form action={formAction}>
+    <form ref={formRef} action={formAction}>
       <div className={styles.formRow}>
         <label className={styles.field}>
           Network name

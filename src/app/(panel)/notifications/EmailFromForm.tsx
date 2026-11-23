@@ -1,8 +1,8 @@
 "use client";
 
 import Link from "next/link";
-import { useActionState } from "react";
 import styles from "@/components/page.module.css";
+import { useFormActionState } from "@/lib/useFormActionState";
 
 type Result = { ok: true } | { ok: false; error: string };
 
@@ -22,7 +22,7 @@ export default function EmailFromForm({
   /** null when the agent could not list them. */
   mailboxes: string[] | null;
 }) {
-  const [state, formAction, pending] = useActionState<Result | null, FormData>(action, null);
+  const [state, formAction, pending, formRef] = useFormActionState<Result | null>(action, null);
   if (mailboxes === null) {
     return <div className={styles.error}>Could not read the mailbox list from the agent.</div>;
   }
@@ -36,7 +36,7 @@ export default function EmailFromForm({
   }
   const chosen = mailboxes.includes(current) ? current : "";
   return (
-    <form action={formAction}>
+    <form ref={formRef} action={formAction}>
       <div style={{ display: "flex", flexWrap: "wrap", gap: 12, alignItems: "flex-end", marginBottom: 8 }}>
         <label className={styles.field} style={{ flex: "1 1 260px", maxWidth: 480 }}>
           Send email from

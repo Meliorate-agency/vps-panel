@@ -1,7 +1,7 @@
 "use client";
 
-import { useActionState } from "react";
 import styles from "@/components/page.module.css";
+import { useFormActionState } from "@/lib/useFormActionState";
 import local from "./redirects.module.css";
 
 type Result = { ok: true } | { ok: false; error: string };
@@ -24,7 +24,7 @@ export default function EditRedirectRow({
   redirect: RedirectSummary;
   action: (prev: Result | null, fd: FormData) => Promise<Result>;
 }) {
-  const [state, formAction, pending] = useActionState<Result | null, FormData>(action, null);
+  const [state, formAction, pending, formRef] = useFormActionState<Result | null>(action, null);
 
   return (
     <details className={local.editDetails} name="redirect-edit">
@@ -33,7 +33,7 @@ export default function EditRedirectRow({
         <div className={local.editTitle}>
           Edit redirect on <span className={styles.code}>{redirect.domain}</span>
         </div>
-        <form action={formAction}>
+        <form ref={formRef} action={formAction}>
           <label className={styles.field} style={{ marginBottom: 10 }}>
             Source path
             <input

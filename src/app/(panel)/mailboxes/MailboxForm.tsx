@@ -1,7 +1,8 @@
 "use client";
 
-import { useActionState, useEffect, useRef, useState } from "react";
+import { useState } from "react";
 import styles from "@/components/page.module.css";
+import { useFormActionState } from "@/lib/useFormActionState";
 import localStyles from "./mailboxes.module.css";
 
 type Result =
@@ -23,26 +24,11 @@ export default function MailboxForm({
   domains: string[];
   diskFreeBytes: number | null;
 }) {
-  const [state, formAction, pending] = useActionState<Result | null, FormData>(action, null);
+  // A refused mailbox keeps every field. A created one clears the password
+  // and quota; the username and the domain picker keep their values.
+  const [state, formAction, pending, formRef] = useFormActionState<Result | null>(action, null);
   const [localpart, setLocalpart] = useState("");
   const [domain, setDomain] = useState(domains[0] ?? "");
-  const formRef = useRef<HTMLFormElement>(null);
-  const domainRef = useRef<HTMLSelectElement>(null);
-  // React 19 resets the form after the action; the <select> DOM snaps to the
-  // first domain while `domain` (and so the hidden email) stays, so the next
-  // mailbox would land on a domain the picker no longer shows. Re-apply it
-  // once the reset has landed, as DeployForm does.
-  useEffect(() => {
-    const form = formRef.current;
-    if (!form) return;
-    const onReset = () => {
-      queueMicrotask(() => {
-        if (domainRef.current) domainRef.current.value = domain;
-      });
-    };
-    form.addEventListener("reset", onReset);
-    return () => form.removeEventListener("reset", onReset);
-  }, [domain]);
 
   if (domains.length === 0) {
     return (
@@ -80,7 +66,6 @@ export default function MailboxForm({
           />
           <span style={{ color: "var(--text-dim)", flexShrink: 0, userSelect: "none" }}>@</span>
           <select
-            ref={domainRef}
             className={styles.input}
             value={domain}
             onChange={(e) => setDomain(e.target.value)}

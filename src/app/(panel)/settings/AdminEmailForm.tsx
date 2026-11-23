@@ -1,8 +1,9 @@
 "use client";
 
-import { useActionState, useEffect } from "react";
+import { useEffect } from "react";
 import { useRouter } from "next/navigation";
 import styles from "@/components/page.module.css";
+import { useFormActionState } from "@/lib/useFormActionState";
 
 type Result = { ok: true } | { ok: false; error: string };
 
@@ -13,10 +14,7 @@ export default function AdminEmailForm({
   currentEmail: string;
   action: (prev: Result | null, fd: FormData) => Promise<Result>;
 }) {
-  const [state, formAction, pending] = useActionState<Result | null, FormData>(
-    action,
-    null,
-  );
+  const [state, formAction, pending, formRef] = useFormActionState<Result | null>(action, null);
   const router = useRouter();
 
   useEffect(() => {
@@ -30,7 +28,7 @@ export default function AdminEmailForm({
   }, [state, router]);
 
   return (
-    <form action={formAction}>
+    <form ref={formRef} action={formAction}>
       <div className={styles.formRow}>
         <label className={styles.field}>
           Admin email

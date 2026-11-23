@@ -1,7 +1,8 @@
 "use client";
 
-import { useActionState, useEffect, useRef } from "react";
+import { useEffect, useRef } from "react";
 import styles from "@/components/page.module.css";
+import { useFormActionState } from "@/lib/useFormActionState";
 
 type Result = { ok: true } | { ok: false; error: string };
 
@@ -32,18 +33,19 @@ export default function AddPublicKeyForm({
   action: (prev: Result | null, fd: FormData) => Promise<Result>;
   users: SshUserOption[];
 }) {
-  const [state, formAction, pending] = useActionState<Result | null, FormData>(
+  const formRef = useRef<HTMLFormElement>(null);
+  const [state, formAction, pending, keepRef] = useFormActionState<Result | null>(
     action,
     null,
+    formRef,
   );
-  const formRef = useRef<HTMLFormElement>(null);
 
   useEffect(() => {
     if (state?.ok === true) formRef.current?.reset();
   }, [state]);
 
   return (
-    <form ref={formRef} action={formAction}>
+    <form ref={keepRef} action={formAction}>
       <div className={styles.formRow}>
         <label className={styles.field}>
           User

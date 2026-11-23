@@ -1,7 +1,8 @@
 "use client";
 
-import { useActionState, useState } from "react";
+import { useState } from "react";
 import styles from "@/components/page.module.css";
+import { useFormActionState } from "@/lib/useFormActionState";
 
 // Mirror of the agent's RESERVED_USERS list in agent/src/handlers/postgres.rs
 // (plus the pg_* prefix rule). Client-side check keeps the round-trip down
@@ -23,10 +24,7 @@ export default function CreatePgUserForm({
 }: {
   action: (prev: Result | null, fd: FormData) => Promise<Result>;
 }) {
-  const [state, formAction, pending] = useActionState<Result | null, FormData>(
-    action,
-    null,
-  );
+  const [state, formAction, pending, formRef] = useFormActionState<Result | null>(action, null);
   const [user, setUser] = useState("");
 
   const lowered = user.trim().toLowerCase();
@@ -34,7 +32,7 @@ export default function CreatePgUserForm({
     RESERVED_USERS.includes(lowered) || lowered.startsWith("pg_");
 
   return (
-    <form action={formAction}>
+    <form ref={formRef} action={formAction}>
       <div className={styles.formRow}>
         <label className={styles.field}>
           Role name

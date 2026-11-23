@@ -1,7 +1,8 @@
 "use client";
 
-import { useActionState, useState } from "react";
+import { useState } from "react";
 import styles from "@/components/page.module.css";
+import { useFormActionState } from "@/lib/useFormActionState";
 import type { SshUserOption } from "./AddPublicKeyForm";
 
 type Result =
@@ -20,10 +21,7 @@ export default function GenerateKeypairForm({
   action: (prev: Result | null, fd: FormData) => Promise<Result>;
   users: SshUserOption[];
 }) {
-  const [state, formAction, pending] = useActionState<Result | null, FormData>(
-    action,
-    null,
-  );
+  const [state, formAction, pending, formRef] = useFormActionState<Result | null>(action, null);
   // Controlled so we can sanitize keystrokes — strip uppercase/spaces and
   // reject invalid chars before they even reach the server validator.
   const [name, setName] = useState("");
@@ -43,7 +41,7 @@ export default function GenerateKeypairForm({
       .slice(0, 32);
 
   return (
-    <form action={formAction}>
+    <form ref={formRef} action={formAction}>
       <div className={styles.formRow}>
         <label className={styles.field}>
           User

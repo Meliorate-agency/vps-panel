@@ -1,7 +1,7 @@
 "use client";
 
-import { useActionState } from "react";
 import styles from "@/components/page.module.css";
+import { useFormActionState } from "@/lib/useFormActionState";
 
 type Result = { ok: true } | { ok: false; error: string };
 
@@ -25,13 +25,11 @@ export default function Fail2banPolicyForm({
   action: (prev: Result | null, fd: FormData) => Promise<Result>;
   initial: InitialPolicy;
 }) {
-  const [state, formAction, pending] = useActionState<Result | null, FormData>(
-    action,
-    null,
-  );
+  const [state, formAction, pending, formRef] = useFormActionState<Result | null>(action, null);
 
   return (
     <form
+      ref={formRef}
       action={formAction}
       style={{ display: "flex", flexDirection: "column", gap: 12 }}
     >

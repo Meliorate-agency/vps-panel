@@ -1,9 +1,10 @@
 "use client";
 
-import { useActionState, useState } from "react";
+import { useEffect, useState } from "react";
 import styles from "@/components/page.module.css";
 import localStyles from "./mailboxes.module.css";
 import { generatePassword } from "@/lib/passwordGen";
+import { useFormActionState } from "@/lib/useFormActionState";
 
 type Result =
   | { ok: true; data?: { password?: string } }
@@ -20,11 +21,15 @@ export default function EditMailboxRow({
   currentUsageMb: number;
   action: (prev: Result | null, fd: FormData) => Promise<Result>;
 }) {
-  const [state, formAction, pending] = useActionState<Result | null, FormData>(action, null);
+  const [state, formAction, pending, formRef] = useFormActionState<Result | null>(action, null);
   // Controlled so "Generate" can fill it. Shown as plain text on purpose:
   // the operator is setting a password to hand to someone, not typing their
-  // own, and needs to read it.
+  // own, and needs to read it. Cleared once it is saved; the notice below
+  // shows it until then.
   const [password, setPassword] = useState("");
+  useEffect(() => {
+    if (state?.ok === true) setPassword("");
+  }, [state]);
   const minQuota = currentUsageMb + 1;
 
   return (
@@ -34,7 +39,7 @@ export default function EditMailboxRow({
         <div className={localStyles.editTitle}>
           Edit <span className={styles.code}>{email}</span>
         </div>
-        <form action={formAction}>
+        <form ref={formRef} action={formAction}>
           <div className={styles.formRow}>
             <label className={styles.field}>
               New password (optional)

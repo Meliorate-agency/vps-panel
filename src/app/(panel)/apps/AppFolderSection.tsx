@@ -1,11 +1,12 @@
 "use client";
 
-import { useActionState, useEffect, useRef, useState, useTransition } from "react";
+import { useEffect, useState, useTransition } from "react";
 import { useRouter } from "next/navigation";
 import Table from "@/components/Table/Table";
 import ConfirmDialog from "@/components/ConfirmDialog/ConfirmDialog";
 import styles from "@/components/page.module.css";
 import sectionStyles from "./AppFolderSection.module.css";
+import { useFormActionState } from "@/lib/useFormActionState";
 
 type Result = { ok: true } | { ok: false; error: string };
 
@@ -81,10 +82,8 @@ export default function AppFolderSection({
   const [editing, setEditing] = useState(false);
   const [name, setName] = useState(label);
   useEffect(() => setName(label), [label]);
-  const formRef = useRef<HTMLFormElement>(null);
-  const [renameState, renameFormAction, renamePending] = useActionState<
-    Result | null,
-    FormData
+  const [renameState, renameFormAction, renamePending, formRef] = useFormActionState<
+    Result | null
   >(
     renameAction ??
       (async () => ({ ok: false, error: "rename not supported" })),

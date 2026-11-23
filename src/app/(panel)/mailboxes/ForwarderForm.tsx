@@ -1,7 +1,8 @@
 "use client";
 
-import { useActionState, useEffect, useRef, useState } from "react";
+import { useEffect, useState } from "react";
 import styles from "@/components/page.module.css";
+import { useFormActionState } from "@/lib/useFormActionState";
 import localStyles from "./mailboxes.module.css";
 
 type Result =
@@ -20,7 +21,9 @@ export default function ForwarderForm({
   action: (prev: Result | null, fd: FormData) => Promise<Result>;
   domains: string[];
 }) {
-  const [state, formAction, pending] = useActionState<Result | null, FormData>(action, null);
+  // A refused forwarder keeps the fields, the catch-all box included (React
+  // reset unchecked it while the form still sent a catch-all).
+  const [state, formAction, pending, formRef] = useFormActionState<Result | null>(action, null);
   const [localpart, setLocalpart] = useState("");
   const [picked, setDomain] = useState(domains[0] ?? "");
   // The list can change under the mounted form: the first mailbox brings the
@@ -29,23 +32,6 @@ export default function ForwarderForm({
   const domain = domains.includes(picked) ? picked : (domains[0] ?? "");
   const [catchAll, setCatchAll] = useState(false);
   const [destinations, setDestinations] = useState("");
-  const formRef = useRef<HTMLFormElement>(null);
-  const domainRef = useRef<HTMLSelectElement>(null);
-  // React 19 resets the form after the action; the <select> DOM snaps to the
-  // first domain while the hidden source keeps `domain`. Re-apply it once
-  // the reset has landed, as MailboxForm does.
-  useEffect(() => {
-    const form = formRef.current;
-    if (!form) return;
-    const onReset = () => {
-      queueMicrotask(() => {
-        if (domainRef.current) domainRef.current.value = domain;
-      });
-    };
-    form.addEventListener("reset", onReset);
-    return () => form.removeEventListener("reset", onReset);
-  }, [domain]);
-
   // A forwarder that went in clears the form for the next one.
   useEffect(() => {
     if (state?.ok) {
@@ -80,7 +66,6 @@ export default function ForwarderForm({
           />
           <span style={{ color: "var(--text-dim)", flexShrink: 0, userSelect: "none" }}>@</span>
           <select
-            ref={domainRef}
             className={styles.input}
             value={domain}
             onChange={(e) => setDomain(e.target.value)}

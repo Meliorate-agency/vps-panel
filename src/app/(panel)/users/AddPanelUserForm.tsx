@@ -1,7 +1,8 @@
 "use client";
 
-import { useActionState, useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import styles from "@/components/page.module.css";
+import { useFormActionState } from "@/lib/useFormActionState";
 
 type Result = { ok: true } | { ok: false; error: string };
 
@@ -17,12 +18,13 @@ export default function AddPanelUserForm({
 }: {
   action: (prev: Result | null, fd: FormData) => Promise<Result>;
 }) {
-  const [state, formAction, pending] = useActionState<Result | null, FormData>(
-    action,
-    null,
-  );
   const [revealed, setRevealed] = useState(false);
   const formRef = useRef<HTMLFormElement>(null);
+  const [state, formAction, pending, keepRef] = useFormActionState<Result | null>(
+    action,
+    null,
+    formRef,
+  );
 
   useEffect(() => {
     if (state?.ok === true) {
@@ -32,7 +34,7 @@ export default function AddPanelUserForm({
   }, [state]);
 
   return (
-    <form ref={formRef} action={formAction}>
+    <form ref={keepRef} action={formAction}>
       <div className={styles.formRow}>
         <label className={styles.field}>
           Email

@@ -1,9 +1,10 @@
 "use client";
 
-import { useActionState, useEffect, useRef, useState, useTransition } from "react";
+import { useEffect, useRef, useState, useTransition } from "react";
 import { useRouter } from "next/navigation";
 import ConfirmDialog from "@/components/ConfirmDialog/ConfirmDialog";
 import styles from "@/components/page.module.css";
+import { useFormActionState } from "@/lib/useFormActionState";
 
 type Result = { ok: true } | { ok: false; error: string };
 
@@ -41,10 +42,9 @@ export default function PanelUserActions({
   const [resetOpen, setResetOpen] = useState(false);
   const [revealed, setRevealed] = useState(false);
   const formRef = useRef<HTMLFormElement>(null);
-  const [resetState, resetFormAction, resetPending] = useActionState<
-    Result | null,
-    FormData
-  >(resetAction, null);
+  const [resetState, resetFormAction, resetPending, keepRef] = useFormActionState<
+    Result | null
+  >(resetAction, null, formRef);
   // The result the dialog was opened with. useActionState keeps the last
   // result, so without this a second Reset password (this user or, after a
   // row above was deleted, the next one) opened on the old "Password reset."
@@ -131,7 +131,7 @@ export default function PanelUserActions({
           sessions so they have to sign in again. The user&apos;s email and
           role are unchanged.
         </p>
-        <form ref={formRef} action={resetFormAction}>
+        <form ref={keepRef} action={resetFormAction}>
           <div className={styles.formRow}>
             <label className={styles.field}>
               New password

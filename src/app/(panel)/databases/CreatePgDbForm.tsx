@@ -1,7 +1,7 @@
 "use client";
 
-import { useActionState } from "react";
 import styles from "@/components/page.module.css";
+import { useFormActionState } from "@/lib/useFormActionState";
 import type { PgRole } from "@/lib/agent";
 
 type Result = { ok: true } | { ok: false; error: string };
@@ -20,12 +20,10 @@ export default function CreatePgDbForm({
   action: (prev: Result | null, fd: FormData) => Promise<Result>;
   roles: PgRole[];
 }) {
-  const [state, formAction, pending] = useActionState<Result | null, FormData>(
-    action,
-    null,
-  );
+  const [state, formAction, pending, formRef] = useFormActionState<Result | null>(action, null);
   return (
     <form
+      ref={formRef}
       action={formAction}
       style={{ display: "flex", gap: 8, alignItems: "flex-end", flexWrap: "wrap" }}
     >

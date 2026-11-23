@@ -1,7 +1,8 @@
 "use client";
 
-import { useActionState, useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import styles from "@/components/page.module.css";
+import { useFormActionState } from "@/lib/useFormActionState";
 
 type Result = { ok: true } | { ok: false; error: string };
 
@@ -16,11 +17,12 @@ export default function NewFolderButton({
   action: (prev: Result | null, fd: FormData) => Promise<Result>;
 }) {
   const [open, setOpen] = useState(false);
-  const [state, formAction, pending] = useActionState<Result | null, FormData>(
+  const formRef = useRef<HTMLFormElement>(null);
+  const [state, formAction, pending, keepRef] = useFormActionState<Result | null>(
     action,
     null,
+    formRef,
   );
-  const formRef = useRef<HTMLFormElement>(null);
   const inputRef = useRef<HTMLInputElement>(null);
 
   // On success, collapse and clear so a second folder add starts fresh.
@@ -50,7 +52,7 @@ export default function NewFolderButton({
 
   return (
     <form
-      ref={formRef}
+      ref={keepRef}
       action={formAction}
       style={{ display: "flex", gap: 6, alignItems: "center" }}
     >

@@ -1,6 +1,6 @@
 "use client";
 
-import { useActionState, useEffect, useState, useTransition } from "react";
+import { useEffect, useState, useTransition } from "react";
 import { useRouter } from "next/navigation";
 import { createPortal } from "react-dom";
 import ConfirmDialog from "@/components/ConfirmDialog/ConfirmDialog";
@@ -8,6 +8,7 @@ import pageStyles from "@/components/page.module.css";
 import local from "./mailboxes.module.css";
 import { generatePassword } from "@/lib/passwordGen";
 import { copyText } from "@/lib/clipboard";
+import { useFormActionState } from "@/lib/useFormActionState";
 
 type UpdateResult =
   | { ok: true; data?: { password?: string } }
@@ -59,9 +60,8 @@ export default function MailboxActions({
   const [copied, setCopied] = useState(false);
 
   // Edit form state (driven by useActionState so the form posts naturally).
-  const [editState, editFormAction, editPending] = useActionState<
-    UpdateResult | null,
-    FormData
+  const [editState, editFormAction, editPending, editFormRef] = useFormActionState<
+    UpdateResult | null
   >(updateAction, null);
 
   // Edit form: controlled password so "Generate" can fill it in.
@@ -84,11 +84,14 @@ export default function MailboxActions({
 
   // Quota-only change succeeded → close the modal + refresh the row.
   // Password change succeeded → keep the dialog open so the operator can
-  // copy the generated password; close happens on their explicit click.
+  // copy the generated password from the notice; close happens on their
+  // explicit click. The field itself is cleared.
   useEffect(() => {
     if (editState?.ok === true && !editState.data?.password) {
       closeAll();
       router.refresh();
+    } else if (editState?.ok === true) {
+      setEditPassword("");
     }
   }, [editState, router]);
 
@@ -224,7 +227,7 @@ export default function MailboxActions({
           onCancel={closeAll}
           onConfirm={() => {}}
         >
-          <form action={editFormAction}>
+          <form ref={editFormRef} action={editFormAction}>
             <div className={pageStyles.formRow}>
               <label className={pageStyles.field}>
                 New password (optional)

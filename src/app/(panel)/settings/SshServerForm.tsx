@@ -1,7 +1,8 @@
 "use client";
 
-import { useActionState, useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import styles from "@/components/page.module.css";
+import { useFormActionState } from "@/lib/useFormActionState";
 import type { SshRootLogin, SshServerConfig } from "@/lib/agent";
 
 type Result = { ok: true } | { ok: false; error: string };
@@ -37,10 +38,11 @@ export default function SshServerForm({
   suggestPasswordAuth?: boolean;
   suggestRootLogin?: SshRootLogin;
 }) {
-  const [state, formAction, pending] = useActionState<Result | null, FormData>(
-    action,
-    null,
-  );
+  // Through the hook: React's reset after a save put the root-login picker
+  // on its first option ("Allowed") and the password switch back to its
+  // state at mount while the component still held the operator's choice,
+  // so the next save sent root login "yes" without anyone picking it.
+  const [state, formAction, pending, formRef] = useFormActionState<Result | null>(action, null);
   const [pwAuth, setPwAuth] = useState(suggestPasswordAuth ?? config.password_auth);
   const [rootLogin, setRootLogin] = useState<SshRootLogin>(
     suggestRootLogin ?? config.permit_root_login,
@@ -72,7 +74,7 @@ export default function SshServerForm({
   );
 
   return (
-    <form action={formAction}>
+    <form ref={formRef} action={formAction}>
       {/* The live values, so the action sends sshd only what was changed. */}
       <input type="hidden" name="current_port" value={config.port} />
       <input type="hidden" name="current_idle_timeout_minutes" value={config.idle_timeout_minutes} />

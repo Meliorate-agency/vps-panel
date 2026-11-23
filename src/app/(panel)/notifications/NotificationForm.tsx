@@ -1,7 +1,8 @@
 "use client";
 
-import { useActionState, useEffect, useRef, useState } from "react";
+import { useState } from "react";
 import styles from "@/components/page.module.css";
+import { useFormActionState } from "@/lib/useFormActionState";
 import { NOTIFICATION_EVENTS } from "@/lib/notificationEvents";
 
 type Result = { ok: true } | { ok: false; error: string };
@@ -16,31 +17,16 @@ export default function NotificationForm({
 }: {
   action: (prev: Result | null, fd: FormData) => Promise<Result>;
 }) {
-  const [state, formAction, pending] = useActionState<Result | null, FormData>(action, null);
+  // A refused add keeps the fields; an added one clears them, while the
+  // channel stays on the last pick.
+  const [state, formAction, pending, formRef] = useFormActionState<Result | null>(action, null);
   const [channel, setChannel] = useState("email");
-  const formRef = useRef<HTMLFormElement>(null);
-  const channelRef = useRef<HTMLSelectElement>(null);
-  // React 19 resets the form after the action; the <select> DOM snaps back
-  // to "email" while `channel` (and the fields it shows) stays. Re-apply it
-  // once the reset has landed, as DeployForm does.
-  useEffect(() => {
-    const form = formRef.current;
-    if (!form) return;
-    const onReset = () => {
-      queueMicrotask(() => {
-        if (channelRef.current) channelRef.current.value = channel;
-      });
-    };
-    form.addEventListener("reset", onReset);
-    return () => form.removeEventListener("reset", onReset);
-  }, [channel]);
   return (
     <form ref={formRef} action={formAction}>
       <div className={styles.formRow}>
         <label className={styles.field}>
           Channel
           <select
-            ref={channelRef}
             name="channel"
             className={styles.select}
             value={channel}

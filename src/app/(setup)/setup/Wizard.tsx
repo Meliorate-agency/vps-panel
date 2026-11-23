@@ -29,6 +29,7 @@ import shared from "@/components/page.module.css";
 import styles from "./setup.module.css";
 import type { CoreServiceState, SshServerConfig } from "@/lib/agent";
 import { PHASE_LABEL, phaseTone, type TailscaleCard } from "@/lib/tailscale";
+import { useFormActionState } from "@/lib/useFormActionState";
 import type { CatalogEntry } from "./catalog";
 
 type Policy = {
@@ -514,7 +515,7 @@ function SecurityStep({
   onBack: () => void;
   onNext: () => void;
 }) {
-  const [state, formAction, pending] = useActionState(setFail2banPolicyAction, null);
+  const [state, formAction, pending, formRef] = useFormActionState(setFail2banPolicyAction, null);
   const [aptTaskId, setAptTaskId] = useState<string | null>(null);
   const [aptError, setAptError] = useState<string | null>(null);
   const [aptStarting, startApt] = useTransition();
@@ -539,7 +540,7 @@ function SecurityStep({
         moment to apply pending OS package updates.
       </p>
 
-      <form action={formAction} style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+      <form ref={formRef} action={formAction} style={{ display: "flex", flexDirection: "column", gap: 12 }}>
         <div className={shared.formRow}>
           <label className={shared.field}>
             Ban time
@@ -668,7 +669,7 @@ function SshLoginSetup({
   config: SshServerConfig | null;
   rootKeyCount: number;
 }) {
-  const [keyState, keyAction, keyPending] = useActionState(addSshKeyAction, null);
+  const [keyState, keyAction, keyPending, keyFormRef] = useFormActionState(addSshKeyAction, null);
   if (!config) {
     return (
       <div>
@@ -698,7 +699,7 @@ function SshLoginSetup({
           root has {rootKeyCount} SSH key{rootKeyCount === 1 ? "" : "s"}.
         </p>
       )}
-      <form action={keyAction} style={{ marginBottom: 14 }}>
+      <form ref={keyFormRef} action={keyAction} style={{ marginBottom: 14 }}>
         <input type="hidden" name="user" value="root" />
         <label className={shared.field}>
           Add a public key for root
