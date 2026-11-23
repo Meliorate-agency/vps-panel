@@ -480,6 +480,13 @@ async fn ensure_mariadb_docker_bridge_bind(task: &crate::ipc::tasks::TaskHandle)
         task.log(format!(
             "{MARIADB_DOCKER_DROPIN_PATH} already up to date — MariaDB bridge bind unchanged"
         ));
+    } else if current.as_deref() == Some(MARIADB_PUBLIC_DROPIN) {
+        // Set to Public on the MariaDB card: 0.0.0.0 covers the bridge.
+        // Rewriting it here took MariaDB back to Local behind the operator's
+        // back whenever phpMyAdmin was installed, rebound or reconfigured.
+        task.log(format!(
+            "{MARIADB_DOCKER_DROPIN_PATH}: MariaDB listens on every interface, the docker bridge included"
+        ));
     } else {
         task.log(format!(
             "writing {MARIADB_DOCKER_DROPIN_PATH} so MariaDB accepts connections from the docker bridge"
@@ -2181,6 +2188,8 @@ pub async fn set_bind(
 
 const MARIADB_PUBLIC_DROPIN: &str = "# Managed by vps-panel — do not edit by hand.\n# PUBLIC bind: MariaDB listens on every interface. Set via the panel's\n# bind dropdown on the MariaDB quick-install card. Flip back to LOCAL to\n# revert.\n#\n# Security note: anyone with TCP reach to this host on 3306 can attempt\n# auth — make sure every MariaDB user has a strong password and no\n# `'user'@'%'` accounts have weak ones.\n\n[mysqld]\nbind-address = 0.0.0.0\n";
 
+const MARIADB_LOCAL_DROPIN: &str = "# Managed by vps-panel — do not edit by hand.\n# LOCAL bind on a server without the docker bridge: loopback only. Installing\n# phpMyAdmin (or touching its settings) adds the bridge address again.\n\n[mysqld]\nbind-address = 127.0.0.1\n";
+
 async fn set_mariadb_bind(
     state: AppState,
     bind: String,
@@ -2193,8 +2202,13 @@ async fn set_mariadb_bind(
         let path = std::path::Path::new(MARIADB_DOCKER_DROPIN_PATH);
         let want = if bind == "0.0.0.0" {
             MARIADB_PUBLIC_DROPIN
-        } else {
+        } else if docker_bridge_gateway_present().await {
             MARIADB_DOCKER_DROPIN
+        } else {
+            // No docker0 on this server. mariadbd does not start when an
+            // address in bind-address is on no interface, so the bridge is
+            // listed only where it exists (as for PostgreSQL below).
+            MARIADB_LOCAL_DROPIN
         };
         let current = tokio::fs::read_to_string(path).await.ok();
         if current.as_deref() == Some(want) {
