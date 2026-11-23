@@ -82,7 +82,7 @@ For local development on a workstation (no system mutations, no privileged paths
 
 ## Out of scope
 
-PHP hosting, containerised app deploys, multi-server orchestration.
+PHP and WordPress hosting, reseller and customer accounts, and managing several servers from one panel: My Networks shows the other servers' status, and each server is still managed in its own panel.
 
 ## License
 
