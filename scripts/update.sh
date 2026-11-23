@@ -255,7 +255,9 @@ patch_panel_vhost_upload_limits() {
 
   # A broken config must never survive this script.
   if nginx -t >/dev/null 2>&1; then
-    systemctl reload nginx
+    # `|| true`: a stopped nginx must not end the update between installing
+    # the new agent and panel and restarting them.
+    systemctl reload nginx || true
     echo "upload limits applied; nginx reloaded"
   else
     echo "nginx -t failed after patching $vhost — reverting" >&2
@@ -707,4 +709,14 @@ retire_nginx_jails || true
 systemctl restart vps-panel-agent.service
 sleep 1
 systemctl restart vps-panel.service
+# Both units are Type=simple: restart succeeds once the process is started,
+# even if it exits right after. An update that left one of them down must
+# not end with "updated." and exit 0.
+sleep 3
+for unit in vps-panel-agent.service vps-panel.service; do
+  if ! systemctl is-active --quiet "$unit"; then
+    echo "$unit is not running after the update. Check: journalctl -u $unit -n 50" >&2
+    exit 1
+  fi
+done
 echo "updated."
