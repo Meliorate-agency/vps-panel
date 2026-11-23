@@ -659,6 +659,7 @@ pub async fn import_sql(
         mariadb_socket_path(&state.config.mariadb_url),
         db.clone(),
         dump_defines_db,
+        dump_defines_db && dump_creates_database(&header),
         req.drop_first,
         req.create_target,
     ));
@@ -707,6 +708,15 @@ fn detect_dump_database(header: &str) -> Option<String> {
         }
     }
     None
+}
+
+/// True when the header has a CREATE DATABASE of its own. A dump that only
+/// says `USE` (Adminer, `mysqldump --no-create-db`) needs its database to
+/// exist before the import starts.
+fn dump_creates_database(header: &str) -> bool {
+    regex::Regex::new(r"(?im)^\s*CREATE\s+DATABASE\b")
+        .unwrap()
+        .is_match(header)
 }
 
 /// The dump named its own database, so the name never came from a form
@@ -829,6 +839,7 @@ async fn run_import_task(
     socket: String,
     db: String,
     dump_defines_db: bool,
+    dump_creates_db: bool,
     drop_first: bool,
     create_target: bool,
 ) {
@@ -867,8 +878,10 @@ async fn run_import_task(
             task.log(format!("Dropped database `{db}` (clean re-import requested)."));
         }
         // A headerless dump won't recreate what we just dropped (and can't
-        // create a brand-new target either) — ensure it exists.
-        if !dump_defines_db {
+        // create a brand-new target either) — ensure it exists. The same for
+        // a dump that only says `USE`: after the DROP its first statement
+        // failed with "Unknown database" and the old data was gone.
+        if !dump_creates_db {
             if let Err(e) = conn
                 .query_drop(format!(
                     "CREATE DATABASE IF NOT EXISTS `{}` CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci",
@@ -1087,5 +1100,17 @@ mod tests {
         }
         // A grant stored unescaped still shows under its database.
         assert_eq!(unescape_grant_db("shop_1"), "shop_1");
+    }
+
+    #[test]
+    fn a_use_only_dump_does_not_create_its_database() {
+        let dumped = "-- MariaDB dump\n\nCREATE DATABASE /*!32312 IF NOT EXISTS*/ `shop` /*!40100 DEFAULT CHARACTER SET utf8mb4 */;\n\nUSE `shop`;\n";
+        assert_eq!(detect_dump_database(dumped).as_deref(), Some("shop"));
+        assert!(dump_creates_database(dumped));
+        let use_only = "-- Adminer 4.8.1 MySQL dump\n\nSET NAMES utf8;\n\nUSE `shop`;\n\nDROP TABLE IF EXISTS `orders`;\n";
+        assert_eq!(detect_dump_database(use_only).as_deref(), Some("shop"));
+        assert!(!dump_creates_database(use_only));
+        // A comment that mentions it is not a statement.
+        assert!(!dump_creates_database("-- run CREATE DATABASE first\nUSE shop;\n"));
     }
 }
