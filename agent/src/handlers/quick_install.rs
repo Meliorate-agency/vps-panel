@@ -424,9 +424,12 @@ async fn is_installed(check: Check) -> bool {
                 .await,
             Ok(s) if (0..=3).contains(&s.code().unwrap_or(-1))
         ),
+        // `container inspect`: a plain `docker inspect phpmyadmin` also finds
+        // an image of that name (a Docker app deployed from the official
+        // `phpmyadmin` image), and the card then said Installed.
         Check::DockerContainer(name) => matches!(
             Command::new("docker")
-                .args(["inspect", name])
+                .args(["container", "inspect", name])
                 .stdin(Stdio::null())
                 .stdout(Stdio::null())
                 .stderr(Stdio::null())
@@ -833,12 +836,23 @@ pub async fn run(
     State(state): State<AppState>,
     Path(slug): Path<String>,
 ) -> AgentResult<Json<TaskAccepted>> {
-    let (info, recipe, _) = lookup(&slug)
+    let (info, recipe, check) = lookup(&slug)
         .ok_or_else(|| AgentError::Invalid(format!("unknown package: {slug}")))?;
 
-    let task = state.tasks.create(&format!("quick-install:{}", info.slug));
+    // Two installs of one package at once fight over apt's lock and the
+    // container name, and the loser's cleanup would meet the winner's
+    // container.
+    let kind = format!("quick-install:{}", info.slug);
+    if state.tasks.any_live_kind(&kind) {
+        return Err(AgentError::Conflict(format!(
+            "{} is already being installed - wait for it to finish",
+            info.name
+        )));
+    }
+    let task = state.tasks.create(&kind);
     let task_id = task.id.clone();
     let display_name = info.name;
+    let check = *check;
     let slug_owned = slug.clone();
     // Clone the panel.db handle into the spawned task so the post-install
     // phpmyadmin hook can look up matching /domains routing slots without
@@ -881,11 +895,13 @@ pub async fn run(
                 Ok(0) => {}
                 Ok(code) => {
                     task.log(format!("step exited with code {code}"));
+                    remove_unstarted_container(check, &task).await;
                     task.finish(false);
                     return;
                 }
                 Err(e) => {
                     task.log(format!("step error: {e}"));
+                    remove_unstarted_container(check, &task).await;
                     task.finish(false);
                     return;
                 }
@@ -962,6 +978,31 @@ pub async fn run(
     });
 
     Ok(Json(TaskAccepted { task_id }))
+}
+
+/// `docker run` creates the container before it starts it. When the start
+/// fails (the host port is taken by something else) the container stays
+/// behind in the "created" state: the card said Installed for a service that
+/// never ran, and there was no way to install it again from the panel. One
+/// that never started holds nothing, so it is removed; a container that has
+/// run (an install repeated over a working one) is left alone.
+async fn remove_unstarted_container(check: Check, task: &crate::ipc::tasks::TaskHandle) {
+    let Check::DockerContainer(name) = check else {
+        return;
+    };
+    let status = exec::run(
+        "docker",
+        ["container", "inspect", "--format", "{{.State.Status}}", name],
+    )
+    .await
+    .map(|o| o.stdout.trim().to_string())
+    .unwrap_or_default();
+    if status == "created" {
+        task.log(format!(
+            "removing the {name} container that never started, so the install can be run again"
+        ));
+        let _ = exec::run("docker", ["rm", name]).await;
+    }
 }
 
 async fn detect_mail_hostname() -> Option<String> {
@@ -1115,10 +1156,12 @@ async fn install_roundcube_dynamic(task: crate::ipc::tasks::TaskHandle) {
         }
         Ok(code) => {
             task.log(format!("docker run exited with code {code}"));
+            remove_unstarted_container(Check::DockerContainer("roundcube"), &task).await;
             task.finish(false);
         }
         Err(e) => {
             task.log(format!("docker run error: {e}"));
+            remove_unstarted_container(Check::DockerContainer("roundcube"), &task).await;
             task.finish(false);
         }
     }
