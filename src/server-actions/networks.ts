@@ -12,7 +12,7 @@ import {
   createInvite,
   createNetwork,
   deleteNetworkLocal,
-  dissolvedRoster,
+  dissolveNetwork,
   getMember,
   getNetwork,
   isOwner,
@@ -227,9 +227,13 @@ export async function deleteNetworkAction(networkId: string): Promise<ActionResu
   const s = await requireAdmin();
   const net = getNetwork(networkId);
   if (!net || !isOwner(net)) return { ok: false, error: "only the network's owner deletes it" };
-  // Tell every member first: they drop it when the signed final list arrives.
-  await pushRoster(net.id, dissolvedRoster(net), membersExcept(net.id));
-  deleteNetworkLocal(net.id);
+  // Every member is told right away and drops the network when the signed
+  // final list arrives. One that cannot be reached now gets the same list in
+  // answer to its next ping (the owner keeps it, dissolveNetwork).
+  const members = membersExcept(net.id);
+  const last = dissolveNetwork(net.id);
+  if (!last) return { ok: false, error: "only the network's owner deletes it" };
+  await pushRoster(net.id, last, members);
   writeAudit({ actorId: s.userId, action: "networks.delete", target: net.name, result: "ok" });
   revalidatePath("/networks");
   return { ok: true };

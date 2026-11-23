@@ -127,17 +127,60 @@ export function publishRoster(networkId: string): { json: string; sig: string } 
     .immediate();
 }
 
-/** Owner: the last list, which tells every member the network is gone. */
-export function dissolvedRoster(net: NetworkRow): { json: string; sig: string } {
-  return signRoster({
-    v: 1,
-    network: net.id,
-    name: net.name,
-    owner: net.owner_key,
-    version: net.roster_version + 1,
-    dissolved: true,
-    members: [],
-  });
+/** How long the final list of a deleted network is kept for members that
+ *  were offline when it was deleted. */
+const DISSOLVED_KEEP_MS = 90 * 86_400_000;
+
+/**
+ * Owner: delete the network. Returns the last list, which tells every member
+ * the network is gone, and keeps it: a member that was offline now gets it
+ * when it pings again (dissolvedNotice). Null when this server owns no such
+ * network.
+ */
+export function dissolveNetwork(networkId: string): { json: string; sig: string } | null {
+  const d = db();
+  return d
+    .transaction(() => {
+      // Read here, not by the caller: a join in between would make the last
+      // list as old as the one the members already hold, and they ignore it.
+      const net = getNetwork(networkId);
+      if (!net || !isOwner(net)) return null;
+      const last = signRoster({
+        v: 1,
+        network: net.id,
+        name: net.name,
+        owner: net.owner_key,
+        version: net.roster_version + 1,
+        dissolved: true,
+        members: [],
+      });
+      d.prepare(
+        `INSERT INTO networks_dissolved (id, roster_json, roster_sig, dissolved_at) VALUES (?, ?, ?, ?)
+         ON CONFLICT(id) DO UPDATE SET roster_json = excluded.roster_json, roster_sig = excluded.roster_sig,
+           dissolved_at = excluded.dissolved_at`,
+      ).run(net.id, last.json, last.sig, Date.now());
+      deleteNetworkLocal(net.id);
+      pruneDissolved();
+      return last;
+    })
+    .immediate();
+}
+
+/**
+ * Owner: the signed last list of a network deleted here, for a server that
+ * still pings for it. Whoever asks has to name the network's id, which only
+ * its members and the holders of a join code ever knew, and the list says no
+ * more than a join code does: the network's name and this server's key.
+ */
+export function dissolvedNotice(networkId: string): { json: string; sig: string } | null {
+  const row = db()
+    .prepare(`SELECT roster_json, roster_sig FROM networks_dissolved WHERE id = ? AND dissolved_at > ?`)
+    .get(networkId, Date.now() - DISSOLVED_KEEP_MS) as { roster_json: string; roster_sig: string } | undefined;
+  return row ? { json: row.roster_json, sig: row.roster_sig } : null;
+}
+
+export function pruneDissolved(): void {
+  db().prepare(`DELETE FROM networks_dissolved WHERE dissolved_at < ?`).run(Date.now() - DISSOLVED_KEEP_MS);
 }
 
 export function createNetwork(name: string, self: { name: string; url: string }): NetworkRow {

@@ -1,5 +1,6 @@
 import "server-only";
 import { db } from "./db";
+import { pruneDissolved } from "./networks/store";
 import { KNOWN_ADDRESS_DAYS } from "./rateLimit";
 
 const DAY_MS = 24 * 60 * 60 * 1000;
@@ -37,6 +38,8 @@ export function startHousekeeping(): void {
   const run = () => {
     try {
       pruneAuthTables();
+      // The final member lists of networks deleted here, after 90 days.
+      pruneDissolved();
     } catch (e) {
       console.error("[housekeeping] could not prune sessions / login attempts:", e);
     }

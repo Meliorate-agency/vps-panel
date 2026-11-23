@@ -214,6 +214,16 @@ function applyMigrations(handle: Database.Database) {
       alerted_at      INTEGER,
       PRIMARY KEY (network_id, public_key)
     );
+    -- Networks this server owned and deleted: the final member list
+    -- (dissolved, signed by this server like every other one), for a member
+    -- that was offline at the time and asks later. dissolved_at is ms since
+    -- the epoch; rows are dropped after 90 days.
+    CREATE TABLE IF NOT EXISTS networks_dissolved (
+      id              TEXT PRIMARY KEY,
+      roster_json     TEXT NOT NULL,
+      roster_sig      TEXT NOT NULL,
+      dissolved_at    INTEGER NOT NULL
+    );
     -- One-time join codes. Only a hash of the secret is kept.
     CREATE TABLE IF NOT EXISTS network_invites (
       id              TEXT PRIMARY KEY,

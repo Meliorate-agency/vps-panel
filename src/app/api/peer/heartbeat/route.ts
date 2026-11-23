@@ -3,7 +3,7 @@ import { nodeIdentity, ownName } from "@/lib/networks/identity";
 import { peerError, readSignedRequest, signedJson } from "@/lib/networks/peer";
 import { cleanStats, nameOrNull } from "@/lib/networks/protocol";
 import { ownStats } from "@/lib/networks/stats";
-import { getMember, getNetwork, recordInbound, removalNotice } from "@/lib/networks/store";
+import { dissolvedNotice, getMember, getNetwork, recordInbound, removalNotice } from "@/lib/networks/store";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -20,7 +20,17 @@ export async function POST(req: NextRequest) {
   const { key, nonce, body } = r;
 
   const net = typeof body.network === "string" ? getNetwork(body.network) : undefined;
-  if (!net) return peerError(404, "this server is not in that network (it left, or the network was deleted)");
+  if (!net) {
+    // A network this server owned and deleted: a member that was offline at
+    // the time keeps pinging. It gets the last member list, which says
+    // dissolved and carries this server's signature, and drops the network.
+    const last = typeof body.network === "string" ? dissolvedNotice(body.network) : null;
+    return peerError(
+      404,
+      "this server is not in that network (it left, or the network was deleted)",
+      last ? { roster: last.json, sig: last.sig } : {},
+    );
+  }
   if (!getMember(net.id, key)) {
     // A server the owner removed keeps pinging until it hears. The owner
     // hands it a signed notice naming its key (not the member list), and it

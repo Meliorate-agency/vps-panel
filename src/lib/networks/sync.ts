@@ -2,6 +2,7 @@ import "server-only";
 import { writeAudit } from "../audit";
 import { nodeIdentity } from "./identity";
 import { peerRequest } from "./peer";
+import { parseRoster } from "./protocol";
 import { applyRoster, listMembers, type RosterResult } from "./store";
 
 export type Target = { key: string; url: string };
@@ -30,6 +31,24 @@ export async function pushRoster(networkId: string, roster: { json: string; sig:
       }),
     ),
   );
+}
+
+/**
+ * The owner answered a ping with "that network was deleted" and its last
+ * member list. The answer itself is an unsigned error, so only this much is
+ * taken from it: a list for this very network that says dissolved, checked
+ * like any other one (signed by the owner key pinned at joining, newer than
+ * the list here). Anything else changes nothing. True when the network was
+ * dropped.
+ */
+export function takeDissolved(networkId: string, json: unknown, sig: unknown, via: string): boolean {
+  try {
+    const roster = parseRoster(json);
+    if (roster.network !== networkId || !roster.dissolved) return false;
+  } catch {
+    return false;
+  }
+  return takeRoster(json, sig, via) === "dissolved";
 }
 
 /** A member list handed over by another server: apply it and log what it did to this one. */

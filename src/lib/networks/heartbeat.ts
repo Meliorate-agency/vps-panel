@@ -18,7 +18,7 @@ import {
   type MemberRow,
   type NetworkRow,
 } from "./store";
-import { membersExcept, pushRoster, takeRoster } from "./sync";
+import { membersExcept, pushRoster, takeDissolved, takeRoster } from "./sync";
 
 /**
  * Every 10 s: ping every member of every network this server is in, then
@@ -89,13 +89,9 @@ async function ping(net: NetworkRow, m: MemberRow, name: string, stats: PeerStat
     }
   } catch (e) {
     recordOutbound(net.id, m.public_key, { ok: false, error: e instanceof Error ? e.message : String(e) });
+    if (!(e instanceof PeerError) || m.public_key !== net.owner_key) return;
     // The owner removed this server while it could not be told.
-    if (
-      e instanceof PeerError &&
-      e.status === 403 &&
-      m.public_key === net.owner_key &&
-      applyRemoval(net.id, e.body?.removed)
-    ) {
+    if (e.status === 403 && applyRemoval(net.id, e.body?.removed)) {
       writeAudit({
         actorId: null,
         action: "networks.removed",
@@ -103,6 +99,12 @@ async function ping(net: NetworkRow, m: MemberRow, name: string, stats: PeerStat
         result: "ok",
         message: `the network's owner removed this server (via=heartbeat to ${m.url})`,
       });
+    }
+    // The owner deleted the network while this server could not be told:
+    // its 404 carries the last member list. Without it this server kept the
+    // network, showed every member offline and sent the alerts.
+    if (e.status === 404 && e.body?.roster !== undefined) {
+      takeDissolved(net.id, e.body.roster, e.body.sig, `heartbeat to ${m.url}`);
     }
   }
 }
