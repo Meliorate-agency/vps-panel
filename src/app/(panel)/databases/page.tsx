@@ -185,6 +185,10 @@ export default async function DatabasesPage() {
           { key: "users", label: "Granted users" },
           { key: "actions", label: "", width: "100px" },
         ]}
+        // Rows keyed by name, not position, in all four tables: a drop shifts
+        // the rows below, and an index key moved one row's open dialog or
+        // inline error (Revoke, Password, pgvector) onto the next one.
+        rowKey={(_row, i) => dbs[i].name}
         rows={dbs.map((d) => ({
           name: <span className={styles.code}>{d.name}</span>,
           users: (
@@ -225,6 +229,7 @@ export default async function DatabasesPage() {
           { key: "host", label: "Host" },
           { key: "actions", label: "", width: "200px" },
         ]}
+        rowKey={(_row, i) => `${users[i].user}@${users[i].host}`}
         rows={users.map((u) => ({
           user: <span className={styles.code}>{u.user}</span>,
           host: u.host,
@@ -296,6 +301,7 @@ export default async function DatabasesPage() {
               { key: "pgvector", label: "pgvector", width: "150px" },
               { key: "actions", label: "", width: "160px" },
             ]}
+            rowKey={(_row, i) => pgDbs[i].name}
             rows={pgDbs.map((d) => ({
               name: <span className={styles.code}>{d.name}</span>,
               owner: <span className={styles.code}>{d.owner}</span>,
@@ -347,6 +353,7 @@ export default async function DatabasesPage() {
               { key: "flags", label: "Flags" },
               { key: "actions", label: "", width: "200px" },
             ]}
+            rowKey={(_row, i) => pgRoles[i].user}
             rows={pgRoles.map((r) => ({
               user: <span className={styles.code}>{r.user}</span>,
               flags: r.superuser ? (
