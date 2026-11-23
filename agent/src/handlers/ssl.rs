@@ -1071,10 +1071,19 @@ async fn build_mail_sni(state: &AppState) -> Option<MailSni> {
     if conn.query_drop("USE `mail`").await.is_err() {
         return None;
     }
-    let domains: Vec<String> = conn
+    // A failed query is not "no tenants": that wrote empty maps, and
+    // Postfix and Dovecot presented the default certificate for every
+    // mail.<tenant> until the next regeneration.
+    let domains: Vec<String> = match conn
         .query("SELECT name FROM virtual_domains ORDER BY name")
         .await
-        .unwrap_or_default();
+    {
+        Ok(domains) => domains,
+        Err(e) => {
+            tracing::warn!(error = %e, "mail sni: the mail domains could not be read; maps left as they are");
+            return None;
+        }
+    };
     drop(conn);
 
     let mut postfix_lines = String::new();
