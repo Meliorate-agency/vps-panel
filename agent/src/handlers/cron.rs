@@ -137,13 +137,44 @@ fn is_safe_id(s: &str) -> bool {
     re.is_match(s)
 }
 
+/// Five fields cron itself accepts. Only the characters used to be checked,
+/// so `0 25 * * *` or `*/0 * * * *` was saved and listed, and cron then
+/// refused the whole file ("bad hour"): the job never ran.
 fn is_valid_cron_spec(s: &str) -> bool {
+    // minute, hour, day of month, month, day of week (7 is Sunday too).
+    const RANGES: [(u32, u32); 5] = [(0, 59), (0, 23), (1, 31), (1, 12), (0, 7)];
     let parts: Vec<&str> = s.split_whitespace().collect();
-    if parts.len() != 5 {
+    parts.len() == 5
+        && parts
+            .iter()
+            .zip(RANGES)
+            .all(|(field, (lo, hi))| field.split(',').all(|item| is_valid_cron_item(item, lo, hi)))
+}
+
+/// One list item of a field: `*`, `N` or `N-M`, each with an optional `/step`.
+fn is_valid_cron_item(item: &str, lo: u32, hi: u32) -> bool {
+    // Digits only: `parse` alone would take a leading `+`.
+    let digits = |s: &str| -> Option<u32> {
+        if s.is_empty() || !s.bytes().all(|b| b.is_ascii_digit()) {
+            return None;
+        }
+        s.parse().ok()
+    };
+    let number = |s: &str| digits(s).filter(|n| (lo..=hi).contains(n));
+    let (range, step) = match item.split_once('/') {
+        Some((range, step)) => (range, Some(step)),
+        None => (item, None),
+    };
+    if step.is_some_and(|s| !digits(s).is_some_and(|n| n >= 1)) {
         return false;
     }
-    let allowed = regex::Regex::new(r"^[0-9*/,\-]+$").unwrap();
-    parts.iter().all(|p| allowed.is_match(p))
+    if range == "*" {
+        return true;
+    }
+    match range.split_once('-') {
+        Some((from, to)) => matches!((number(from), number(to)), (Some(a), Some(b)) if a <= b),
+        None => number(range).is_some(),
+    }
 }
 
 /// Cron turns an unescaped `%` into a newline and feeds the rest to stdin,
@@ -191,7 +222,7 @@ fn sanitize_label(s: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{escape_percent, parse_job_line};
+    use super::{escape_percent, is_valid_cron_spec, parse_job_line};
 
     #[test]
     fn env_lines_and_comments_are_not_jobs() {
@@ -208,6 +239,42 @@ mod tests {
         assert_eq!(schedule, "0 3 * * *");
         assert_eq!(user, "root");
         assert_eq!(command, "tar czf /b/$(date +%F).tgz  /srv");
+    }
+
+    #[test]
+    fn schedule_fields_are_checked_the_way_cron_reads_them() {
+        for ok in [
+            "* * * * *",
+            "*/5 * * * *",
+            "0 3 * * 0",
+            "30 4 1,15 * 7",
+            "0-30/10 9-17 * 1-12 1-5",
+            " 15   2 * * * ",
+        ] {
+            assert!(is_valid_cron_spec(ok), "{ok} should be accepted");
+        }
+        for bad in [
+            "",
+            "* * * *",
+            "* * * * * *",
+            "60 * * * *",
+            "0 24 * * *",
+            "0 0 0 * *",
+            "0 0 32 * *",
+            "0 0 * 13 *",
+            "0 0 * * 8",
+            "*/0 * * * *",
+            "30-10 * * * *",
+            "1,,2 * * * *",
+            "1, * * * *",
+            "- * * * *",
+            "/5 * * * *",
+            "+5 * * * *",
+            "5- * * * *",
+            "@daily",
+        ] {
+            assert!(!is_valid_cron_spec(bad), "{bad} should be refused");
+        }
     }
 
     #[test]
