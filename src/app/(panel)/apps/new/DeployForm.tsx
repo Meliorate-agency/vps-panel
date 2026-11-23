@@ -540,7 +540,10 @@ export default function DeployForm({
       </div>
 
       {state?.ok && state.data?.taskId && (
+        // Keyed by task: each step starts with an empty log and its own
+        // status, not the previous step's lines under the new task's id.
         <TaskProgress
+          key={state.data.taskId}
           taskId={state.data.taskId}
           onComplete={(s) => {
             // Re-probe the folder state regardless of which step ran — Pull
