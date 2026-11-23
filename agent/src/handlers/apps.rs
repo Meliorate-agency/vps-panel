@@ -1638,6 +1638,9 @@ pub async fn delete(
     // Read before anything is removed: it names the container, image tags and
     // volumes to clean up.
     let docker = docker_apps::read_config(&name).await;
+    // Also before the unit file goes: with no panel.db row it is where the
+    // app's folder comes from, and its vhost was left behind.
+    let (subdomain, _, source_dir) = lookup_app(&state, &name).await.unwrap_or_default();
     let unit = format!("{VPS_APP_PREFIX}{name}.service");
     let _ = exec::run("systemctl", ["stop", &unit]).await;
     let _ = exec::run("systemctl", ["disable", &unit]).await;
@@ -1646,13 +1649,16 @@ pub async fn delete(
     let env_path = PathBuf::from(format!("/etc/vps-panel/apps/{name}.env"));
     let _ = fs_atomic::remove_if_exists(&env_path).await;
 
-    let (subdomain, _, source_dir) = lookup_app(&state, &name).await.unwrap_or_default();
     // Only the app's own `# vps-app:<name>` vhost: a file of that name that
     // the app did not write (a hand-made vhost) used to be deleted too.
     if !subdomain.is_empty() {
         remove_app_vhost(&name, &subdomain).await;
     }
     let _ = exec::run("systemctl", ["daemon-reload"]).await;
+    // systemd keeps a failed unit in memory after its file is gone: an app
+    // deleted while it was crash-looping stayed in the Apps list as a row
+    // that opened a 404.
+    let _ = exec::run("systemctl", ["reset-failed", &unit]).await;
 
     // `wipe` also means a Docker app's data volumes. One from a registry has
     // no checkout; one built from Git goes on like a Node app (mirror, folder).
@@ -1676,12 +1682,23 @@ pub async fn delete(
         } else {
             format!("{APPS_BASE_DIR}/{name}")
         };
-        if dir.starts_with(&format!("{APPS_BASE_DIR}/")) && PathBuf::from(&dir).is_dir() {
+        if is_wipeable_app_dir(&dir) && PathBuf::from(&dir).is_dir() {
             let _ = tokio::fs::remove_dir_all(&dir).await;
         }
     }
 
     Ok(Json(OkResponse::default()))
+}
+
+/// A folder of its own under /srv/apps. The prefix alone also passed
+/// `/srv/apps/` itself (every app) and `/srv/apps/../etc`.
+fn is_wipeable_app_dir(dir: &str) -> bool {
+    dir.strip_prefix(APPS_BASE_DIR)
+        .and_then(|rest| rest.strip_prefix('/'))
+        .is_some_and(|rest| {
+            let rest = rest.trim_end_matches('/');
+            !rest.is_empty() && rest.split('/').all(|seg| !seg.is_empty() && seg != "." && seg != "..")
+        })
 }
 
 /// Start = enable + start: the app comes back after a reboot until the
@@ -3132,6 +3149,15 @@ mod tests {
         assert_eq!(app_name_of_unit("vps-app-shop-test.service"), Some("shop-test"));
         for other in ["vps-app-.service", "vps-app-.service.d", "nginx.service", "vps-app-shop.service.bak", "vps-app-Shop.service"] {
             assert_eq!(app_name_of_unit(other), None, "{other}");
+        }
+    }
+
+    #[test]
+    fn only_a_folder_of_its_own_under_srv_apps_is_wiped() {
+        assert!(is_wipeable_app_dir("/srv/apps/shop"));
+        assert!(is_wipeable_app_dir("/srv/apps/shop/"));
+        for bad in ["/srv/apps", "/srv/apps/", "/srv/apps/../etc", "/srv/apps/shop/../..", "/srv/appsx/shop", "/etc", "", "/srv/apps//"] {
+            assert!(!is_wipeable_app_dir(bad), "{bad:?} must not be wiped");
         }
     }
 }
