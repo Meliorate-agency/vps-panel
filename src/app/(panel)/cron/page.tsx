@@ -1,5 +1,6 @@
 import { agent } from "@/lib/agent";
 import Table from "@/components/Table/Table";
+import ConfirmDeleteButton from "@/components/ConfirmDeleteButton/ConfirmDeleteButton";
 import styles from "@/components/page.module.css";
 import { createCronAction, deleteCronAction } from "@/server-actions/cron";
 import CronForm from "./CronForm";
@@ -42,9 +43,21 @@ export default async function CronPage() {
           user: j.user,
           command: <span className={styles.code}>{j.command}</span>,
           actions: (
-            <form action={deleteCronAction.bind(null, j.id)}>
-              <button type="submit" className={styles.btnDanger}>Delete</button>
-            </form>
+            <ConfirmDeleteButton
+              action={deleteCronAction.bind(null, j.id)}
+              title={j.label ? `Delete cron job "${j.label}"?` : "Delete cron job?"}
+              buttonLabel="Delete"
+              confirmLabel="Delete job"
+              body={
+                <p>
+                  <code className={styles.code}>
+                    {j.schedule} {j.command}
+                  </code>{" "}
+                  stops running as <strong>{j.user}</strong>: its file in{" "}
+                  <span className={styles.code}>/etc/cron.d</span> is removed.
+                </p>
+              }
+            />
           ),
         }))}
         empty="No cron jobs yet."
