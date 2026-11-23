@@ -32,7 +32,7 @@ type MailboxListShape = { server: string; mailboxes: { id: number; email: string
 export default async function MailboxesPage() {
   const knownDomains = mailboxDomains();
 
-  const [mailboxResp, sysinfo, recipes, aliases, mailDomains] = await Promise.all([
+  const [mailboxResp, sysinfo, recipes, aliases, mailDomains, mailIp] = await Promise.all([
     agent.mail
       .listMailboxes()
       .then<MailboxListShape>((r: unknown) => {
@@ -51,6 +51,8 @@ export default async function MailboxesPage() {
     agent.quickInstall.list().catch(() => null),
     agent.mail.listAliases().catch((): MailAliasRow[] => []),
     agent.mail.listDomains().catch((): MailDomainRow[] => []),
+    // Only for one line in the connection card; left out when it fails.
+    agent.mail.ipSettings().catch(() => null),
   ]);
 
   const { server, mailboxes } = mailboxResp;
@@ -110,7 +112,7 @@ export default async function MailboxesPage() {
         </div>
       </div>
 
-      <MailServerInfo server={server} />
+      <MailServerInfo server={server} mailIp={mailIp} />
 
       <div className={styles.section}>
         <h2 className={styles.sectionTitle}>Add mailbox</h2>

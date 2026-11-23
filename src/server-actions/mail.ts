@@ -1,13 +1,21 @@
 "use server";
 
 import { revalidatePath } from "next/cache";
-import { agent } from "@/lib/agent";
+import { agent, AgentError } from "@/lib/agent";
 import { requireAdmin } from "@/lib/auth";
 import { writeAudit } from "@/lib/audit";
-import { agentErrorMessage } from "@/lib/redirects";
+import { agentErrorMessage, isSafeDomain } from "@/lib/redirects";
 import { mailboxDomains } from "@/lib/mailboxDomains";
 import type { SslTaskResult } from "@/lib/sslTaskResult";
-import type { MailTrackResp } from "@/lib/agent";
+import type {
+  MailDomainDnsCheck,
+  MailIpCheck,
+  MailIpDomain,
+  MailIpPreference,
+  MailIpProtocol,
+  MailIpSettings,
+  MailTrackResp,
+} from "@/lib/agent";
 
 export type ActionResult<T = undefined> =
   | { ok: true; data?: T }
@@ -227,5 +235,146 @@ export async function ensureMailSslAction(domain: string): Promise<SslTaskResult
       message: msg,
     });
     return { ok: false, error: msg };
+  }
+}
+
+// ─── Outgoing mail over IPv4 or IPv6 ─────────────────────────────────────
+
+/** A write the agent may refuse with 409 because the IPv6 side is not ready:
+ *  `needsForce` asks the operator to confirm and send it again with force. */
+export type MailIpWriteResult<T> =
+  | { ok: true; data: T }
+  | { ok: false; error: string; needsForce?: boolean };
+
+export type MailIpReadResult<T> = { ok: true; data: T } | { ok: false; error: string };
+
+const IP_PROTOCOLS: readonly string[] = ["ipv4", "ipv6"] satisfies MailIpProtocol[];
+const IP_PREFERENCES: readonly string[] = ["default", "ipv4", "ipv6"] satisfies MailIpPreference[];
+const PREFERENCE_TEXT: Record<MailIpPreference, string> = {
+  default: "server default",
+  ipv4: "IPv4 first",
+  ipv6: "IPv6 first",
+};
+
+/** The agent's message without its "conflict: " style prefix. An agent
+ *  older than this setting answers these routes with a bare 404. */
+function mailIpError(e: unknown, domain?: string): string {
+  if (e instanceof AgentError && e.status === 404) {
+    if (!e.body) {
+      return "The agent on this server does not have this setting yet. Update the panel, then try again.";
+    }
+    if (domain) return `${domain} is not a mail domain on this server.`;
+  }
+  return agentErrorMessage(e).replace(/^(conflict|invalid input): /, "");
+}
+
+/** Server-wide: which protocol outgoing mail tries first. `force` is only
+ *  true after the operator confirmed past the agent's 409. */
+export async function setMailIpDefaultAction(
+  protocol: string,
+  force: boolean,
+): Promise<MailIpWriteResult<MailIpSettings>> {
+  const s = await requireAdmin();
+  if (!IP_PROTOCOLS.includes(protocol)) return { ok: false, error: "Choose IPv4 or IPv6." };
+  const forced = force === true;
+  try {
+    const data = await agent.mail.setIpSettings({
+      default_protocol: protocol as MailIpProtocol,
+      ...(forced ? { force: true } : {}),
+    });
+    writeAudit({
+      actorId: s.userId,
+      action: "mail.ip.default.set",
+      target: protocol,
+      result: "ok",
+      message: forced ? "applied although IPv6 was not ready" : undefined,
+    });
+    revalidatePath("/settings");
+    revalidatePath("/mailboxes");
+    return { ok: true, data };
+  } catch (e: unknown) {
+    const error = mailIpError(e);
+    // Refused because IPv6 is not ready: nothing changed, the operator decides.
+    if (e instanceof AgentError && e.status === 409 && !forced) {
+      return { ok: false, error, needsForce: true };
+    }
+    writeAudit({
+      actorId: s.userId,
+      action: "mail.ip.default.set",
+      target: protocol,
+      result: "error",
+      message: error,
+    });
+    return { ok: false, error };
+  }
+}
+
+/** One mail domain: follow the server default, or a protocol of its own. */
+export async function setMailDomainIpAction(
+  domain: string,
+  preference: string,
+  force: boolean,
+): Promise<MailIpWriteResult<MailIpDomain>> {
+  const s = await requireAdmin();
+  const name = String(domain ?? "").trim().toLowerCase();
+  if (!isSafeDomain(name)) return { ok: false, error: "Not a valid domain name." };
+  if (!IP_PREFERENCES.includes(preference)) {
+    return { ok: false, error: "Choose the server default, IPv4 or IPv6." };
+  }
+  const forced = force === true;
+  try {
+    const data = await agent.mail.setDomainIpPreference(name, {
+      preference: preference as MailIpPreference,
+      ...(forced ? { force: true } : {}),
+    });
+    writeAudit({
+      actorId: s.userId,
+      action: "mail.ip.domain.set",
+      target: name,
+      result: "ok",
+      message:
+        PREFERENCE_TEXT[preference as MailIpPreference] +
+        (forced ? ", applied although IPv6 was not ready" : ""),
+    });
+    revalidatePath("/settings");
+    revalidatePath("/mailboxes");
+    return { ok: true, data };
+  } catch (e: unknown) {
+    const error = mailIpError(e, name);
+    if (e instanceof AgentError && e.status === 409 && !forced) {
+      return { ok: false, error, needsForce: true };
+    }
+    writeAudit({
+      actorId: s.userId,
+      action: "mail.ip.domain.set",
+      target: name,
+      result: "error",
+      message: error,
+    });
+    return { ok: false, error };
+  }
+}
+
+/** Live check of both protocols (reverse DNS and so on). Slow: DNS lookups. */
+export async function mailIpCheckAction(): Promise<MailIpReadResult<MailIpCheck>> {
+  await requireAdmin();
+  try {
+    return { ok: true, data: await agent.mail.ipCheck() };
+  } catch (e: unknown) {
+    return { ok: false, error: mailIpError(e) };
+  }
+}
+
+/** Live check of one mail domain's DNS records for both protocols. Slow. */
+export async function mailDomainDnsCheckAction(
+  domain: string,
+): Promise<MailIpReadResult<MailDomainDnsCheck>> {
+  await requireAdmin();
+  const name = String(domain ?? "").trim().toLowerCase();
+  if (!isSafeDomain(name)) return { ok: false, error: "Not a valid domain name." };
+  try {
+    return { ok: true, data: await agent.mail.domainDnsCheck(name) };
+  } catch (e: unknown) {
+    return { ok: false, error: mailIpError(e, name) };
   }
 }

@@ -397,6 +397,30 @@ export const agent = {
         path: "/mail/track",
         query: { address, days },
       }),
+    /** Outgoing mail over IPv4 or IPv6: the server default and every domain's
+     *  choice. No network lookups. */
+    ipSettings: () => agentRequest<MailIpSettings>({ method: "GET", path: "/mail/ip-settings" }),
+    /** 409 when `ipv6` is chosen while the IPv6 side is not ready, unless
+     *  `force` is true. */
+    setIpSettings: (body: { default_protocol: MailIpProtocol; force?: boolean }) =>
+      agentRequest<MailIpSettings>({ method: "PUT", path: "/mail/ip-settings", body }),
+    setDomainIpPreference: (
+      name: string,
+      body: { preference: MailIpPreference; force?: boolean },
+    ) =>
+      agentRequest<MailIpDomain>({
+        method: "PUT",
+        path: `/mail/domains/${encodeURIComponent(name)}/ip-preference`,
+        body,
+      }),
+    // The two checks do live DNS lookups and can take several seconds.
+    // agentRequest sets no timeout, so they are not cut short.
+    ipCheck: () => agentRequest<MailIpCheck>({ method: "GET", path: "/mail/ip-check" }),
+    domainDnsCheck: (name: string) =>
+      agentRequest<MailDomainDnsCheck>({
+        method: "GET",
+        path: `/mail/domains/${encodeURIComponent(name)}/dns-check`,
+      }),
   },
 
   databases: {
@@ -1357,7 +1381,64 @@ export type ReconcileZoneResp = {
   non_standard_extras: string[];
 };
 
-export type MailDomainRow = { id: number; name: string; mailboxes: number };
+export type MailDomainRow = {
+  id: number;
+  name: string;
+  mailboxes: number;
+  /** Which protocol this domain's outgoing mail uses. Missing from an agent
+   *  older than the IPv4 / IPv6 setting. */
+  ip_preference?: MailIpPreference;
+};
+
+/** Outgoing mail: the IP protocol Postfix tries first; the other is the fallback. */
+export type MailIpProtocol = "ipv4" | "ipv6";
+/** Per mail domain: follow the server-wide default, or a protocol of its own. */
+export type MailIpPreference = "default" | "ipv4" | "ipv6";
+export type MailIpDomain = {
+  name: string;
+  /** What is stored for the domain. */
+  preference: MailIpPreference;
+  /** What that resolves to right now. */
+  effective: MailIpProtocol;
+};
+export type MailIpSettings = {
+  default_protocol: MailIpProtocol;
+  /** Public IPv4 mail leaves from and A / SPF publish. */
+  server_ipv4: string | null;
+  /** Public IPv6 mail leaves from and AAAA / SPF publish; null = none usable. */
+  server_ipv6: string | null;
+  /** Every mail domain, sorted by name. */
+  domains: MailIpDomain[];
+  /** Plain sentences, shown as they are under the setting. */
+  notes: string[];
+};
+export type MailCheckStatus = "ok" | "warn" | "fail";
+export type MailCheckItem = {
+  /** Stable id, e.g. "ptr", "spf", "aaaa". */
+  id: string;
+  label: string;
+  status: MailCheckStatus;
+  /** What was found and, when not ok, what to do about it. */
+  detail: string;
+};
+export type MailIpFamilyCheck = {
+  address: string | null;
+  /** address is set and no check failed */
+  ready: boolean;
+  checks: MailCheckItem[];
+};
+export type MailIpCheck = {
+  /** The name Postfix introduces itself with (myhostname). */
+  helo_host: string;
+  ipv4: MailIpFamilyCheck;
+  ipv6: MailIpFamilyCheck;
+};
+export type MailDomainDnsCheck = {
+  domain: string;
+  /** The zone is in this panel's PowerDNS, so Reconcile zone can repair it. */
+  managed: boolean;
+  checks: MailCheckItem[];
+};
 export type MailDomainCreateResp = {
   name: string;
   dkim_status: string;

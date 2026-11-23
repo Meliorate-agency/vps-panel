@@ -64,6 +64,7 @@ import HostnameForm from "./HostnameForm";
 import { setServerHostnameAction } from "@/server-actions/hostname";
 import { isIP } from "node:net";
 import SettingsTabs from "./SettingsTabs";
+import MailIpSection, { loadMailIpSettings } from "./MailIpSection";
 
 export const dynamic = "force-dynamic";
 
@@ -99,6 +100,7 @@ export default async function SettingsPage() {
     .catch((e: unknown) => ({ error: e instanceof Error ? e.message : String(e) }));
   // Offered as the server hostname in one click; not in IP-only mode.
   const panelHostName = config.panelHost && !isIP(config.panelHost) ? config.panelHost : null;
+  const mailIp = await loadMailIpSettings();
   const pdnsZones = await agent.dns.listZones().catch(() => []);
   // Cert status for the panel host so PanelHostForm can show "SSL · Nd"
   // instead of just an "Issue cert" button when a cert already exists.
@@ -418,6 +420,12 @@ export default async function SettingsPage() {
                   </div>
             </>
           ),
+        },
+        {
+          id: "mail",
+          label: "Mail",
+          anchors: ["mail-ip"],
+          content: <MailIpSection settings={mailIp} />,
         },
         {
           id: "dns",

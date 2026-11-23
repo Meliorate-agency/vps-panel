@@ -1,6 +1,25 @@
 import "server-only";
 import { agent } from "@/lib/agent";
-import { optionalNumber, optionalString, requireString, type Tool } from "../types";
+import {
+  optionalBoolean,
+  optionalNumber,
+  optionalString,
+  requireString,
+  type Tool,
+} from "../types";
+
+/** The route does not enforce a schema's enum, so check it here. */
+function requireOneOf<T extends string>(
+  args: Record<string, unknown>,
+  key: string,
+  allowed: readonly T[],
+): T {
+  const v = requireString(args, key);
+  if (!(allowed as readonly string[]).includes(v)) {
+    throw new Error(`argument ${key} must be one of: ${allowed.join(", ")}`);
+  }
+  return v as T;
+}
 
 export const TOOLS: Tool[] = [
   {
@@ -154,5 +173,94 @@ export const TOOLS: Tool[] = [
     },
     call: async (args) =>
       agent.mail.trackDelivery(requireString(args, "address"), optionalNumber(args, "days") ?? 3),
+  },
+  {
+    page: "Mailboxes",
+    name: "mail.ip_settings",
+    description:
+      "Which IP protocol outgoing mail uses: the server-wide default_protocol (ipv4 or ipv6; the other is the fallback), the server's public IPv4 and IPv6 addresses (server_ipv6 null = none usable), and every mail domain's preference (default, ipv4 or ipv6) with what it resolves to (effective). Receiving mail is not affected. Fast, no DNS lookups.",
+    inputSchema: { type: "object", properties: {}, additionalProperties: false },
+    call: async () => agent.mail.ipSettings(),
+  },
+  {
+    page: "Mailboxes",
+    name: "mail.ip_check",
+    description:
+      "Live check of whether each protocol is fit to send mail from: for the server's IPv4 and IPv6 address, items such as reverse DNS (PTR) and the HELO name, each ok / warn / fail with a plain explanation; ready = has an address and no item failed. Slow: live DNS lookups, several seconds.",
+    inputSchema: { type: "object", properties: {}, additionalProperties: false },
+    call: async () => agent.mail.ipCheck(),
+  },
+  {
+    page: "Mailboxes",
+    name: "mail.domain_dns_check",
+    description:
+      "Live check of one mail domain's DNS records for both protocols (MX, A / AAAA, SPF, DKIM, DMARC and so on), each ok / warn / fail with a plain explanation. managed = the zone is hosted in this panel's DNS, so Reconcile zone on the domain's page can repair the records. Slow: live DNS lookups.",
+    inputSchema: {
+      type: "object",
+      properties: { name: { type: "string", description: "Mail domain (apex, e.g. example.com)." } },
+      required: ["name"],
+      additionalProperties: false,
+    },
+    call: async (args) => agent.mail.domainDnsCheck(requireString(args, "name")),
+  },
+  {
+    page: "Mailboxes",
+    name: "mail.set_default_ip_protocol",
+    description:
+      "Set the protocol outgoing mail tries first, server-wide: ipv4 (the panel's default) or ipv6; the other is the fallback. Choosing ipv6 while the IPv6 side is not ready (see mail.ip_check) is refused with a conflict that says what is wrong; pass force=true only when the operator has decided to apply it anyway. Returns the new settings.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        protocol: { type: "string", enum: ["ipv4", "ipv6"], description: "Protocol to try first." },
+        force: {
+          type: "boolean",
+          description: "Apply ipv6 although IPv6 is not ready. Never needed for ipv4.",
+          default: false,
+        },
+      },
+      required: ["protocol"],
+      additionalProperties: false,
+    },
+    call: async (args) => {
+      const protocol = requireOneOf(args, "protocol", ["ipv4", "ipv6"] as const);
+      const force = optionalBoolean(args, "force") === true;
+      return agent.mail.setIpSettings({
+        default_protocol: protocol,
+        ...(force ? { force: true } : {}),
+      });
+    },
+  },
+  {
+    page: "Mailboxes",
+    name: "mail.set_domain_ip_preference",
+    description:
+      "Set which protocol mail from one mail domain goes out over: default (follow the server-wide choice), ipv4 or ipv6. Choosing ipv6 while the IPv6 side is not ready is refused with a conflict that says what is wrong; pass force=true only when the operator has decided to apply it anyway. Returns the domain's preference and what it resolves to.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        name: { type: "string", description: "Mail domain (apex, e.g. example.com)." },
+        preference: {
+          type: "string",
+          enum: ["default", "ipv4", "ipv6"],
+          description: "default = follow the server-wide protocol.",
+        },
+        force: {
+          type: "boolean",
+          description: "Apply ipv6 although IPv6 is not ready. Never needed for ipv4 or default.",
+          default: false,
+        },
+      },
+      required: ["name", "preference"],
+      additionalProperties: false,
+    },
+    call: async (args) => {
+      const name = requireString(args, "name");
+      const preference = requireOneOf(args, "preference", ["default", "ipv4", "ipv6"] as const);
+      const force = optionalBoolean(args, "force") === true;
+      return agent.mail.setDomainIpPreference(name, {
+        preference,
+        ...(force ? { force: true } : {}),
+      });
+    },
   },
 ];

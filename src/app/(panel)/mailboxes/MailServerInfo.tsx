@@ -1,7 +1,18 @@
+import Link from "next/link";
 import styles from "@/components/page.module.css";
+import type { MailIpSettings } from "@/lib/agent";
 import localStyles from "./mailboxes.module.css";
 
-export default function MailServerInfo({ server }: { server: string }) {
+const PROTOCOL_NAME = { ipv4: "IPv4", ipv6: "IPv6" } as const;
+
+export default function MailServerInfo({
+  server,
+  mailIp,
+}: {
+  server: string;
+  /** null when the agent could not say; the line is left out then. */
+  mailIp: MailIpSettings | null;
+}) {
   if (!server) return null;
   return (
     <div className={localStyles.serverInfo}>
@@ -45,6 +56,31 @@ export default function MailServerInfo({ server }: { server: string }) {
           </tr>
         </tbody>
       </table>
+      {mailIp && <OutgoingProtocol settings={mailIp} />}
     </div>
+  );
+}
+
+/** One line: which protocol outgoing mail uses, and where to change it. */
+function OutgoingProtocol({ settings }: { settings: MailIpSettings }) {
+  const first = settings.default_protocol;
+  const other = first === "ipv4" ? "ipv6" : "ipv4";
+  const differ = (settings.domains ?? []).filter((d) => d.effective !== first).length;
+  const noV6 = first === "ipv4" && !settings.server_ipv6 && differ === 0;
+  return (
+    <p className={localStyles.muted} style={{ margin: "10px 0 0" }}>
+      {noV6 ? (
+        <>Outgoing mail goes out over IPv4; this server has no public IPv6 address. </>
+      ) : (
+        <>
+          Outgoing mail goes out over {PROTOCOL_NAME[first]} first, {PROTOCOL_NAME[other]} as the
+          fallback
+          {differ > 0 &&
+            `, except from ${differ} ${differ === 1 ? "domain" : "domains"} set to ${PROTOCOL_NAME[other]}`}
+          .{" "}
+        </>
+      )}
+      <Link href="/settings?tab=mail#mail-ip">Change in Settings</Link>
+    </p>
   );
 }
