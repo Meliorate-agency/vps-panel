@@ -114,7 +114,10 @@ export async function createPgRoleAction(
 ): Promise<ActionResult<{ password: string; user: string }>> {
   const s = await requireAdmin();
   const user = String(fd.get("user") ?? "").trim();
-  const password = String(fd.get("password") ?? "").trim() || undefined;
+  // Blank means "generate one". A typed password is used as typed: trimming
+  // it set a different password from the one the form showed.
+  const typed = String(fd.get("password") ?? "");
+  const password = typed.trim() === "" ? undefined : typed;
   const superuser = String(fd.get("superuser") ?? "") === "on";
   try {
     const resp = await agent.postgres.createRole({ user, password, superuser });

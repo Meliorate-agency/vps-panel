@@ -160,8 +160,9 @@ async function deployDockerApp(fd: FormData): Promise<ActionResult<{ taskId: str
       .split(/\r?\n/)
       .map((v) => v.trim())
       .filter(Boolean),
-    memory_mb: Number(fd.get("memory_mb") ?? 1024),
-    cpus: Number(fd.get("cpus") ?? 1),
+    // An emptied field means the default, not 0 (which is "no limit").
+    memory_mb: Number(String(fd.get("memory_mb") ?? "").trim() || 1024),
+    cpus: Number(String(fd.get("cpus") ?? "").trim() || 1),
     build: fromGit
       ? {
           context: String(fd.get("context") ?? "").trim() || ".",

@@ -85,7 +85,10 @@ export async function createDbUserAction(
   const s = await requireAdmin();
   const user = String(fd.get("user") ?? "").trim();
   const host = String(fd.get("host") ?? "localhost").trim();
-  const password = String(fd.get("password") ?? "").trim() || undefined;
+  // Blank means "generate one". A typed password is used as typed: trimming
+  // it set a different password from the one the form showed.
+  const typed = String(fd.get("password") ?? "");
+  const password = typed.trim() === "" ? undefined : typed;
   try {
     const resp = await agent.databases.createUser({ user, host, password });
     writeAudit({ actorId: s.userId, action: "db.users.create", target: `${user}@${host}`, result: "ok" });
