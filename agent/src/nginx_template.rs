@@ -71,3 +71,62 @@ pub struct SiteVhostTemplate<'a> {
     pub key_path: &'a str,
     pub acme_webroot: &'a str,
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn site(force_www_redirect: bool, ssl_enabled: bool) -> String {
+        SiteVhostTemplate {
+            domain: "example.com",
+            mode: "port",
+            upstream_port: Some(3000),
+            folder_path: None,
+            force_www_redirect,
+            ssl_enabled,
+            cert_path: "/c/fullchain.pem",
+            key_path: "/c/privkey.pem",
+            acme_webroot: ACME_WEBROOT,
+        }
+        .render()
+        .unwrap()
+    }
+
+    /// HSTS is for the name that sent it. With includeSubDomains one HTTPS
+    /// site on example.com made browsers refuse every HTTP-only site or app
+    /// on a subdomain of it for two years.
+    #[test]
+    fn hsts_covers_the_vhosts_own_name_only() {
+        let app = AppVhostTemplate {
+            name: "shop",
+            server_name: "shop.example.com",
+            upstream_port: 3000,
+            ssl_enabled: true,
+            cert_path: "/c/fullchain.pem",
+            key_path: "/c/privkey.pem",
+            acme_webroot: ACME_WEBROOT,
+        }
+        .render()
+        .unwrap();
+        let panel = PanelVhostTemplate {
+            server_name: "panel.example.com",
+            default_server: true,
+            ssl_enabled: true,
+            cert_path: "/c/fullchain.pem",
+            key_path: "/c/privkey.pem",
+            acme_webroot: ACME_WEBROOT,
+            peer_location: PEER_API_LOCATION,
+        }
+        .render()
+        .unwrap();
+        for (what, body) in [("site", site(true, true)), ("app", app), ("panel", panel)] {
+            assert_eq!(
+                body.matches("add_header Strict-Transport-Security \"max-age=63072000\" always;").count(),
+                1,
+                "{what}"
+            );
+            assert!(!body.contains("includeSubDomains"), "{what}");
+        }
+        assert!(!site(true, false).contains("Strict-Transport-Security"));
+    }
+}
