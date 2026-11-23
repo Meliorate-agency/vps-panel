@@ -814,10 +814,18 @@ log "configuring UFW"
 # A re-run keeps the operator's rules. The reset here used to wipe every
 # port opened since (apps, a public database) and the rule for an SSH port
 # moved in Settings, locking SSH out.
+# The service ports (web, mail, DNS) are opened once: when ufw was not active
+# before this run, or was but the panel has never been installed here (its
+# unit is written near the end of a first run). A re-run used to open them
+# all again, also the ones the operator had closed since.
+UFW_OPEN_SERVICES=0
 if ! ufw status 2>/dev/null | grep -q "Status: active"; then
+  UFW_OPEN_SERVICES=1
   ufw --force reset >/dev/null
   ufw default deny incoming
   ufw default allow outgoing
+elif [[ ! -f /etc/systemd/system/vps-panel.service ]]; then
+  UFW_OPEN_SERVICES=1
 fi
 # The port(s) SSH really listens on: sshd's own (sshd -T needs /run/sshd), a
 # port set on ssh.socket (a drop-in there wins over what sshd -T reports) and
@@ -836,19 +844,26 @@ SSH_PORTS="$(
     echo "${SSH_SESSION##* }"
   } | grep -E '^[0-9]+$' | sort -un || true
 )"
+# Always, also on a re-run: without its rule SSH is locked out.
 for p in ${SSH_PORTS:-22}; do
   ufw allow "$p/tcp" comment 'ssh'
 done
-ufw allow 'Nginx Full'
-ufw allow 25/tcp comment 'smtp in'
-ufw allow 465/tcp comment 'smtps'
-ufw allow 587/tcp comment 'submission'
-ufw allow 993/tcp comment 'imaps'
-ufw allow 995/tcp comment 'pop3s'
-# ManageSieve for the Roundcube container only (Docker's 172.16.0.0/12).
+if [[ $UFW_OPEN_SERVICES -eq 1 ]]; then
+  ufw allow 'Nginx Full'
+  ufw allow 25/tcp comment 'smtp in'
+  ufw allow 465/tcp comment 'smtps'
+  ufw allow 587/tcp comment 'submission'
+  ufw allow 993/tcp comment 'imaps'
+  ufw allow 995/tcp comment 'pop3s'
+  ufw allow 53/tcp comment 'dns tcp'
+  ufw allow 53/udp comment 'dns udp'
+else
+  log "keeping the firewall rules for web, mail and DNS as they are"
+fi
+# ManageSieve for the Roundcube container only (Docker's 172.16.0.0/12). Not
+# a public port, and webmail's filters need it: added on every run, as
+# update.sh adds it back when it is missing.
 ufw allow from 172.16.0.0/12 to any port 4190 proto tcp comment 'managesieve (webmail)'
-ufw allow 53/tcp comment 'dns tcp'
-ufw allow 53/udp comment 'dns udp'
 ufw --force enable
 
 log "configuring fail2ban"

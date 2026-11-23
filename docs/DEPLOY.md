@@ -36,6 +36,8 @@ The script will:
 
 After it exits, point your DNS so `panel.example.com` resolves to the server, open the panel, log in, enroll TOTP, then go to Settings -> Issue cert for panel host.
 
+Running the installer again on an installed server keeps what was set since: the panel hostname, the secrets in `.env`, the database passwords, the SSH settings, the panel vhost, a Postfix smarthost (`relayhost`) and `mynetworks`, and the firewall rules. It opens the web, mail and DNS ports only on a first install; on a re-run a port you closed stays closed, and it only makes sure SSH is allowed.
+
 ## Update
 
 The Update button in the panel's top bar, or by hand:
