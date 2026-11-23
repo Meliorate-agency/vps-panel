@@ -67,6 +67,9 @@ pub struct SiteVhostTemplate<'a> {
     pub folder_path: Option<&'a str>,
     pub force_www_redirect: bool,
     pub ssl_enabled: bool,
+    /// The certificate lists `www.<domain>`. Without it the www block is
+    /// left out on 443: it would answer with a certificate for another name.
+    pub www_in_cert: bool,
     pub cert_path: &'a str,
     pub key_path: &'a str,
     pub acme_webroot: &'a str,
@@ -76,7 +79,7 @@ pub struct SiteVhostTemplate<'a> {
 mod tests {
     use super::*;
 
-    fn site(force_www_redirect: bool, ssl_enabled: bool) -> String {
+    fn site(force_www_redirect: bool, ssl_enabled: bool, www_in_cert: bool) -> String {
         SiteVhostTemplate {
             domain: "example.com",
             mode: "port",
@@ -84,6 +87,7 @@ mod tests {
             folder_path: None,
             force_www_redirect,
             ssl_enabled,
+            www_in_cert,
             cert_path: "/c/fullchain.pem",
             key_path: "/c/privkey.pem",
             acme_webroot: ACME_WEBROOT,
@@ -119,7 +123,7 @@ mod tests {
         }
         .render()
         .unwrap();
-        for (what, body) in [("site", site(true, true)), ("app", app), ("panel", panel)] {
+        for (what, body) in [("site", site(true, true, true)), ("app", app), ("panel", panel)] {
             assert_eq!(
                 body.matches("add_header Strict-Transport-Security \"max-age=63072000\" always;").count(),
                 1,
@@ -127,6 +131,32 @@ mod tests {
             );
             assert!(!body.contains("includeSubDomains"), "{what}");
         }
-        assert!(!site(true, false).contains("Strict-Transport-Security"));
+        assert!(!site(true, false, false).contains("Strict-Transport-Security"));
+    }
+
+    /// The www block answers on 443 only with a certificate that lists
+    /// www.<domain>; port 80 for the name is there whenever the flag is.
+    #[test]
+    fn the_www_block_is_on_443_only_when_the_certificate_lists_www() {
+        let www_443 = "listen 443 ssl http2;\n    listen [::]:443 ssl http2;\n    server_name www.example.com;";
+        let www_80 = "listen 80;\n    listen [::]:80;\n    server_name www.example.com;";
+
+        let covered = site(true, true, true);
+        assert!(covered.contains(www_443));
+        assert!(covered.contains(www_80));
+        assert_eq!(covered.matches("ssl_certificate /c/fullchain.pem;").count(), 2);
+
+        let not_covered = site(true, true, false);
+        assert!(!not_covered.contains(www_443));
+        assert!(not_covered.contains(www_80));
+        assert!(not_covered.contains("return 301 https://example.com$request_uri;"));
+        assert_eq!(not_covered.matches("ssl_certificate /c/fullchain.pem;").count(), 1);
+        assert!(not_covered.contains("listen 443 ssl http2;\n    listen [::]:443 ssl http2;\n    server_name example.com;"));
+
+        // No certificate in use at all: nothing on 443, whatever the flag says.
+        let http_only = site(true, false, true);
+        assert!(!http_only.contains("listen 443"));
+        assert!(http_only.contains("return 301 http://example.com$request_uri;"));
+        assert!(!site(false, true, true).contains("server_name www.example.com;"));
     }
 }

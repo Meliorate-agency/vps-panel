@@ -206,9 +206,13 @@ async fn cert_covers_names(cert_path: &str, names: &[String]) -> bool {
         .all(|n| out.stdout.contains(&format!("DNS:{n}")))
 }
 
+/// The names the site's certificate must list. `www.<domain>` whenever the
+/// flag is set, because the vhost then has a www block: it used to be asked
+/// for two-label domains only, so on example.co.uk or a subdomain (the flag
+/// reaches those through the MCP tool) the block answered on 443 with a
+/// certificate that did not list the name.
 fn ssl_required_names(domain: &str, force_www_redirect: bool) -> Vec<String> {
-    let is_apex = domain.split('.').filter(|l| !l.is_empty()).count() == 2;
-    if force_www_redirect && is_apex {
+    if force_www_redirect {
         vec![domain.to_string(), format!("www.{domain}")]
     } else {
         vec![domain.to_string()]
@@ -225,6 +229,16 @@ async fn render_and_install(
     // never leave nginx pointing at a missing file. For freshly issued certs
     // the panel will have written to its own path by the time we render.
     let (cert_path, key_path) = existing_cert_paths(domain).unwrap_or_else(|| cert_paths(domain));
+    // The other half of ssl_required_names: a certificate without www (the
+    // one in use while a new one is ordered, or a renewal that had to leave
+    // the name out) gets no www block on 443.
+    let www_in_cert = ssl_enabled
+        && route.force_www_redirect
+        && crate::handlers::ssl::cert_covers(
+            std::path::Path::new(&cert_path),
+            &format!("www.{domain}"),
+        )
+        .await;
     let body = SiteVhostTemplate {
         domain,
         mode: &route.mode,
@@ -232,6 +246,7 @@ async fn render_and_install(
         folder_path: route.folder.as_deref(),
         force_www_redirect: route.force_www_redirect,
         ssl_enabled,
+        www_in_cert,
         cert_path: &cert_path,
         key_path: &key_path,
         acme_webroot: ACME_WEBROOT,
@@ -634,5 +649,21 @@ async fn covering_parent_cert(domain: &str) -> Option<(String, String)> {
         Some((full, parent.to_string()))
     } else {
         None
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ssl_required_names;
+
+    #[test]
+    fn the_certificate_is_asked_for_www_whenever_the_vhost_gets_a_www_block() {
+        for domain in ["example.com", "example.co.uk", "app.example.com"] {
+            assert_eq!(
+                ssl_required_names(domain, true),
+                vec![domain.to_string(), format!("www.{domain}")]
+            );
+            assert_eq!(ssl_required_names(domain, false), vec![domain.to_string()]);
+        }
     }
 }
