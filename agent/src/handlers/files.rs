@@ -127,6 +127,9 @@ const PROTECTED: &[&str] = &[
     // token; /var/lib/vps-panel holds panel.db AND the trash itself.
     "/etc/vps-panel",
     "/var/lib/vps-panel",
+    // The database dumps a backup takes (every database in plain SQL). They
+    // were under /var/lib/vps-panel; the Backups root is /var/backups.
+    "/var/backups/vps-panel-db-dumps",
     // Credentials and keys.
     "/etc/shadow",
     "/etc/gshadow",

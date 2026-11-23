@@ -64,7 +64,7 @@ Use the Update button or SSH, not the panel's own terminal: there the script is 
 bash /root/vps-panel-src/scripts/uninstall.sh
 ```
 
-Stops both services, removes systemd units, the panel's nginx vhost, the agent binary and `/opt/vps-panel`; leaves `/var/lib/vps-panel`, `/etc/vps-panel` and the MariaDB databases alone. `--purge` also removes the panel's own state: `/var/lib/vps-panel` (panel.db, the Files trash), its logs, `.env`, the agent token, the panel access list and the `panel` database. Certificates, app env files, the backup key and repository, the `pdns` and `mail` databases, site vhosts and app units stay: nginx, your apps, DNS and mail keep running on them.
+Stops both services, removes systemd units, the panel's nginx vhost, the agent binary and `/opt/vps-panel`; leaves `/var/lib/vps-panel`, `/etc/vps-panel` and the MariaDB databases alone. `--purge` also removes the panel's own state: `/var/lib/vps-panel` (panel.db, the Files trash), the plain-SQL database dumps in `/var/backups/vps-panel-db-dumps` (their encrypted copies stay in the repository), its logs, `.env`, the agent token, the panel access list and the `panel` database. Certificates, app env files, the backup key and repository, the `pdns` and `mail` databases, site vhosts and app units stay: nginx, your apps, DNS and mail keep running on them.
 
 ## Backups
 

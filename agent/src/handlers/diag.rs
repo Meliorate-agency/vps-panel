@@ -191,7 +191,7 @@ const FOLDERS: &[(&str, &str, FolderKind)] = &[
     ("/var/www", "Static websites", FolderKind::Data),
     ("/var/lib/vps-panel", "Panel data", FolderKind::Data),
     ("/var/lib/vps-panel/trash", "Files trash, emptied after 30 days", FolderKind::Data),
-    ("/var/lib/vps-panel/db-dumps", "Database dumps for backups", FolderKind::Data),
+    ("/var/backups/vps-panel-db-dumps", "Database dumps for backups", FolderKind::Data),
     ("/var/lib/vps-panel/build-snapshots", "Snapshots left by interrupted app builds", FolderKind::Leftover),
     ("/var/lib/vps-panel/.npm", "npm download cache of panel updates", FolderKind::Cache),
     ("/opt/vps-panel", "Panel install", FolderKind::System),

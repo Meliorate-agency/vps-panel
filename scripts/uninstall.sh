@@ -23,6 +23,13 @@ rm -f /usr/local/bin/vps-panel-agent /usr/local/bin/vps-panel-agent.prev
 rm -rf /var/backups/vps-panel-config/units.prev
 rm -rf /opt/vps-panel
 rm -rf /run/vps-panel
+# The agent orders MariaDB after Docker while phpMyAdmin has it listen on the
+# Docker bridge. Without the agent nothing maintains that drop-in.
+if [[ -f /etc/systemd/system/mariadb.service.d/10-vps-panel-docker.conf ]]; then
+  rm -f /etc/systemd/system/mariadb.service.d/10-vps-panel-docker.conf
+  rmdir /etc/systemd/system/mariadb.service.d 2>/dev/null || true
+  systemctl daemon-reload || true
+fi
 
 if [[ "$PURGE" -eq 1 ]]; then
   # Only the panel's own state. Other services keep running on the rest:
@@ -33,6 +40,9 @@ if [[ "$PURGE" -eq 1 ]]; then
   # mail dead. Backups stay too, with the key needed to read them.
   echo "purging panel state"
   rm -rf /var/lib/vps-panel /var/log/vps-panel
+  # The plain-SQL dumps a backup takes before restic picks them up. They used
+  # to go with /var/lib/vps-panel; the encrypted copies stay in the repository.
+  rm -rf /var/backups/vps-panel-db-dumps
   rm -f /etc/vps-panel/.env /etc/vps-panel/agent.token /etc/vps-panel/acme-account.json
   rm -f /etc/fail2ban/jail.d/zz-vps-panel-operator.conf
   # Settings > Panel access. Only the panel vhost (removed above) includes

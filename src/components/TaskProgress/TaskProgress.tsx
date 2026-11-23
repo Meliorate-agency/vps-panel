@@ -10,6 +10,9 @@ type Props = {
   onComplete?: (status: "succeeded" | "failed") => void;
 };
 
+/** Lines kept in the view; older ones scroll out. */
+const MAX_LINES = 6500;
+
 export default function TaskProgress({ taskId, onComplete }: Props) {
   const [lines, setLines] = useState<string[]>([]);
   const [status, setStatus] = useState<Status>("pending");
@@ -40,6 +43,7 @@ export default function TaskProgress({ taskId, onComplete }: Props) {
     let fellBack = false;
     atBottom.current = true;
     let pollTimer: number | undefined;
+    let flushTimer: number | undefined;
     const es = new EventSource(`/api/tasks/${encodeURIComponent(taskId)}/stream`);
 
     const finish = (s: Status) => {
@@ -83,8 +87,24 @@ export default function TaskProgress({ taskId, onComplete }: Props) {
         });
     };
 
+    // Lines are added in batches. One state update per line copied the whole
+    // log for every line, so watching a chatty build slowed the browser to a
+    // crawl. The agent keeps at most the first 1000 and last 5000 lines of a
+    // log; the view keeps the same order of size.
+    let batch: string[] = [];
+    const flush = () => {
+      flushTimer = undefined;
+      if (cancelled || batch.length === 0) return;
+      const add = batch;
+      batch = [];
+      setLines((prev) => {
+        const next = prev.concat(add);
+        return next.length > MAX_LINES ? next.slice(next.length - MAX_LINES) : next;
+      });
+    };
     es.addEventListener("line", (e) => {
-      setLines((prev) => [...prev, (e as MessageEvent).data]);
+      batch.push((e as MessageEvent).data);
+      if (flushTimer === undefined) flushTimer = window.setTimeout(flush, 100);
     });
     es.addEventListener("status", (e) => {
       const s = stripQuotes((e as MessageEvent).data);
@@ -93,18 +113,26 @@ export default function TaskProgress({ taskId, onComplete }: Props) {
     es.addEventListener("done", (e) => {
       const s = stripQuotes((e as MessageEvent).data) as Status;
       es.close();
+      // The last lines first, so the log is whole when the status changes.
+      if (flushTimer !== undefined) window.clearTimeout(flushTimer);
+      flush();
       finish(s);
     });
     es.onerror = () => {
       es.close();
       if (!fellBack) {
         fellBack = true;
+        // The poll replaces the log wholesale: drop what was still waiting.
+        if (flushTimer !== undefined) window.clearTimeout(flushTimer);
+        flushTimer = undefined;
+        batch = [];
         pollState(0);
       }
     };
     return () => {
       cancelled = true;
       if (pollTimer !== undefined) window.clearTimeout(pollTimer);
+      if (flushTimer !== undefined) window.clearTimeout(flushTimer);
       es.close();
     };
   }, [taskId]);
