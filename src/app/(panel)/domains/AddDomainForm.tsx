@@ -346,7 +346,10 @@ export default function AddDomainForm({
             SSL badge once the cert lands (or to a Retry button with the
             failure reason if pre-flight or ACME refuses).
           </div>
+          {/* Keyed by task: the next domain's log starts empty instead of
+              continuing the previous domain's. */}
           <TaskProgress
+            key={state.taskId}
             taskId={state.taskId}
             onComplete={(status) => {
               // Trigger a soft refresh so the row in the list table re-renders
