@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import type { NextRequest } from "next/server";
 import { jwtVerify } from "jose";
+import { contentSecurityPolicy, newNonce } from "@/lib/csp";
 import { originRefusal } from "@/lib/csrf";
 
 // Next 16 runs `proxy.ts` only when it sits next to the `app` directory. This
@@ -23,14 +24,15 @@ export async function proxy(req: NextRequest) {
     if (refused) return new NextResponse(refused.message, { status: refused.status });
   }
 
-  if (PUBLIC_PATHS.includes(pathname)) return NextResponse.next();
-
   // Server actions and API routes check the session themselves and answer in
   // a form their callers understand (a redirect() the client follows, a 401).
-  // A redirect from here would break both.
+  // A redirect from here would break both. Neither answers with a document,
+  // so they pass through as they are, under the policy next.config.ts sets.
   if (req.headers.has("next-action") || pathname.startsWith("/api/")) {
     return NextResponse.next();
   }
+
+  if (PUBLIC_PATHS.includes(pathname)) return page(req);
 
   const token = req.cookies.get(COOKIE_NAME)?.value;
   if (!token) return redirectToLogin(req);
@@ -46,10 +48,30 @@ export async function proxy(req: NextRequest) {
     if (payload.needsTotp && pathname !== "/totp") {
       return NextResponse.redirect(new URL("/totp", req.url));
     }
-    return NextResponse.next();
+    return page(req);
   } catch {
     return redirectToLogin(req);
   }
+}
+
+/**
+ * Lets a page request through with its own Content-Security-Policy: a fresh
+ * nonce, in the header the browser gets and in the request's copy of it.
+ * Next reads the nonce from the request and puts it on every script it
+ * emits (its bundles and the inline data it streams), so those run and an
+ * injected <script> does not. A server component that needs the nonce for a
+ * script of its own reads the x-nonce request header.
+ */
+function page(req: NextRequest): NextResponse {
+  const nonce = newNonce();
+  const csp = contentSecurityPolicy(nonce);
+  const headers = new Headers(req.headers);
+  headers.set("x-nonce", nonce);
+  headers.set("Content-Security-Policy", csp);
+  const res = NextResponse.next({ request: { headers } });
+  // In place of the nonce-less policy next.config.ts puts on every path.
+  res.headers.set("Content-Security-Policy", csp);
+  return res;
 }
 
 function redirectToLogin(req: NextRequest) {

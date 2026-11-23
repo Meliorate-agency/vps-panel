@@ -1,4 +1,5 @@
 import type { Metadata, Viewport } from "next";
+import { connection } from "next/server";
 import { getTabTitle, getThemeConfig } from "@/lib/accent";
 import { deriveTheme, themeVars } from "@/lib/theme";
 import "./globals.css";
@@ -34,6 +35,12 @@ export default async function RootLayout({
 }: Readonly<{
   children: React.ReactNode;
 }>) {
+  // Every page is rendered for its request, the built-in "not found" page
+  // included (the one page Next would otherwise build once, ahead of time).
+  // The scripts Next emits carry the nonce of that request's
+  // Content-Security-Policy (src/proxy.ts); a page built ahead of time has
+  // none, and the browser would refuse all of its scripts.
+  await connection();
   // The accent-derived palette rides on <html>'s style attribute rather than a
   // <style> block: an inline style always outranks the :root defaults in
   // globals.css, whichever order Next flushes the stylesheet link and the
