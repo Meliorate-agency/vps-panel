@@ -136,12 +136,33 @@ fn spawn_issue_task(state: &AppState, kind: &str, domain: String) -> AgentResult
         task.start();
         let acme_email = resolve_acme_email(&panel_db, &cfg);
         let names = desired_san_set(&state_clone, &domain).await;
-        if !run_acme_preflight(&state_clone, &names, &task).await {
+        // With a certificate for the name already on disk this is a
+        // renewal: it goes on when DNS is not ready for one of the other
+        // names (see renew_for_names). A first certificate is not ordered
+        // until every name it was asked for is ready.
+        let renewal = tokio::fs::try_exists(format!("/etc/vps-panel/certs/{domain}/fullchain.pem"))
+            .await
+            .unwrap_or(false);
+        let failed = acme_preflight_failures(&state_clone, &names, &task).await;
+        if failed.iter().any(|(name, _)| !renewal || *name == domain) {
+            log_preflight_failures(&preflight_lines(&failed), &task);
             task.finish(false);
             return;
         }
-        match issue_for_names(&cfg, &acme_email, &domain, &names, &task).await {
-            Ok(_) => {
+        if !failed.is_empty() {
+            task.log(
+                "renewing all the same: a name that cannot be validated is left out of the certificate",
+            );
+        }
+        let ordered = if renewal {
+            renew_for_names(&state_clone, &cfg, &acme_email, &domain, &names, &task)
+                .await
+                .map(|_| ())
+        } else {
+            issue_for_names(&cfg, &acme_email, &domain, &names, &task).await
+        };
+        match ordered {
+            Ok(()) => {
                 if let Err(e) = regenerate_mail_sni(&state_clone).await {
                     task.log(format!("mail sni regen warning: {e}"));
                 }
@@ -199,16 +220,31 @@ pub(crate) async fn ensure_mail_acme_helpers(state: &AppState, names: &[String],
 /// Preflight every SAN before ACME so a stale/missing DNS record fails fast
 /// instead of timing out inside `instant-acme`. Returns false to abort.
 async fn run_acme_preflight(state: &AppState, names: &[String], task: &TaskHandle) -> bool {
+    let failed = acme_preflight_failures(state, names, task).await;
+    log_preflight_failures(&preflight_lines(&failed), task);
+    failed.is_empty()
+}
+
+/// The preflight itself: (name, reason) for every name whose DNS is not
+/// ready.
+async fn acme_preflight_failures(
+    state: &AppState,
+    names: &[String],
+    task: &TaskHandle,
+) -> Vec<(String, String)> {
     ensure_mail_acme_helpers(state, names, task).await;
     let mut failed = Vec::new();
     for name in names {
         if let Err(e) = crate::handlers::dns::preflight_acme_dns(state, name, task).await {
             task.log(format!("ssl preflight failed for {name}: {e}"));
-            failed.push(format!("{name}: {e}"));
+            failed.push((name.clone(), e));
         }
     }
-    log_preflight_failures(&failed, task);
-    failed.is_empty()
+    failed
+}
+
+fn preflight_lines(failed: &[(String, String)]) -> Vec<String> {
+    failed.iter().map(|(name, why)| format!("{name}: {why}")).collect()
 }
 
 /// The panel shows a failed task's last log line as the reason. The checks
@@ -240,13 +276,137 @@ pub async fn issue_for_names(
     names: &[String],
     task: &TaskHandle,
 ) -> AgentResult<()> {
+    order_and_install(cfg, acme_email, primary, names, task)
+        .await
+        .map_err(AgentError::from)
+}
+
+/// Why an order produced no certificate.
+enum OrderError {
+    /// The ACME server could not validate every name. `unvalidated` are the
+    /// names whose authorization was not valid when the order failed.
+    Invalid {
+        unvalidated: Vec<String>,
+        detail: String,
+    },
+    Other(AgentError),
+}
+
+impl From<AgentError> for OrderError {
+    fn from(e: AgentError) -> Self {
+        OrderError::Other(e)
+    }
+}
+
+impl From<OrderError> for AgentError {
+    fn from(e: OrderError) -> Self {
+        match e {
+            OrderError::Invalid { detail, .. } => {
+                AgentError::Other(anyhow::anyhow!("order invalid: {detail}"))
+            }
+            OrderError::Other(e) => e,
+        }
+    }
+}
+
+/// A renewal. It used to be all names or nothing: with "Force www" on and
+/// no DNS record for www.<domain>, every renewal failed on that one name
+/// and the certificate of the site itself ran out. When the ACME server
+/// cannot validate a name whose public DNS does not point at this server,
+/// the order is tried once more without it. The primary name always stays.
+/// Returns the names the new certificate lists.
+///
+/// Only for a certificate that is being renewed: a first order for names
+/// the operator asked for fails as a whole, so the reason is seen.
+pub(crate) async fn renew_for_names(
+    state: &AppState,
+    cfg: &Config,
+    acme_email: &str,
+    primary: &str,
+    names: &[String],
+    task: &TaskHandle,
+) -> AgentResult<Vec<String>> {
+    let (unvalidated, detail) = match order_and_install(cfg, acme_email, primary, names, task).await {
+        Ok(()) => return Ok(names.to_vec()),
+        Err(OrderError::Invalid { unvalidated, detail }) => (unvalidated, detail),
+        Err(OrderError::Other(e)) => return Err(e),
+    };
+    let failed = || AgentError::Other(anyhow::anyhow!("order invalid: {detail}"));
+    // A name the ACME server did validate reaches this server, whatever
+    // the DNS check here makes of it (a name behind a proxy).
+    let mut not_here = Vec::new();
+    for name in renewal_suspects(primary, names, &unvalidated) {
+        if let Err(why) = crate::handlers::dns::verify_public_dns(state, &name).await {
+            not_here.push((name, why));
+        }
+    }
+    let left_out: Vec<String> = not_here.iter().map(|(name, _)| name.clone()).collect();
+    let Some(kept) = renewal_retry_names(primary, names, &left_out) else {
+        // Every name points here, so the same order would fail the same way.
+        return Err(failed());
+    };
+    // The check has to work on this server before a name is dropped on its
+    // word: without dig, or behind a proxy or NAT, it finds no name here.
+    if let Err(why) = crate::handlers::dns::verify_public_dns(state, primary).await {
+        task.log(format!(
+            "not ordering again without {}: the DNS check does not find {primary} here either ({why})",
+            left_out.join(", ")
+        ));
+        return Err(failed());
+    }
+    for (name, why) in &not_here {
+        task.log(format!("leaving {name} out of the certificate: {why}"));
+        tracing::warn!(cert = %primary, %name, reason = %why, "renewal: name left out of the certificate");
+    }
+    task.log(format!("ordering once more for {}", kept.join(", ")));
+    issue_for_names(cfg, acme_email, primary, &kept, task).await?;
+    task.log(format!(
+        "renewed without {}. Renew the certificate again once DNS for {} points at this server",
+        left_out.join(", "),
+        if left_out.len() == 1 { "that name" } else { "those names" }
+    ));
+    Ok(kept)
+}
+
+/// The names of a failed renewal that may be left out of the second order:
+/// the ones the ACME server did not validate, never the primary.
+fn renewal_suspects(primary: &str, names: &[String], unvalidated: &[String]) -> Vec<String> {
+    names
+        .iter()
+        .filter(|n| {
+            !n.eq_ignore_ascii_case(primary)
+                && unvalidated.iter().any(|u| u.eq_ignore_ascii_case(n))
+        })
+        .cloned()
+        .collect()
+}
+
+/// The names for the second order: all but `left_out`, the primary in any
+/// case. None when nothing is left out.
+fn renewal_retry_names(primary: &str, names: &[String], left_out: &[String]) -> Option<Vec<String>> {
+    let kept: Vec<String> = names
+        .iter()
+        .filter(|n| n.as_str() == primary || !left_out.contains(n))
+        .cloned()
+        .collect();
+    (kept.len() < names.len()).then_some(kept)
+}
+
+/// Order a certificate for `names` and install it as `primary`'s.
+async fn order_and_install(
+    cfg: &Config,
+    acme_email: &str,
+    primary: &str,
+    names: &[String],
+    task: &TaskHandle,
+) -> Result<(), OrderError> {
     if names.is_empty() {
-        return Err(AgentError::Invalid("no domain names supplied".into()));
+        return Err(AgentError::Invalid("no domain names supplied".into()).into());
     }
 
     if let Err(e) = crate::validate::validate_acme_email(acme_email) {
         task.log(format!("{e}"));
-        return Err(e);
+        return Err(e.into());
     }
 
     // Orders for the same primary never overlap: they would write the same
@@ -261,7 +421,8 @@ pub async fn issue_for_names(
                 return Err(AgentError::Other(anyhow::anyhow!(
                     "the ACME server did not complete the order within {} minutes",
                     ORDER_TIMEOUT.as_secs() / 60
-                )))
+                ))
+                .into())
             }
         };
 
@@ -278,7 +439,7 @@ pub async fn issue_for_names(
             Some(old) => fs_atomic::write(&cert_file, &old, 0o640).await,
             None => fs_atomic::remove_if_exists(&cert_file).await,
         };
-        return Err(e);
+        return Err(e.into());
     }
     if cfg.vps_panel_gid != 0 {
         let _ = fs_atomic::chown_blocking(&cert_file, 0, cfg.vps_panel_gid);
@@ -312,7 +473,7 @@ async fn order_certificate(
     acme_email: &str,
     names: &[String],
     task: &TaskHandle,
-) -> AgentResult<(String, String)> {
+) -> Result<(String, String), OrderError> {
     use instant_acme::{
         Account, AuthorizationStatus, ChallengeType, Identifier, NewAccount, NewOrder, OrderStatus,
     };
@@ -363,7 +524,8 @@ async fn order_certificate(
             other => {
                 return Err(AgentError::Other(anyhow::anyhow!(
                     "unexpected authorization status: {other:?}"
-                )))
+                ))
+                .into())
             }
         }
         let challenge = auth
@@ -396,7 +558,8 @@ async fn order_certificate(
         if tries > 30 {
             return Err(AgentError::Other(anyhow::anyhow!(
                 "order did not become ready in time"
-            )));
+            ))
+            .into());
         }
         tokio::time::sleep(Duration::from_secs(2)).await;
         let state = order
@@ -407,12 +570,15 @@ async fn order_certificate(
             OrderStatus::Ready => break,
             OrderStatus::Pending => continue,
             OrderStatus::Invalid => {
-                let detail = match order.authorizations().await {
-                    Ok(auths) => format_invalid_order(&auths),
-                    Err(e) => format!("(could not fetch authorizations: {e})"),
+                let (detail, unvalidated) = match order.authorizations().await {
+                    Ok(auths) => (format_invalid_order(&auths), unvalidated_names(&auths)),
+                    Err(e) => (
+                        format!("(could not fetch authorizations: {e})"),
+                        names.to_vec(),
+                    ),
                 };
                 task.log(format!("order invalid: {detail}"));
-                return Err(AgentError::Other(anyhow::anyhow!("order invalid: {detail}")));
+                return Err(OrderError::Invalid { unvalidated, detail });
             }
             _ => continue,
         }
@@ -521,6 +687,19 @@ fn cert_order_lock(primary: &str) -> std::sync::Arc<tokio::sync::Mutex<()>> {
         .entry(primary.to_string())
         .or_default()
         .clone()
+}
+
+/// The names of an order the ACME server has not validated: failed, or not
+/// reached before the order failed on another name.
+fn unvalidated_names(auths: &[instant_acme::Authorization]) -> Vec<String> {
+    use instant_acme::{AuthorizationStatus, Identifier};
+    auths
+        .iter()
+        .filter(|auth| auth.status != AuthorizationStatus::Valid)
+        .map(|auth| match &auth.identifier {
+            Identifier::Dns(d) => d.to_ascii_lowercase(),
+        })
+        .collect()
 }
 
 fn format_invalid_order(auths: &[instant_acme::Authorization]) -> String {
@@ -680,8 +859,8 @@ async fn scan_and_renew(state: &AppState) -> AgentResult<()> {
                     task.start();
                     ensure_mail_acme_helpers(&state_clone, &names, &task).await;
                     let acme_email = resolve_acme_email(&panel_db, &cfg);
-                    match issue_for_names(&cfg, &acme_email, &domain_owned, &names, &task).await {
-                        Ok(()) => {
+                    match renew_for_names(&state_clone, &cfg, &acme_email, &domain_owned, &names, &task).await {
+                        Ok(_) => {
                             if let Err(e) = regenerate_mail_sni(&state_clone).await {
                                 task.log(format!("mail sni regen warning: {e}"));
                             }
@@ -1162,7 +1341,64 @@ async fn write_mail_sni(sni: &MailSni) -> AgentResult<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::{parse_san_names, vhost_has_server_name};
+    use super::{
+        parse_san_names, renewal_retry_names, renewal_suspects, unvalidated_names,
+        vhost_has_server_name,
+    };
+
+    fn list(items: &[&str]) -> Vec<String> {
+        items.iter().map(|s| s.to_string()).collect()
+    }
+
+    /// Force www with no DNS record for www: the renewal is tried again for
+    /// the site's own name and what else validated.
+    #[test]
+    fn a_failed_renewal_is_retried_without_the_names_that_do_not_point_here() {
+        let names = list(&["example.com", "www.example.com", "mail.example.com"]);
+
+        // The ACME server refused www; mail was validated and is not asked about.
+        let suspects = renewal_suspects("example.com", &names, &list(&["www.example.com"]));
+        assert_eq!(suspects, list(&["www.example.com"]));
+        assert_eq!(
+            renewal_retry_names("example.com", &names, &suspects),
+            Some(list(&["example.com", "mail.example.com"]))
+        );
+
+        // The primary is never a candidate, even when it is what failed.
+        let all = list(&["EXAMPLE.com", "www.example.com", "mail.example.com"]);
+        assert_eq!(
+            renewal_suspects("example.com", &names, &all),
+            list(&["www.example.com", "mail.example.com"])
+        );
+        assert_eq!(
+            renewal_retry_names("example.com", &names, &list(&["example.com", "www.example.com"])),
+            Some(list(&["example.com", "mail.example.com"]))
+        );
+
+        // Every unvalidated name points here: nothing to leave out, no retry.
+        assert_eq!(renewal_retry_names("example.com", &names, &[]), None);
+        assert!(renewal_suspects("example.com", &names, &[]).is_empty());
+        // A certificate for one name has nothing to fall back to.
+        let single = list(&["example.com"]);
+        assert!(renewal_suspects("example.com", &single, &single).is_empty());
+    }
+
+    #[test]
+    fn the_names_an_invalid_order_did_not_validate() {
+        use instant_acme::{Authorization, AuthorizationStatus, Identifier};
+        let auth = |name: &str, status| Authorization {
+            identifier: Identifier::Dns(name.to_string()),
+            status,
+            challenges: Vec::new(),
+        };
+        let auths = [
+            auth("example.com", AuthorizationStatus::Valid),
+            auth("WWW.example.com", AuthorizationStatus::Invalid),
+            auth("mail.example.com", AuthorizationStatus::Pending),
+        ];
+        assert_eq!(unvalidated_names(&auths), list(&["www.example.com", "mail.example.com"]));
+        assert!(unvalidated_names(&auths[..1]).is_empty());
+    }
 
     #[test]
     fn finds_the_www_block_of_a_site_vhost() {
