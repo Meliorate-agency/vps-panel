@@ -734,9 +734,23 @@ if ! ufw status 2>/dev/null | grep -q "Status: active"; then
   ufw default deny incoming
   ufw default allow outgoing
 fi
-# The port(s) sshd really listens on (sshd -T needs /run/sshd).
+# The port(s) SSH really listens on: sshd's own (sshd -T needs /run/sshd), a
+# port set on ssh.socket (a drop-in there wins over what sshd -T reports) and
+# the one this session came in on. With only sshd -T, a port moved on
+# ssh.socket stayed closed and the operator was locked out. `|| true`: with
+# pipefail a failing sshd -T ended the installer here instead of falling
+# back to 22.
 install -d -m 0755 /run/sshd
-SSH_PORTS="$(sshd -T 2>/dev/null | awk '$1=="port"{print $2}' | sort -u)"
+SSH_SESSION="${SSH_CONNECTION:-}"
+SSH_PORTS="$(
+  {
+    sshd -T 2>/dev/null | awk '$1=="port"{print $2}'
+    if systemctl is-active --quiet ssh.socket 2>/dev/null; then
+      systemctl show ssh.socket -p Listen 2>/dev/null | sed -n 's/.*:\([0-9][0-9]*\) (Stream)$/\1/p'
+    fi
+    echo "${SSH_SESSION##* }"
+  } | grep -E '^[0-9]+$' | sort -un || true
+)"
 for p in ${SSH_PORTS:-22}; do
   ufw allow "$p/tcp" comment 'ssh'
 done
