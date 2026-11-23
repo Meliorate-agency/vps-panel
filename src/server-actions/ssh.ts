@@ -129,7 +129,9 @@ export async function addSshKeyAction(
     revalidatePath("/setup");
     return { ok: true };
   } catch (e: unknown) {
-    return { ok: false, error: e instanceof Error ? e.message : String(e) };
+    const msg = e instanceof Error ? e.message : String(e);
+    writeAudit({ actorId: s.userId, action: "ssh.keys.add", target: user, result: "error", message: msg });
+    return { ok: false, error: msg };
   }
 }
 
@@ -139,7 +141,18 @@ export async function removeSshKeyAction(
   purgeKeypair?: string,
 ): Promise<void> {
   const s = await requireAdmin();
-  await agent.ssh.remove(fp, user, purgeKeypair);
+  try {
+    await agent.ssh.remove(fp, user, purgeKeypair);
+  } catch (e: unknown) {
+    writeAudit({
+      actorId: s.userId,
+      action: "ssh.keys.remove",
+      target: `${user}/${fp}`,
+      result: "error",
+      message: e instanceof Error ? e.message : String(e),
+    });
+    throw e;
+  }
   writeAudit({
     actorId: s.userId,
     action: "ssh.keys.remove",
@@ -272,6 +285,8 @@ async function saveSshFile(
       result: "ok",
       message: `${content.length} bytes`,
     });
+    // The key table on the page is read from these files.
+    revalidatePath("/ssh-keys");
     return { ok: true };
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e);
