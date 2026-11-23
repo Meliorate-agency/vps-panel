@@ -84,6 +84,9 @@ function buildAppRow(
   const hasUnit = !!a.active;
   const statusText = a.sub || a.active || (isExternal ? "no unit" : "unknown");
   return {
+    // Row key for AppFolderSection (not a column): the Updates and Comment
+    // cells hold per-app state that must not slide to another app's row.
+    _key: a.name,
     name: (
       <Link href={`/apps/${encodeURIComponent(a.name)}`}>
         <strong style={{ whiteSpace: "nowrap" }}>{a.name}</strong>

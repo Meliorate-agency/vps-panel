@@ -18,7 +18,7 @@ type Props = {
   fallbackLabel?: string;
   /** Pre-built row data for the Table component. The page server
    *  component builds these to share the cell-rendering logic across
-   *  buckets. */
+   *  buckets. `_key` (the app name) is the row's React key. */
   rows: Record<string, React.ReactNode>[];
   /** Table column metadata. */
   columns: { key: string; label: string; width?: string }[];
@@ -235,7 +235,16 @@ export default function AppFolderSection({
 
       {!localCollapsed && (
         <div className={sectionStyles.body}>
-          <Table scrollX columns={columns} rows={rows} empty={empty} />
+          {/* Keyed by app name, not position: moving or deleting an app
+              shifts the rows below, and index keys handed one app's checked
+              update status (or an open comment editor) to the next app. */}
+          <Table
+            scrollX
+            columns={columns}
+            rows={rows}
+            rowKey={(row, i) => (typeof row._key === "string" ? row._key : i)}
+            empty={empty}
+          />
         </div>
       )}
 
