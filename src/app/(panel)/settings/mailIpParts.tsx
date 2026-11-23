@@ -39,31 +39,54 @@ export function hasProblems(checks: MailCheckItem[]): boolean {
 }
 
 /**
- * The agent refused IPv6 because that side is not ready (409). Shows its
- * reason and lets the operator apply it anyway; nothing is sent with force
- * until they click.
+ * The agent refused a change with 409 (IPv6 not ready, a port the server
+ * needs, no way left to log in over SSH). Shows its reason and lets the
+ * operator apply it anyway; nothing is sent with force until they click.
+ * The defaults are the mail IPv6 wording.
+ *
+ * Inside a `<form action>`, pass `submitName` instead of `onForce`: the
+ * button then submits the form with `<submitName>=1`, which the action reads
+ * as the confirmation.
  */
 export function ForceConfirm({
   message,
   busy,
   onForce,
+  submitName,
   onCancel,
+  note = "Until that is fixed, receiving servers may refuse mail sent over IPv6 or put it in spam.",
+  forceLabel = "Use IPv6 anyway",
+  busyLabel = "Saving...",
 }: {
   message: string;
   busy: boolean;
-  onForce: () => void;
+  onForce?: () => void;
+  submitName?: string;
   onCancel: () => void;
+  note?: string | null;
+  forceLabel?: string;
+  busyLabel?: string;
 }) {
   return (
     <div className={local.warnBox} role="alert">
       <p>{message}</p>
-      <p className={local.sub}>
-        Until that is fixed, receiving servers may refuse mail sent over IPv6 or put it in spam.
-      </p>
+      {note && <p className={local.sub}>{note}</p>}
       <div className={local.row}>
-        <button type="button" className={styles.btnGhost} onClick={onForce} disabled={busy}>
-          {busy ? "Saving..." : "Use IPv6 anyway"}
-        </button>
+        {submitName ? (
+          <button
+            type="submit"
+            name={submitName}
+            value="1"
+            className={styles.btnGhost}
+            disabled={busy}
+          >
+            {busy ? busyLabel : forceLabel}
+          </button>
+        ) : (
+          <button type="button" className={styles.btnGhost} onClick={onForce} disabled={busy}>
+            {busy ? busyLabel : forceLabel}
+          </button>
+        )}
         <button type="button" className={styles.btnGhost} onClick={onCancel} disabled={busy}>
           Cancel
         </button>

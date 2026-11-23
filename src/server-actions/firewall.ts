@@ -1,16 +1,24 @@
 "use server";
 
 import { revalidatePath } from "next/cache";
-import { agent, type FailedByIp } from "@/lib/agent";
+import { agent, AgentError, type FailedByIp } from "@/lib/agent";
 import { requireAdmin, requireSession } from "@/lib/auth";
 import { writeAudit } from "@/lib/audit";
+import { agentErrorMessage } from "@/lib/redirects";
 
 export type ActionResult = { ok: true } | { ok: false; error: string };
 
+/** The port form's result. `needsForce`: the agent refused to block a port
+ *  the server needs (sshd's, 80 or 443); the operator may confirm and send it
+ *  again with force. */
+export type PortActionResult =
+  | { ok: true }
+  | { ok: false; error: string; needsForce?: boolean };
+
 export async function firewallPortAction(
-  _prev: ActionResult | null,
+  _prev: PortActionResult | null,
   fd: FormData,
-): Promise<ActionResult> {
+): Promise<PortActionResult> {
   const s = await requireAdmin();
   const intent = String(fd.get("intent") ?? "");
   const port = Number(fd.get("port"));
@@ -21,22 +29,31 @@ export async function firewallPortAction(
   if (intent !== "allow" && intent !== "deny") {
     return { ok: false, error: "intent must be allow or deny" };
   }
+  // Only the form's "Block it anyway" button sends this.
+  const forced = intent === "deny" && fd.get("force") === "1";
   try {
     if (intent === "allow") {
       await agent.firewall.allow(port, proto);
     } else {
-      await agent.firewall.deny(port, proto);
+      await agent.firewall.deny(port, proto, forced);
     }
     writeAudit({
       actorId: s.userId,
       action: `firewall.${intent}`,
       target: `${port}/${proto}`,
       result: "ok",
+      message: forced ? "blocked after confirming the agent's warning" : undefined,
     });
     revalidatePath("/firewall");
     return { ok: true };
   } catch (e: unknown) {
-    return { ok: false, error: e instanceof Error ? e.message : String(e) };
+    const error = agentErrorMessage(e).replace(/^(conflict|invalid input): /, "");
+    // Refused because the server needs this port: nothing changed, the
+    // operator decides.
+    if (intent === "deny" && !forced && e instanceof AgentError && e.status === 409) {
+      return { ok: false, error, needsForce: true };
+    }
+    return { ok: false, error };
   }
 }
 

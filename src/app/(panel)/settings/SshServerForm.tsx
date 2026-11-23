@@ -4,8 +4,8 @@ import { useEffect, useRef, useState } from "react";
 import styles from "@/components/page.module.css";
 import { useFormActionState } from "@/lib/useFormActionState";
 import type { SshRootLogin, SshServerConfig } from "@/lib/agent";
-
-type Result = { ok: true } | { ok: false; error: string };
+import type { SshConfigResult as Result } from "@/server-actions/ssh";
+import { ForceConfirm } from "./mailIpParts";
 
 const ROOT_LOGIN_LABELS: Record<SshRootLogin, string> = {
   yes: "Allowed (key or password)",
@@ -47,6 +47,13 @@ export default function SshServerForm({
   const [rootLogin, setRootLogin] = useState<SshRootLogin>(
     suggestRootLogin ?? config.permit_root_login,
   );
+  // The agent refused the change because nobody could log in afterwards
+  // (409). The form keeps every field as it was; only the confirmation
+  // button resends it with force. Cancelled, or any field changed after the
+  // refusal, and the confirmation no longer applies.
+  const [dismissed, setDismissed] = useState<Result | null>(null);
+  const refusal =
+    state?.ok === false && state.needsForce === true && state !== dismissed ? state : null;
 
   // After a save, revalidatePath re-renders with the new live values but
   // keeps this component instance, so follow them when they change. Only on
@@ -74,7 +81,20 @@ export default function SshServerForm({
   );
 
   return (
-    <form ref={formRef} action={formAction}>
+    <form
+      ref={formRef}
+      action={formAction}
+      onChange={() => {
+        if (refusal) setDismissed(refusal);
+      }}
+      onKeyDown={(e) => {
+        // Enter in a field submits with the form's first submit button,
+        // which is "Apply anyway" while it is shown.
+        if (refusal && e.key === "Enter" && e.target instanceof HTMLInputElement) {
+          e.preventDefault();
+        }
+      }}
+    >
       {/* The live values, so the action sends sshd only what was changed. */}
       <input type="hidden" name="current_port" value={config.port} />
       <input type="hidden" name="current_idle_timeout_minutes" value={config.idle_timeout_minutes} />
@@ -179,11 +199,25 @@ export default function SshServerForm({
         listening on the new port.
       </p>
       )}
-      {state?.ok === false && <div className={styles.error}>{state.error}</div>}
+      {state?.ok === false && !state.needsForce && (
+        <div className={styles.error}>{state.error}</div>
+      )}
       {state?.ok === true && <div className={styles.notice}>SSH config updated.</div>}
-      <button type="submit" className={styles.btn} disabled={pending}>
-        {pending ? "Saving..." : loginOnly ? "Apply SSH login settings" : "Save SSH config"}
-      </button>
+      {refusal ? (
+        <ForceConfirm
+          message={refusal.error}
+          busy={pending}
+          submitName="force"
+          forceLabel="Apply anyway"
+          busyLabel="Saving..."
+          note="Nothing was changed. If you apply it anyway and no key works, SSH only works again through your provider's web console."
+          onCancel={() => setDismissed(refusal)}
+        />
+      ) : (
+        <button type="submit" className={styles.btn} disabled={pending}>
+          {pending ? "Saving..." : loginOnly ? "Apply SSH login settings" : "Save SSH config"}
+        </button>
+      )}
     </form>
   );
 }

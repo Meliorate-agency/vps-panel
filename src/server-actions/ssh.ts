@@ -1,9 +1,10 @@
 "use server";
 
 import { revalidatePath } from "next/cache";
-import { agent, type SshRootLogin } from "@/lib/agent";
+import { agent, AgentError, type SshRootLogin } from "@/lib/agent";
 import { requireAdmin } from "@/lib/auth";
 import { writeAudit } from "@/lib/audit";
+import { agentErrorMessage } from "@/lib/redirects";
 
 export type ActionResult = { ok: true } | { ok: false; error: string };
 
@@ -38,10 +39,17 @@ const ROOT_LOGIN_MODES: readonly SshRootLogin[] = [
   "no",
 ];
 
+/** The SSH server form's result. `needsForce`: the agent refused a change
+ *  that would leave no way to log in (password login off while nobody has a
+ *  key); the operator may confirm and send it again with force. */
+export type SshConfigResult =
+  | { ok: true }
+  | { ok: false; error: string; needsForce?: boolean };
+
 export async function setSshServerConfigAction(
-  _prev: ActionResult | null,
+  _prev: SshConfigResult | null,
   fd: FormData,
-): Promise<ActionResult> {
+): Promise<SshConfigResult> {
   const s = await requireAdmin();
   const str = (k: string) => String(fd.get(k) ?? "").trim();
 
@@ -86,20 +94,36 @@ export async function setSshServerConfigAction(
     return { ok: false, error: "Nothing changed." };
   }
 
+  // Only the form's confirmation button sends this, after the agent refused
+  // the same change.
+  const forced = fd.get("force") === "1";
   try {
-    await agent.ssh.setConfig(body);
+    await agent.ssh.setConfig(forced ? { ...body, force: true } : body);
     writeAudit({
       actorId: s.userId,
       action: "ssh.config.set",
       target: JSON.stringify(body),
       result: "ok",
+      message: forced ? "applied after confirming the agent's warning" : undefined,
     });
     revalidatePath("/settings");
     revalidatePath("/users");
     revalidatePath("/setup");
     return { ok: true };
   } catch (e: unknown) {
-    const msg = e instanceof Error ? e.message : String(e);
+    const msg = agentErrorMessage(e).replace(/^(conflict|invalid input): /, "");
+    // Refused because nobody could log in afterwards: nothing changed, the
+    // operator decides. A 409 for a port another service holds is not
+    // something force can fix, so it stays a plain error.
+    if (
+      e instanceof AgentError &&
+      e.status === 409 &&
+      !forced &&
+      (body.password_auth !== undefined || body.permit_root_login !== undefined) &&
+      !/already in use/.test(msg)
+    ) {
+      return { ok: false, error: msg, needsForce: true };
+    }
     writeAudit({
       actorId: s.userId,
       action: "ssh.config.set",

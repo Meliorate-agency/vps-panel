@@ -616,8 +616,14 @@ export const agent = {
     status: () => agentRequest<FirewallStatus>({ method: "GET", path: "/firewall/status" }),
     allow: (port: number, proto = "tcp") =>
       agentRequest<Ok>({ method: "POST", path: "/firewall/allow", body: { port, proto } }),
-    deny: (port: number, proto = "tcp") =>
-      agentRequest<Ok>({ method: "POST", path: "/firewall/deny", body: { port, proto } }),
+    // The agent answers 409 for a port sshd listens on, or 80 / 443, unless
+    // `force` is set. Only sent once the operator confirmed past that.
+    deny: (port: number, proto = "tcp", force = false) =>
+      agentRequest<Ok>({
+        method: "POST",
+        path: "/firewall/deny",
+        body: { port, proto, ...(force ? { force: true } : {}) },
+      }),
     enable: () => agentRequest<Ok>({ method: "POST", path: "/firewall/enable" }),
     setFail2banPolicy: (body: {
       bantime: string;
@@ -660,11 +666,14 @@ export const agent = {
         query: { user, purge_keypair: purgeKeypair },
       }),
     getConfig: () => agentRequest<SshServerConfig>({ method: "GET", path: "/ssh/config" }),
+    // The agent answers 409 when the change would leave no way to log in
+    // (password login off while nobody has a key), unless `force` is set.
     setConfig: (body: {
       port?: number;
       idle_timeout_minutes?: number;
       password_auth?: boolean;
       permit_root_login?: SshRootLogin;
+      force?: boolean;
     }) => agentRequest<Ok>({ method: "PATCH", path: "/ssh/config", body }),
     getPublicKey: (fp: string, user: string) =>
       agentRequest<{ content: string }>({
