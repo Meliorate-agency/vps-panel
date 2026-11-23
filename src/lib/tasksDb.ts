@@ -1,6 +1,6 @@
 import "server-only";
 import { db } from "./db";
-import { getPanelTimezone, todayInTz } from "./audit";
+import { getPanelTimezone, todayInTz, tzMidnightUtcMs } from "./audit";
 
 // ─── Why this file lives on the panel side ──────────────────────────────
 //
@@ -41,26 +41,6 @@ function dayFmt(tz: string): Intl.DateTimeFormat {
   return f;
 }
 
-function offsetFmt(tz: string): Intl.DateTimeFormat {
-  return new Intl.DateTimeFormat("en-US", {
-    timeZone: tz,
-    timeZoneName: "shortOffset",
-  });
-}
-
-/** Resolve the configured tz's UTC offset (in minutes) for a given instant. */
-function tzOffsetMinutes(at: Date, tz: string): number {
-  const parts = offsetFmt(tz).formatToParts(at);
-  const label = parts.find((p) => p.type === "timeZoneName")?.value ?? "GMT+0";
-  if (label === "GMT" || label === "UTC") return 0;
-  const m = label.match(/GMT([+-])(\d+)(?::(\d+))?/);
-  if (!m) return 0;
-  const sign = m[1] === "-" ? -1 : 1;
-  const hours = Number(m[2]);
-  const mins = Number(m[3] ?? 0);
-  return sign * (hours * 60 + mins);
-}
-
 /** Date → "YYYY-MM-DD" in the configured tz. */
 function toTzDay(d: Date, tz: string): string {
   return dayFmt(tz).format(d);
@@ -74,15 +54,12 @@ function tzDayToRfc3339Range(
   day: string,
   tz: string,
 ): { startRfc: string; endRfc: string } {
-  // Noon UTC reference so DST boundaries don't put us on the wrong day.
-  const reference = new Date(`${day}T12:00:00Z`);
-  const offsetMin = tzOffsetMinutes(reference, tz);
-  const baseUtcMidnight = new Date(`${day}T00:00:00Z`);
-  const startMs = baseUtcMidnight.getTime() - offsetMin * 60_000;
-  const endMs = startMs + 24 * 60 * 60 * 1000;
+  // From this local midnight to the next: the day the clocks change is 23
+  // or 25 hours long.
+  const nextDay = new Date(Date.parse(`${day}T00:00:00Z`) + 86_400_000).toISOString().slice(0, 10);
   return {
-    startRfc: new Date(startMs).toISOString(),
-    endRfc: new Date(endMs).toISOString(),
+    startRfc: new Date(tzMidnightUtcMs(day, tz)).toISOString(),
+    endRfc: new Date(tzMidnightUtcMs(nextDay, tz)).toISOString(),
   };
 }
 

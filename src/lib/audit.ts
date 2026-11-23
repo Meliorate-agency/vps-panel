@@ -147,18 +147,27 @@ function toSqlUtc(d: Date): string {
  * local midnight.
  */
 function tzDayToUtcRange(day: string, tz: string): { startUtc: string; endUtc: string } {
-  // Take noon UTC on `day` purely to detect the offset — using midnight UTC
-  // can land us on the wrong side of a DST boundary in spring.
-  const reference = new Date(`${day}T12:00:00Z`);
-  const offsetMin = tzOffsetMinutes(reference, tz);
-  // Local midnight → UTC instant = midnight-UTC minus the offset.
-  const baseUtcMidnight = new Date(`${day}T00:00:00Z`);
-  const startMs = baseUtcMidnight.getTime() - offsetMin * 60_000;
-  const endMs = startMs + 24 * 60 * 60 * 1000;
+  const startMs = tzMidnightUtcMs(day, tz);
+  const nextDay = new Date(Date.parse(`${day}T00:00:00Z`) + 86_400_000).toISOString().slice(0, 10);
   return {
     startUtc: toSqlUtc(new Date(startMs)),
-    endUtc: toSqlUtc(new Date(endMs)),
+    endUtc: toSqlUtc(new Date(tzMidnightUtcMs(nextDay, tz))),
   };
+}
+
+/**
+ * The UTC instant at which calendar day `day` starts in `tz`. The offset is
+ * the one in force at that midnight, and the day ends where the next one
+ * starts: with the offset at noon and a fixed 24 hours, the day the clocks
+ * change started an hour off and showed an hour of its neighbour's entries.
+ */
+export function tzMidnightUtcMs(day: string, tz: string): number {
+  const base = Date.parse(`${day}T00:00:00Z`);
+  // First with the offset at UTC midnight, then with the offset at the
+  // instant that gives, which is the local midnight unless the change
+  // happens within those few hours.
+  const guess = base - tzOffsetMinutes(new Date(base), tz) * 60_000;
+  return base - tzOffsetMinutes(new Date(guess), tz) * 60_000;
 }
 
 /**
