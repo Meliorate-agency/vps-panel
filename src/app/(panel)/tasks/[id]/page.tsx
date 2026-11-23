@@ -2,6 +2,7 @@ import Link from "next/link";
 import { notFound } from "next/navigation";
 import { agent, AgentError, type TaskState } from "@/lib/agent";
 import { requireSession } from "@/lib/auth";
+import { formatTaskTs } from "@/lib/tasksDb";
 import StatusBadge from "@/components/StatusBadge/StatusBadge";
 import LiveTaskLog from "./LiveTaskLog";
 import styles from "@/components/page.module.css";
@@ -57,8 +58,9 @@ export default async function TaskDetailPage({
           </h1>
           <div className={styles.subtitle}>
             <StatusBadge text={task.status} />{" "}
-            <span>started {task.started_at}</span>
-            {task.finished_at && <span> &middot; finished {task.finished_at}</span>}
+            {/* In the panel's time zone, like the task list, not raw UTC. */}
+            <span>started {formatTaskTs(task.started_at)}</span>
+            {task.finished_at && <span> &middot; finished {formatTaskTs(task.finished_at)}</span>}
           </div>
         </div>
       </div>
