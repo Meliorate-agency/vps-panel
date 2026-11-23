@@ -137,12 +137,21 @@ if [[ ! "$ADMIN_EMAIL" =~ ^[^@[:space:]]+@[^@[:space:]]+$ ]]; then
 fi
 
 #-------------------------------------------------- packages
+# On a re-run apt may upgrade a package whose configuration file was changed
+# on the server (pdns.conf, which this installer writes, for one). dpkg then
+# stops to ask which version to keep, or fails where nobody can answer. These
+# options keep the file that is installed, without asking.
+APT_KEEP_CONF=(-o Dpkg::Options::=--force-confdef -o Dpkg::Options::=--force-confold)
+
 log "updating apt"
 DEBIAN_FRONTEND=noninteractive apt-get update -qq
-DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+# bind9-dnsutils is dig: the agent looks records up with it before it orders
+# a certificate, and for the mail checks. Minimal images come without it, and
+# then every such check failed as "no public A or AAAA record".
+DEBIAN_FRONTEND=noninteractive apt-get install -y "${APT_KEEP_CONF[@]}" --no-install-recommends \
   curl ca-certificates gnupg lsb-release software-properties-common \
   build-essential pkg-config libssl-dev libsqlite3-dev libmariadb-dev \
-  jq acl htop iotop iftop ncdu rsync sudo \
+  jq acl htop iotop iftop ncdu rsync sudo bind9-dnsutils \
   nginx \
   mariadb-server mariadb-client \
   pdns-server pdns-backend-mysql \
@@ -162,7 +171,7 @@ DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
 log "adding NodeSource (Node 22 LTS)"
 if ! command -v node >/dev/null 2>&1 || [[ "$(node --version | cut -dv -f2 | cut -d. -f1)" -lt 20 ]]; then
   curl -fsSL https://deb.nodesource.com/setup_22.x | bash -
-  apt-get install -y nodejs
+  apt-get install -y "${APT_KEEP_CONF[@]}" nodejs
 fi
 
 log "adding upstream Rspamd repo"
@@ -173,7 +182,7 @@ fi
 echo "deb [signed-by=/etc/apt/keyrings/rspamd.gpg] http://rspamd.com/apt-stable/ $(lsb_release -cs) main" \
   > /etc/apt/sources.list.d/rspamd.list
 apt-get update -qq
-apt-get install -y rspamd
+apt-get install -y "${APT_KEEP_CONF[@]}" rspamd
 
 log "installing rustup for the panel build user"
 if ! command -v cargo >/dev/null 2>&1; then
@@ -416,14 +425,6 @@ fi
 # systemd-resolved, which listens on IPv4 only. Not on a kernel without IPv6.
 if [[ -e /proc/net/if_inet6 ]]; then
   PDNS_LOCAL_ADDRESS="$PDNS_LOCAL_ADDRESS,::"
-fi
-
-# dig, for the DNS checks the agent runs before it orders a certificate and
-# for the mail checks. Minimal images come without it, and then every such
-# check failed as "no public A or AAAA record".
-if ! command -v dig >/dev/null 2>&1; then
-  DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends bind9-dnsutils \
-    || warn "could not install bind9-dnsutils (dig); certificate and mail DNS checks need it"
 fi
 
 # Holds the database password: never readable by others, not even between

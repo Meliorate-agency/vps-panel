@@ -39,6 +39,12 @@ if [[ "$(git rev-parse HEAD)" != "$BEFORE_PULL" && -z "${VPS_PANEL_UPDATE_REEXEC
   exec bash "$REPO_DIR/scripts/update.sh"
 fi
 
+# For every apt-get install below: a package upgraded along the way must not
+# stop to ask about a configuration file that was changed on the server (the
+# installer edits Dovecot's 10-auth.conf, for one). There is nobody to
+# answer, and the install failed. These keep the file that is installed.
+APT_KEEP_CONF=(-o Dpkg::Options::=--force-confdef -o Dpkg::Options::=--force-confold)
+
 # NOTE: deliberately NOT copying any .env file from the repo. /etc/vps-panel/.env
 # is the deployment's source of truth — install.sh generates it on first run
 # with unique secrets and the operator's PANEL_HOST. update.sh must never
@@ -702,7 +708,7 @@ enable_sieve() {
   local sql=/etc/dovecot/dovecot-sql.conf.ext
   [[ -d /etc/dovecot/conf.d && -f "$sql" ]] && command -v doveconf >/dev/null 2>&1 || return 0
   if ! dpkg -s dovecot-sieve dovecot-managesieved >/dev/null 2>&1; then
-    if ! DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+    if ! DEBIAN_FRONTEND=noninteractive apt-get install -y "${APT_KEEP_CONF[@]}" --no-install-recommends \
          dovecot-sieve dovecot-managesieved >/dev/null 2>&1; then
       echo "could not install dovecot-sieve; webmail filters stay off until the next update" >&2
       return 0
@@ -862,7 +868,7 @@ enable_junk_folder || true
 # AAAA record". Never fails the update.
 ensure_dig() {
   command -v dig >/dev/null 2>&1 && return 0
-  if DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+  if DEBIAN_FRONTEND=noninteractive apt-get install -y "${APT_KEEP_CONF[@]}" --no-install-recommends \
        bind9-dnsutils >/dev/null 2>&1; then
     echo "installed bind9-dnsutils (dig)"
   else
