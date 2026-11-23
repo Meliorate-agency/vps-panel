@@ -584,8 +584,10 @@ function ContainerBindForm({
       </p>
       {slug === "pgadmin" && (
         <p>
-          pgAdmin was installed with the login <code>admin@example.com</code> /{" "}
-          <code>changeme</code>. Change it first.
+          pgAdmin&apos;s first login is <code>admin@example.com</code> with the
+          password shown in its install task (Databases says where else to
+          find it). One installed by an earlier version of the panel still
+          has the password <code>changeme</code>: change it first.
         </p>
       )}
       <p style={{ marginBottom: 4 }}>

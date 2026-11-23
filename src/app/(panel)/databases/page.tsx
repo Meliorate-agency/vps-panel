@@ -407,15 +407,13 @@ export default async function DatabasesPage() {
       )}
 
       {pgadmin?.installed && (
-        // The quick-install recipe bakes default credentials into the
-        // dpage/pgadmin4 container (PGADMIN_DEFAULT_EMAIL /
-        // PGADMIN_DEFAULT_PASSWORD env vars in
-        // agent/src/handlers/quick_install.rs::PGADMIN). The panel doesn't
-        // surface them anywhere else, so operators have no way to log in
-        // on the first visit without reading the source — that's the gap
-        // this notice closes. Tone is `warn` because the password is the
-        // string "changeme" — leaving it in place would let anyone who
-        // can reach the port (or any future-bound public IP) own the
+        // The quick-install recipe gives the dpage/pgadmin4 container its
+        // first login (PGADMIN_DEFAULT_EMAIL / PGADMIN_DEFAULT_PASSWORD env
+        // vars in agent/src/handlers/quick_install.rs::PGADMIN). The
+        // password is generated at install and kept in the container's
+        // environment only, so this notice says where to read it. Installs
+        // from before that all got "changeme", which is why the tone is
+        // `warn`: left in place, anyone who can reach the port owns the
         // Postgres GUI. Rendered as a top-level alert (not wrapped in a
         // .section card) so it doesn't visually duplicate the engine
         // group above.
@@ -433,11 +431,19 @@ export default async function DatabasesPage() {
             <strong>pgAdmin first-login credentials</strong>
             <div style={{ marginTop: 6 }}>
               Email{" "}
-              <code className={styles.code}>admin@example.com</code>, password{" "}
-              <code className={styles.code}>changeme</code>. These are baked
-              into the container by the install recipe.{" "}
-              <strong>Change the password immediately</strong> from the
-              pgAdmin top-right user menu &rarr; <em>Change Password</em>. The{" "}
+              <code className={styles.code}>admin@example.com</code>. The
+              password was generated when pgAdmin was installed: it is in the
+              log of the install task (Tasks,{" "}
+              <code className={styles.code}>quick-install:pgadmin</code>) and,
+              on the server, in the output of{" "}
+              <code className={styles.code}>
+                docker inspect pgadmin | grep PGADMIN_DEFAULT_PASSWORD
+              </code>
+              . A pgAdmin installed by an earlier version of the panel has the
+              password <code className={styles.code}>changeme</code> until it
+              is changed.{" "}
+              <strong>Change the password</strong> from the pgAdmin top-right
+              user menu &rarr; <em>Change Password</em>. The{" "}
               <code className={styles.code}>pgadmin_data</code> Docker volume
               persists the new password across restarts.
             </div>
