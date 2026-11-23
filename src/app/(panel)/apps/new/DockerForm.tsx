@@ -451,6 +451,8 @@ export default function DockerForm(props: Props) {
             className={styles.input}
             type="number"
             min={0}
+            // An emptied box reached the action as Number("") = 0: no limit.
+            required
             value={values.memory_mb}
             onChange={set("memory_mb")}
           />
@@ -465,6 +467,7 @@ export default function DockerForm(props: Props) {
             className={styles.input}
             type="number"
             min={0}
+            required
             step={0.1}
             value={values.cpus}
             onChange={set("cpus")}
