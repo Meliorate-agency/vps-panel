@@ -53,7 +53,25 @@ fi
 # and down until someone fixed it over SSH.
 # ---------------------------------------------------------------------------
 
-cargo build --release --locked --manifest-path agent/Cargo.toml
+build_agent() {
+  cargo build --release --locked --manifest-path agent/Cargo.toml
+}
+# Nothing else ever updates Rust on the server. Once a dependency needed a
+# newer rustc than install.sh had installed, this build failed on every
+# update from then on. Only after a failed build, and only once: update the
+# toolchain and build again.
+if ! build_agent; then
+  if ! command -v rustup >/dev/null 2>&1; then
+    echo "agent build failed; nothing was changed" >&2
+    exit 1
+  fi
+  echo "agent build failed - updating Rust (rustup update stable) and building once more" >&2
+  rustup update --no-self-update stable || echo "rustup update stable failed" >&2
+  if ! build_agent; then
+    echo "agent build failed again; nothing was changed" >&2
+    exit 1
+  fi
+fi
 
 # The new panel is built at its real path, because Next.js output can embed the
 # directory it was built in. The running install is moved aside to $PREV_DIR
