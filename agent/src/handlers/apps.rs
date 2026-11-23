@@ -1530,6 +1530,9 @@ const RUNTIME_ARTIFACT_DIRS: &[&str] = &["node_modules", ".next", ".output", "di
 /// very build it protects.
 const BUILD_SNAPSHOT_BASE: &str = "/var/lib/vps-panel/build-snapshots";
 
+/// Written into a snapshot once every artifact is saved.
+const SNAPSHOT_COMPLETE: &str = ".complete";
+
 /// The app's runtime artifacts as they were before an install/build, so a
 /// failure can put them back.
 struct ArtifactSnapshot {
@@ -1545,12 +1548,21 @@ impl ArtifactSnapshot {
     /// logged and left unprotected.
     async fn take(app: &str, source_dir: &str, task: &crate::ipc::tasks::TaskHandle) -> Self {
         let dir = PathBuf::from(format!("{BUILD_SNAPSHOT_BASE}/{app}"));
+        Self::take_in(dir, source_dir, task).await
+    }
+
+    async fn take_in(dir: PathBuf, source_dir: &str, task: &crate::ipc::tasks::TaskHandle) -> Self {
         let mut snap = ArtifactSnapshot {
             source_dir: PathBuf::from(source_dir),
             dir: dir.clone(),
             names: Vec::new(),
         };
-        // Left over from an update the agent restart interrupted.
+        // A snapshot still here was neither discarded nor restored: the agent
+        // was restarted in the middle of that install or build (a panel update
+        // does this). What the run left in the source tree is half written and
+        // the snapshot is the last build that worked. It used to be deleted
+        // here, and the app could not start again until a build succeeded.
+        snap.recover_interrupted(task).await;
         let _ = tokio::fs::remove_dir_all(&dir).await;
         if let Err(e) = fs_atomic::ensure_dir(&dir, 0o700).await {
             task.log(format!("could not save the current build ({e}); a failed build cannot be undone"));
@@ -1567,12 +1579,18 @@ impl ArtifactSnapshot {
             }
             match exec::run("cp", [std::ffi::OsStr::new("-al"), live.as_os_str(), dir.join(name).as_os_str()]).await {
                 Ok(_) => snap.names.push(name),
-                Err(e) => task.log(format!(
-                    "could not save {} ({e}); a failed build cannot restore it",
-                    live.display()
-                )),
+                Err(e) => {
+                    // A partial copy must never be taken for a saved build.
+                    let _ = tokio::fs::remove_dir_all(dir.join(name)).await;
+                    task.log(format!(
+                        "could not save {} ({e}); a failed build cannot restore it",
+                        live.display()
+                    ));
+                }
             }
         }
+        // Only a snapshot that got this far is put back by recover_interrupted.
+        let _ = tokio::fs::write(dir.join(SNAPSHOT_COMPLETE), b"").await;
         if !snap.names.is_empty() {
             task.log(format!(
                 "saved the current {} so a failed install or build can be undone",
@@ -1580,6 +1598,29 @@ impl ArtifactSnapshot {
             ));
         }
         snap
+    }
+
+    /// Put back a complete snapshot an interrupted run left in `dir`. One the
+    /// agent was stopped in the middle of saving (no marker) is not used: the
+    /// live build it was copying is still whole.
+    async fn recover_interrupted(&mut self, task: &crate::ipc::tasks::TaskHandle) {
+        if !self.dir.join(SNAPSHOT_COMPLETE).is_file() {
+            return;
+        }
+        for name in RUNTIME_ARTIFACT_DIRS {
+            let saved = tokio::fs::symlink_metadata(self.dir.join(name))
+                .await
+                .map(|m| m.is_dir())
+                .unwrap_or(false);
+            if saved {
+                self.names.push(name);
+            }
+        }
+        if !self.names.is_empty() {
+            task.log("the last install or build was interrupted: putting back the build saved before it");
+            self.restore(task).await;
+        }
+        self.names.clear();
     }
 
     /// Put the saved artifacts back in place of whatever the failed run left.
@@ -3171,6 +3212,61 @@ mod tests {
         // A Docker app's file is still every line as it is.
         assert_eq!(parse_app_env("A=\"x y\"\nC=a\\nb\n", true), vec![kv("A", "\"x y\""), kv("C", "a\\nb")]);
         assert_eq!(render_app_env(&[kv("A", "\"x\"\ny")], true), "A=\"x\"\\ny\n");
+    }
+
+    /// A TaskTracker on a throwaway panel.db.
+    fn tracker() -> (tempfile::TempDir, crate::ipc::tasks::TaskTracker) {
+        let dir = tempfile::tempdir().unwrap();
+        let db = crate::db::PanelDb::open(&dir.path().join("panel.db")).unwrap();
+        db.with(|c| {
+            c.execute_batch(
+                "CREATE TABLE tasks (id TEXT PRIMARY KEY, kind TEXT NOT NULL, status TEXT NOT NULL,
+                 started_at TEXT NOT NULL, finished_at TEXT, log_blob TEXT NOT NULL DEFAULT '');",
+            )
+        })
+        .unwrap();
+        (dir, crate::ipc::tasks::TaskTracker::new(db))
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_build_cut_short_by_an_agent_restart_gets_its_saved_artifacts_back() {
+        let (_db, tasks) = tracker();
+        let task = tasks.create("apps.update:web");
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("web");
+        let snaps = dir.path().join("snapshots/web");
+        let module = src.join("node_modules/pkg/index.js");
+        std::fs::create_dir_all(module.parent().unwrap()).unwrap();
+        std::fs::write(&module, "good").unwrap();
+        let source_dir = src.to_str().unwrap();
+
+        // An update saves the build, npm ci empties node_modules, and the
+        // agent is restarted: nothing discards or restores the snapshot.
+        let interrupted = ArtifactSnapshot::take_in(snaps.clone(), source_dir, &task).await;
+        assert_eq!(interrupted.names, ["node_modules"]);
+        std::fs::remove_dir_all(src.join("node_modules")).unwrap();
+        std::fs::create_dir_all(src.join("node_modules/half")).unwrap();
+        drop(interrupted);
+
+        // The next run puts the saved build back before it saves again.
+        let next = ArtifactSnapshot::take_in(snaps.clone(), source_dir, &task).await;
+        assert_eq!(std::fs::read_to_string(&module).unwrap(), "good");
+        assert!(!src.join("node_modules/half").exists());
+        assert_eq!(next.names, ["node_modules"]);
+        // And a build that fails after it still has that build to go back to.
+        std::fs::remove_dir_all(src.join("node_modules")).unwrap();
+        assert!(next.restore(&task).await);
+        assert_eq!(std::fs::read_to_string(&module).unwrap(), "good");
+        assert!(!snaps.exists());
+
+        // A snapshot the agent was stopped in the middle of saving is partial
+        // and the live build is whole: it is not put back.
+        std::fs::create_dir_all(snaps.join("node_modules")).unwrap();
+        let again = ArtifactSnapshot::take_in(snaps.clone(), source_dir, &task).await;
+        assert_eq!(std::fs::read_to_string(&module).unwrap(), "good");
+        again.discard().await;
+        task.finish(true);
     }
 
     #[test]
