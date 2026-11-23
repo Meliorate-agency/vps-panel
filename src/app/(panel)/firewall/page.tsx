@@ -42,7 +42,9 @@ export default async function FirewallPage() {
 
       <div className={styles.section}>
         <h2 className={styles.sectionTitle}>UFW</h2>
-        <p style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
+        {/* A div, not a p: the Enable button below is a form, and a form inside a
+            paragraph is invalid HTML that broke hydration of this page. */}
+        <div style={{ margin: "0 0 12px", display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
           <span>
             Status:{" "}
             {/* No answer from the agent is not "inactive". */}
@@ -56,7 +58,7 @@ export default async function FirewallPage() {
               <button type="submit" className={styles.btn}>Enable UFW</button>
             </ActionForm>
           )}
-        </p>
+        </div>
         {status && !status.ufw_enabled && (
           <div className={styles.subtitle} style={{ marginTop: 4 }}>
             UFW is inactive — added rules below are queued but will not take effect until you enable it. Enabling auto-allows the port SSH listens on.
