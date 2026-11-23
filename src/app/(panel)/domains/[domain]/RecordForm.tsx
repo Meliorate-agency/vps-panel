@@ -43,7 +43,16 @@ export default function RecordForm({
         </label>
         <label className={styles.field}>
           TTL
-          <input name="ttl" type="number" defaultValue={3600} className={styles.input} />
+          {/* Required: an emptied box reached the action as Number("") = 0
+              and the record was served with TTL 0. */}
+          <input
+            name="ttl"
+            type="number"
+            defaultValue={3600}
+            min={1}
+            required
+            className={styles.input}
+          />
         </label>
         <label className={styles.field}>
           Priority (MX/SRV)
