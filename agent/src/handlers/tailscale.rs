@@ -790,8 +790,11 @@ pub async fn logout() -> AgentResult<Json<Steps>> {
     // lives in tailscaled's memory: a restart ends it (nothing is connected
     // at this point, so nothing is cut off).
     if read_status().await.and_then(|v| text(&v["AuthURL"])).is_some() {
-        steps.push("$ systemctl restart tailscaled (the unused login link stops working)".into());
-        exec::run("systemctl", ["restart", "tailscaled"]).await?;
+        // The snap's unit has another name; `tailscaled` there failed the
+        // logout that had just worked, and the link stayed valid.
+        let unit = daemon_unit().await;
+        steps.push(format!("$ systemctl restart {unit} (the unused login link stops working)"));
+        exec::run("systemctl", ["restart", unit]).await?;
     }
     Ok(Json(Steps { steps }))
 }
@@ -824,8 +827,10 @@ async fn ensure_forwarding(steps: &mut Vec<String>) -> AgentResult<()> {
         steps.push(format!("wrote {FORWARDING_CONF} (IP forwarding, which an exit node needs)"));
     }
     // Also when the file was there: the running value may have been reset.
-    exec::run("sysctl", ["-p", FORWARDING_CONF]).await?;
-    steps.push(format!("$ sysctl -p {FORWARDING_CONF}"));
+    // -e: a kernel booted with ipv6.disable=1 has no net.ipv6 keys; sysctl
+    // then exited 1 and the exit node could not be turned on at all.
+    exec::run("sysctl", ["-e", "-p", FORWARDING_CONF]).await?;
+    steps.push(format!("$ sysctl -e -p {FORWARDING_CONF}"));
     Ok(())
 }
 
