@@ -1,6 +1,6 @@
 "use client";
 
-import { useActionState, useState } from "react";
+import { useActionState, useState, useTransition } from "react";
 import styles from "@/components/page.module.css";
 import type { DbUser } from "@/lib/agent";
 
@@ -26,19 +26,33 @@ export default function GrantForm({
   databases: { name: string }[];
 }) {
   const [state, formAction, pending] = useActionState<Result | null, FormData>(action, null);
-  // The select's value is an index into `users` — immune to any separator
-  // character legally appearing in a user or host name.
+  // The select's value is the JSON of [user, host] — immune to any separator
+  // character legally appearing in a user or host name. Not an index into
+  // `users`: a user created or dropped on this page re-renders the list, and
+  // the index then named someone else.
   const [sel, setSel] = useState("");
-  const pair = sel === "" ? null : users[Number(sel)];
+  const keyOf = (u: DbUser) => JSON.stringify([u.user, u.host]);
+  const pair = users.find((u) => keyOf(u) === sel) ?? null;
+
+  // Submitted by hand rather than through <form action>: React resets a form
+  // after its action ran, which showed the first user in the User select
+  // while the hidden fields still carried the picked one, so the next grant
+  // went to a user the form did not show.
+  const [, startTransition] = useTransition();
+  function onSubmit(e: React.FormEvent<HTMLFormElement>) {
+    e.preventDefault();
+    const fd = new FormData(e.currentTarget);
+    startTransition(() => formAction(fd));
+  }
 
   return (
-    <form action={formAction}>
+    <form onSubmit={onSubmit}>
       <div className={styles.formRow}>
         <label className={styles.field}>
           User
           <select
             className={styles.select}
-            value={sel}
+            value={pair ? sel : ""}
             onChange={(e) => setSel(e.target.value)}
             required
             disabled={users.length === 0}
@@ -46,8 +60,8 @@ export default function GrantForm({
             <option value="" disabled>
               {users.length === 0 ? "No users yet — create one above" : "Pick a user…"}
             </option>
-            {users.map((u, i) => (
-              <option key={`${u.user}@${u.host}`} value={String(i)}>
+            {users.map((u) => (
+              <option key={keyOf(u)} value={keyOf(u)}>
                 {u.user}@{u.host}
               </option>
             ))}
