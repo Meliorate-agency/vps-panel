@@ -339,17 +339,42 @@ pub async fn create_database(
         String::new()
     };
 
-    let sql = format!(
-        "CREATE DATABASE \"{}\"{} ENCODING 'UTF8' TEMPLATE template1;",
-        req.name, owner_clause
-    );
-    psql_exec(&sql).await?;
+    let template1_encoding = psql_query(
+        "SELECT pg_encoding_to_char(encoding) FROM pg_database WHERE datname = 'template1'",
+    )
+    .await?;
+    let template1_encoding = template1_encoding.trim();
+    if template1_encoding != "UTF8" {
+        tracing::info!(
+            database = %req.name,
+            template1_encoding,
+            "template1 is not UTF8: creating the database from template0 with locale C.UTF-8"
+        );
+    }
+    psql_exec(&create_database_sql(&req.name, &owner_clause, template1_encoding)).await?;
 
     let owner = req.owner.unwrap_or_else(|| "postgres".to_string());
     Ok(Json(DatabaseRow {
         name: req.name,
         owner,
     }))
+}
+
+/// CREATE DATABASE for a UTF8 database. A cluster made while the server's
+/// locale was C or POSIX has an SQL_ASCII template1, and a copy of it cannot
+/// be given another encoding ("new encoding (UTF8) is incompatible with the
+/// encoding of the template database"): every create failed there. template0
+/// can, but its locale has to fit UTF8 as well, so it is named: C.UTF-8,
+/// which glibc always has. Extensions the operator put into template1 are
+/// not in a database made this way. LC_COLLATE / LC_CTYPE and not LOCALE,
+/// which only PostgreSQL 13 and later know.
+fn create_database_sql(name: &str, owner_clause: &str, template1_encoding: &str) -> String {
+    let template = if template1_encoding == "UTF8" {
+        "TEMPLATE template1"
+    } else {
+        "LC_COLLATE 'C.UTF-8' LC_CTYPE 'C.UTF-8' TEMPLATE template0"
+    };
+    format!("CREATE DATABASE \"{name}\"{owner_clause} ENCODING 'UTF8' {template};")
 }
 
 pub async fn update_database(
@@ -742,6 +767,20 @@ mod tests {
         assert!(owner.ends_with("r.rolname NOT IN (current_user, 'reporter') \\gexec"));
         assert_eq!(lines.next(), None);
         assert!(sql.ends_with('\n'));
+    }
+
+    #[test]
+    fn a_database_on_a_non_utf8_cluster_is_made_from_template0() {
+        assert_eq!(
+            create_database_sql("shop", " OWNER \"app\"", "UTF8"),
+            "CREATE DATABASE \"shop\" OWNER \"app\" ENCODING 'UTF8' TEMPLATE template1;"
+        );
+        let from_template0 =
+            "CREATE DATABASE \"shop\" ENCODING 'UTF8' LC_COLLATE 'C.UTF-8' LC_CTYPE 'C.UTF-8' TEMPLATE template0;";
+        assert_eq!(create_database_sql("shop", "", "SQL_ASCII"), from_template0);
+        assert_eq!(create_database_sql("shop", "", "LATIN1"), from_template0);
+        // No template1 at all (the query came back empty).
+        assert_eq!(create_database_sql("shop", "", ""), from_template0);
     }
 
     #[test]
