@@ -1,8 +1,11 @@
 "use client";
 
-import { useEffect, useRef } from "react";
+import { useEffect, useRef, useSyncExternalStore } from "react";
+import { createPortal } from "react-dom";
 import pageStyles from "@/components/page.module.css";
 import styles from "./ConfirmDialog.module.css";
+
+const noSubscribe = () => () => {};
 
 type Props = {
   open: boolean;
@@ -75,9 +78,20 @@ export default function ConfirmDialog({
     };
   }, [open, pending, lockDismiss]);
 
+  // Rendered into <body>. Cards, table wrappers and the quick-install cards
+  // blur their background (backdrop-filter), which makes them the containing
+  // block of a fixed-position descendant: a dialog opened from a table row
+  // or a card was sized and clipped to that card instead of the viewport.
+  // False on the server and while hydrating, so the markup still matches.
+  const canPortal = useSyncExternalStore(
+    noSubscribe,
+    () => true,
+    () => false,
+  );
+
   if (!open) return null;
 
-  return (
+  const dialog = (
     <div
       className={styles.backdrop}
       onClick={() => {
@@ -140,4 +154,5 @@ export default function ConfirmDialog({
       </div>
     </div>
   );
+  return canPortal ? createPortal(dialog, document.body) : dialog;
 }
