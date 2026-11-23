@@ -512,7 +512,13 @@ async fn run_panel_host_task(
     let mut ssl_ok = false;
     if !ip_only && issue_ssl_opt {
         task.log(format!("verifying public DNS for {host}"));
-        match crate::handlers::dns::verify_public_dns(state, &host).await {
+        // The preflight every other certificate order runs, not the bare
+        // check: it also warns in the log when the name has an AAAA record
+        // that is not this server's. Let's Encrypt validates over IPv6
+        // first, so with such a record the order below fails although the A
+        // record is right, and nothing here said why. Its record step finds
+        // the name as step 6 left it.
+        match crate::handlers::dns::preflight_acme_dns(state, &host, task).await {
             Ok(()) => {
                 task.log("public DNS check passed".to_string());
                 let acme_email = crate::handlers::ssl::resolve_acme_email(panel_db, cfg);
@@ -623,6 +629,15 @@ async fn run_panel_host_task(
         );
         panel_vhost_to_http(&http_body, nginx_body, task).await;
     }
+
+    // Outgoing mail may use IPv6 only from the address the panel hostname
+    // publishes, and that name has just changed. The pin was looked at only
+    // when the agent started, so until then Postfix kept sending from the
+    // old name's address (or kept off IPv6). Not earlier in this task: it
+    // rewrites main.cf and puts the file back from a snapshot when Postfix
+    // refuses the result, which would undo a postconf made here in between
+    // (myhostname in step 2, the certificate in steps 7 and 8).
+    tokio::spawn(crate::handlers::mail_ip::ensure_at_startup(state.clone()));
 
     // 9. Schedule the panel restart. 5s instead of 3s so the SSE `Done` event
     //    flushes through the panel's proxy before the panel goes down.
