@@ -86,6 +86,34 @@ function resolveCd(cwd: string, arg: string): string {
   return `/${out.join("/")}`.replace(/\/+/g, "/").replace(/(.)\/$/, "$1");
 }
 
+/**
+ * A multi-line paste as one command line. The box is a single-line input, so
+ * the browser would drop the line breaks and `cmd1⏎cmd2` would run as
+ * `cmd1cmd2` (or `cmd1 cmd2`). Instead the non-empty lines are joined with
+ * ` && `, so they run in order and stop at the first that fails. A line
+ * ending in `\`, `&&`, `||` or `|` carries on into the next one with a
+ * space, and lines that are only a `#` comment are left out (one would
+ * comment out everything after it). `lines` is how many commands came out.
+ */
+function joinPastedLines(text: string): { command: string; lines: number } {
+  const commands: string[] = [];
+  let pending = "";
+  for (const raw of text.replace(/\r\n?/g, "\n").split("\n")) {
+    const line = raw.trim();
+    if (!pending && (!line || line.startsWith("#"))) continue;
+    pending = pending && line ? `${pending} ${line}` : pending || line;
+    if (/\\$/.test(pending)) {
+      pending = pending.slice(0, -1).trimEnd();
+      continue;
+    }
+    if (/(&&|\|\||\|)$/.test(pending)) continue;
+    commands.push(pending);
+    pending = "";
+  }
+  if (pending) commands.push(pending);
+  return { command: commands.join(" && "), lines: commands.length };
+}
+
 export default function TerminalConsole({
   initialPath,
   initialHistory,
@@ -109,6 +137,12 @@ export default function TerminalConsole({
   // Where Up/Down are in this session's own command list (separate from the
   // saved per-folder history on the right).
   const [recallIndex, setRecallIndex] = useState<number | null>(null);
+  // A multi-line paste was joined into the box: shows the note under it.
+  // Cleared whenever the box is emptied or replaced.
+  const [joinedLines, setJoinedLines] = useState(false);
+  useEffect(() => {
+    if (input === "") setJoinedLines(false);
+  }, [input]);
 
   const currentApp = appOf(cwd);
   const abortRef = useRef<AbortController | null>(null);
@@ -166,7 +200,9 @@ export default function TerminalConsole({
       // `cd` can't work as a real command — every run is its own `bash -lc`,
       // so the directory would snap back immediately. Treat it as a navigation
       // instruction for the tree instead, which is what the operator means.
-      if (cmd === "cd" || cmd.startsWith("cd ")) {
+      // A cd chained to more (`cd /srv && ls`, a joined paste) runs as a
+      // command: the rest is meant to run in that directory.
+      if ((cmd === "cd" || cmd.startsWith("cd ")) && !/[;&|]/.test(cmd)) {
         const target = resolveCd(cwd, cmd.slice(2));
         setCwd(target);
         setInput("");
@@ -316,6 +352,7 @@ export default function TerminalConsole({
     }
     setRecallIndex(next);
     setInput(list[next]);
+    setJoinedLines(false);
   };
 
   return (
@@ -456,6 +493,23 @@ export default function TerminalConsole({
             autoCapitalize="off"
             disabled={running}
             onChange={(e) => setInput(e.target.value)}
+            onPaste={(e) => {
+              const text = e.clipboardData.getData("text");
+              if (!/[\r\n]/.test(text)) return;
+              // Never runs anything: the joined line lands in the box for
+              // the operator to read, and Run (or Enter) is still theirs.
+              e.preventDefault();
+              const { command, lines } = joinPastedLines(text);
+              const el = e.currentTarget;
+              const start = el.selectionStart ?? input.length;
+              const end = el.selectionEnd ?? input.length;
+              const next = input.slice(0, start) + command + input.slice(end);
+              setInput(next);
+              setRecallIndex(null);
+              setJoinedLines(lines > 1);
+              const caret = start + command.length;
+              requestAnimationFrame(() => el.setSelectionRange(caret, caret));
+            }}
             onKeyDown={(e) => {
               if (e.key === "ArrowUp") {
                 e.preventDefault();
@@ -488,6 +542,12 @@ export default function TerminalConsole({
             Clear
           </button>
         </form>
+        {joinedLines && (
+          <div className={styles.pasteNote}>
+            The pasted lines were joined with <code>&amp;&amp;</code>: they run one after another
+            and stop at the first that fails. Check the line above before you run it.
+          </div>
+        )}
       </section>
 
       <aside className={styles.paneRight}>
@@ -519,6 +579,7 @@ export default function TerminalConsole({
                   title={`Used ${h.uses}× — click to load, double-click to run`}
                   onClick={() => {
                     setInput(h.command);
+                    setJoinedLines(false);
                     inputRef.current?.focus();
                   }}
                   onDoubleClick={() => void run(h.command)}
