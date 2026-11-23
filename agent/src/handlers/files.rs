@@ -253,6 +253,17 @@ fn guard_write_into(root: &RootDef, dir: &Path) -> AgentResult<()> {
     Ok(())
 }
 
+/// Gate for creating or replacing `dir/name`: `dir` must accept new items
+/// and the item itself must not be a locked path. Only `dir` used to be
+/// checked, so uploading `passwd` into /etc with overwrite replaced
+/// /etc/passwd, and a folder named `.ssh` could be moved into /root.
+fn guard_new_entry(root: &RootDef, dir: &Path, name: &std::ffi::OsStr) -> AgentResult<PathBuf> {
+    guard_write_into(root, dir)?;
+    let target = dir.join(name);
+    guard_write(root, &target)?;
+    Ok(target)
+}
+
 fn validate_name(name: &str) -> AgentResult<()> {
     if name.is_empty() {
         return Err(AgentError::Invalid("name must not be empty".into()));
@@ -676,9 +687,7 @@ async fn create_entry(req: CreateReq, is_dir: bool) -> AgentResult<Json<CreatedR
     let root = find_root(&req.root)?;
     validate_name(&req.name)?;
     let dir = resolve_dir(root, &req.path).await?;
-    guard_write_into(root, &dir)?;
-
-    let target = dir.join(&req.name);
+    let target = guard_new_entry(root, &dir, req.name.as_ref())?;
     if fs::symlink_metadata(&target).await.is_ok() {
         return Err(AgentError::Conflict(format!(
             "{:?} already exists here",
@@ -795,7 +804,7 @@ async fn move_one(root: &RootDef, rel: &str, dest: &Path) -> AgentResult<()> {
     let name = src
         .file_name()
         .ok_or_else(|| AgentError::Invalid("cannot move this path".into()))?;
-    let target = dest.join(name);
+    let target = guard_new_entry(root, dest, name)?;
     if target == src {
         return Ok(());
     }
@@ -868,9 +877,7 @@ pub async fn upload(
     let root = find_root(&q.root)?;
     validate_name(&q.name)?;
     let dir = resolve_dir(root, &q.path).await?;
-    guard_write_into(root, &dir)?;
-
-    let target = dir.join(&q.name);
+    let target = guard_new_entry(root, &dir, q.name.as_ref())?;
     if !q.overwrite && fs::symlink_metadata(&target).await.is_ok() {
         return Err(AgentError::Conflict(format!(
             "{:?} already exists here",
@@ -1015,6 +1022,22 @@ fn pct_encode(s: &str) -> String {
     out
 }
 
+/// The name for the quoted `filename="..."` form, which can't carry a quote,
+/// a backslash or a control character without breaking the header (an escape
+/// character in a file name made the download fail with a 500); filename*
+/// carries the real name.
+fn ascii_fallback_name(name: &str) -> String {
+    name.chars()
+        .map(|c| {
+            if c.is_ascii() && !c.is_ascii_control() && !matches!(c, '"' | '\\') {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect()
+}
+
 /// Streamed download.
 ///
 /// Unlike every mutating handler, this one canonicalises the LEAF as well as
@@ -1037,12 +1060,7 @@ pub async fn download(Query(q): Query<DownloadQuery>) -> AgentResult<axum::respo
     } else {
         "attachment"
     };
-    // The quoted form can't carry a quote, a backslash or a newline without
-    // breaking the header; filename* carries the real name.
-    let ascii_name: String = name
-        .chars()
-        .map(|c| if c.is_ascii() && !matches!(c, '"' | '\\' | '\n' | '\r') { c } else { '_' })
-        .collect();
+    let ascii_name = ascii_fallback_name(&name);
 
     let mut file = fs::File::open(&canon).await.map_err(AgentError::Io)?;
     let stream = async_stream::stream! {
@@ -1187,8 +1205,7 @@ async fn trash_path(root: &RootDef, src: &Path) -> AgentResult<String> {
     let payload_dir = entry_dir.join("payload");
     fs_atomic::ensure_dir(&payload_dir, 0o700).await?;
 
-    move_path(&src, &payload_dir.join(&name)).await?;
-
+    let payload = payload_dir.join(&name);
     let manifest = TrashMeta {
         id: id.clone(),
         name,
@@ -1200,7 +1217,24 @@ async fn trash_path(root: &RootDef, src: &Path) -> AgentResult<String> {
     };
     let body = serde_json::to_vec_pretty(&manifest)
         .map_err(|e| AgentError::Other(anyhow::anyhow!("serialize trash meta: {e}")))?;
-    fs_atomic::write(&entry_dir.join("meta.json"), &body, 0o600).await?;
+    // The manifest goes in before the item. Written after it, a failed write
+    // (a full disk, which is when people delete things) left the item gone
+    // from its folder and in no list: an entry without a manifest is never
+    // shown, restored or purged.
+    let moved = async {
+        fs_atomic::write(&entry_dir.join("meta.json"), &body, 0o600).await?;
+        move_path(&src, &payload).await
+    }
+    .await;
+    if let Err(e) = moved {
+        // Nothing arrived: drop the entry. remove_dir only takes an empty
+        // payload folder, so what a cross-device `mv` copied before it
+        // stopped stays in the trash.
+        if fs::remove_dir(&payload_dir).await.is_ok() {
+            let _ = fs::remove_dir_all(&entry_dir).await;
+        }
+        return Err(e);
+    }
     Ok(id)
 }
 
@@ -1287,28 +1321,46 @@ pub async fn trash_restore(Json(req): Json<RestoreReq>) -> AgentResult<Json<Rest
     // Re-run the guard on restore: the protected list may have grown, or the
     // original location may now sit inside one.
     guard_write(root, &original)?;
-    let parent = original
-        .parent()
-        .ok_or_else(|| AgentError::Invalid("item has no parent directory".into()))?;
-    if fs::symlink_metadata(&original).await.is_ok() {
+    let target = restore_target(root, &original).await?;
+    if fs::symlink_metadata(&target).await.is_ok() {
         return Err(AgentError::Conflict(format!(
             "{} already exists — rename or move it first",
             meta.original_path
         )));
     }
-    if fs::metadata(parent).await.is_err() {
-        return Err(AgentError::Conflict(format!(
-            "{} no longer exists",
-            parent.display()
-        )));
-    }
 
-    move_path(&entry_dir.join("payload").join(&meta.name), &original).await?;
+    move_path(&entry_dir.join("payload").join(&meta.name), &target).await?;
     let _ = fs::remove_dir_all(&entry_dir).await;
     Ok(Json(RestoreResponse {
         ok: true,
         restored_to: meta.original_path,
     }))
+}
+
+/// Where a trashed item goes back to: its original folder as it resolves
+/// now, which must still be inside the root, plus its name, which must still
+/// pass the write guard there. Only the stored path used to be checked, so
+/// when a folder on the way had been swapped for a symlink (an app can do
+/// that in its own tree) root moved the item to wherever the link pointed.
+async fn restore_target(root: &RootDef, original: &Path) -> AgentResult<PathBuf> {
+    let (Some(parent), Some(name)) = (original.parent(), original.file_name()) else {
+        return Err(AgentError::Invalid("item has no parent directory".into()));
+    };
+    let gone = |p: &Path| AgentError::Conflict(format!("{} no longer exists", p.display()));
+    let base = fs::canonicalize(root.path)
+        .await
+        .map_err(|_| gone(Path::new(root.path)))?;
+    let dir = fs::canonicalize(parent).await.map_err(|_| gone(parent))?;
+    if !dir.starts_with(&base) {
+        return Err(AgentError::Invalid(format!(
+            "{} now leads outside the {} root",
+            parent.display(),
+            root.label
+        )));
+    }
+    let target = dir.join(name);
+    guard_write(root, &target)?;
+    Ok(target)
 }
 
 pub async fn trash_purge_one(AxPath(id): AxPath<String>) -> AgentResult<Json<OkResponse>> {
@@ -1480,6 +1532,42 @@ mod tests {
     }
 
     #[test]
+    fn a_new_or_replaced_item_cannot_be_a_protected_path() {
+        let fs_root = ROOTS.iter().find(|r| r.id == "fs").unwrap();
+        let name = |s: &'static str| std::ffi::OsStr::new(s);
+        // /etc takes new files, but an upload with overwrite must not
+        // replace the protected ones in it.
+        assert!(guard_new_entry(fs_root, p("/etc"), name("passwd")).is_err());
+        assert!(guard_new_entry(fs_root, p("/etc"), name("sudoers.d")).is_err());
+        assert!(guard_new_entry(fs_root, p("/root"), name(".ssh")).is_err());
+        assert_eq!(
+            guard_new_entry(fs_root, p("/etc"), name("motd")).unwrap(),
+            PathBuf::from("/etc/motd")
+        );
+        let drive = ROOTS.iter().find(|r| r.id == "drive").unwrap();
+        assert!(guard_new_entry(drive, p("/srv/drive"), name("passwd")).is_ok());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn restore_follows_the_folder_as_it_resolves_now() {
+        let fs_root = ROOTS.iter().find(|r| r.id == "fs").unwrap();
+        let dir = std::env::temp_dir().join(format!("files-restore-{}", Uuid::new_v4().simple()));
+        std::fs::create_dir_all(dir.join("plain")).unwrap();
+        // The folder the item came from is now a link into a protected path.
+        std::os::unix::fs::symlink("/usr", dir.join("swapped")).unwrap();
+
+        let canon = std::fs::canonicalize(&dir).unwrap();
+        assert_eq!(
+            restore_target(fs_root, &dir.join("plain/item")).await.unwrap(),
+            canon.join("plain/item")
+        );
+        assert!(restore_target(fs_root, &dir.join("swapped/item")).await.is_err());
+        assert!(restore_target(fs_root, &dir.join("gone/item")).await.is_err());
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
     fn the_drive_root_is_writable_and_ordinary() {
         let drive = ROOTS.iter().find(|r| r.id == "drive").unwrap();
         assert_eq!(drive.path, "/srv/drive");
@@ -1520,6 +1608,10 @@ mod tests {
         assert_eq!(pct_encode("š.txt"), "%C5%A1.txt");
         // A newline in a filename would otherwise split the header.
         assert_eq!(pct_encode("a\nb"), "a%0Ab");
+        // The quoted fallback has to be a legal header value whatever the name.
+        let fallback = ascii_fallback_name("a\u{1b}b\u{7f}\"c\nš.txt");
+        assert_eq!(fallback, "a_b__c__.txt");
+        assert!(axum::http::HeaderValue::from_str(&fallback).is_ok());
     }
 
     #[test]
