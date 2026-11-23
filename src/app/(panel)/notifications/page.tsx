@@ -68,6 +68,9 @@ export default async function NotificationsPage() {
           { key: "events", label: "Events" },
           { key: "actions", label: "", width: "260px" },
         ]}
+        // Each row's Send test keeps its answer: keyed by channel so the
+        // answer stays on its row when a channel is added above or removed.
+        rowKey={(_r, i) => rows[i].id}
         rows={rows.map((r) => ({
           channel: <strong>{r.channel}</strong>,
           target:
