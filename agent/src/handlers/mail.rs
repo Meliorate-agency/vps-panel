@@ -146,15 +146,19 @@ async fn migrate_mail_schema(conn: &mut mysql_async::Conn) {
     if MAIL_MIGRATED.load(Ordering::Acquire) {
         return;
     }
+    // ip_forced: the IPv6 choice was made with force, so it stands whatever
+    // the domain's SPF record says (mail_ip.rs). 0 for every existing row:
+    // which earlier choices were forced was never stored.
     match conn
         .query_drop(
             "ALTER TABLE virtual_domains \
-             ADD COLUMN IF NOT EXISTS ip_preference VARCHAR(8) NOT NULL DEFAULT 'default'",
+             ADD COLUMN IF NOT EXISTS ip_preference VARCHAR(8) NOT NULL DEFAULT 'default', \
+             ADD COLUMN IF NOT EXISTS ip_forced TINYINT(1) NOT NULL DEFAULT 0",
         )
         .await
     {
         Ok(()) => MAIL_MIGRATED.store(true, Ordering::Release),
-        Err(e) => tracing::warn!(error = %e, "could not add virtual_domains.ip_preference"),
+        Err(e) => tracing::warn!(error = %e, "could not add virtual_domains.ip_preference and ip_forced"),
     }
 }
 
@@ -241,6 +245,9 @@ pub async fn create_domain(
         (&name,),
     )
     .await?;
+    // 0 rows when the domain was there already: the panel calls this before
+    // every new mailbox.
+    let created = conn.affected_rows() > 0;
 
     let (dkim_status, dkim_pubkey) = match ensure_dkim_key(&name).await {
         Ok(pubkey) => ("ok".to_string(), Some(pubkey)),
@@ -288,6 +295,13 @@ pub async fn create_domain(
         let _ = crate::handlers::ssl::regenerate_mail_sni(&state).await;
         None
     };
+
+    // On a server that sends over IPv6: is the new domain's SPF record fit
+    // for it? After the records above were written, so a zone hosted here
+    // already answers with them.
+    if created {
+        notes.extend(crate::handlers::mail_ip::domain_added(&state, &name).await);
+    }
 
     Ok(Json(CreateDomainResp {
         name,

@@ -85,6 +85,14 @@ impl Ipv4Facts {
         self.interfaces.iter().any(|(_, a)| a == ip)
     }
 
+    /// The device an address is configured on.
+    pub fn device_of(&self, ip: &str) -> Option<&str> {
+        self.interfaces
+            .iter()
+            .find(|(_, a)| a == ip)
+            .map(|(dev, _)| dev.as_str())
+    }
+
     /// The server's own public address: the one outgoing connections leave
     /// from when that is public, else the first public one on an interface.
     fn own_public(&self) -> Option<&str> {
@@ -109,6 +117,17 @@ impl Ipv4Facts {
             (None, Some(named)) => Some(named.clone()),
             (None, None) => self.interfaces.first().map(|(_, a)| a.clone()),
         }
+    }
+
+    /// The address the panel hostname resolves to, when that is not this
+    /// server: a proxy in front of the panel, or the server the name used to
+    /// point at.
+    pub fn foreign(&self) -> Option<&str> {
+        if self.named.iter().any(|a| self.on_interface(a)) {
+            return None;
+        }
+        self.own_public()?;
+        self.named.first().map(String::as_str)
     }
 
     /// Every IPv4 address a name may carry and still reach this server: the
@@ -293,12 +312,8 @@ fn parse_interface_ipv6s(ip_output: &str) -> Vec<String> {
     out
 }
 
-/// Every IPv4 address on this server's interfaces, loopback interface aside.
-pub async fn ipv4s_on_interfaces() -> Vec<String> {
-    ipv4_devices().await.into_iter().map(|(_, ip)| ip).collect()
-}
-
-/// The same, each with the device it is on.
+/// Every IPv4 address on this server's interfaces with the device it is on,
+/// loopback interface aside.
 async fn ipv4_devices() -> Vec<(String, String)> {
     match crate::exec::run("ip", ["-4", "-o", "addr", "show", "scope", "global"]).await {
         Ok(out) => parse_interface_ipv4s(&out.stdout),
@@ -346,6 +361,19 @@ pub async fn default_source_ipv4() -> Option<String> {
         .await
         .ok()?;
     route_field(&out.stdout, "src").and_then(|s| parse_ipv4(&s))
+}
+
+/// The device packets sent from `addr` leave through.
+/// `ip -4 route get 1.1.1.1 from 203.0.113.9` prints
+/// `1.1.1.1 from 203.0.113.9 via 172.31.1.1 dev eth0 uid 0`, following the
+/// routing rules for that source address. None when the kernel has no such
+/// route (the address is not on this server, or there is no default route).
+pub async fn route_dev_from(addr: &str) -> Option<String> {
+    let addr = parse_ipv4(addr)?;
+    let out = crate::exec::run("ip", ["-4", "route", "get", "1.1.1.1", "from", addr.as_str()])
+        .await
+        .ok()?;
+    route_field(&out.stdout, "dev")
 }
 
 /// Loopback, private (RFC 1918), link-local, carrier-grade NAT and 0/8: none
@@ -437,6 +465,7 @@ mod tests {
         // The usual VPS.
         let f = v4(&["198.51.100.127"], &[("eth0", "198.51.100.127")]);
         assert_eq!(f.address().as_deref(), Some("198.51.100.127"));
+        assert_eq!(f.foreign(), None);
         // Two public addresses, the panel hostname on the second: the name
         // decides, not the address connections leave from.
         let f = v4(
@@ -444,9 +473,11 @@ mod tests {
             &[("eth0", "198.51.100.127"), ("eth0", "203.0.113.9")],
         );
         assert_eq!(f.address().as_deref(), Some("203.0.113.9"));
+        assert_eq!(f.foreign(), None);
         // A name with two answers, one of them here.
         let f = v4(&["192.0.2.50", "198.51.100.127"], &[("eth0", "198.51.100.127")]);
         assert_eq!(f.address().as_deref(), Some("198.51.100.127"));
+        assert_eq!(f.foreign(), None);
         // A LAN install named by its private address.
         let f = v4(&["192.168.1.10"], &[("eth0", "192.168.1.10")]);
         assert_eq!(f.address().as_deref(), Some("192.168.1.10"));
@@ -458,6 +489,7 @@ mod tests {
         // it is being moved from.
         let f = v4(&["104.16.1.1"], &[("eth0", "10.0.0.5"), ("eth0", "198.51.100.127")]);
         assert_eq!(f.address().as_deref(), Some("198.51.100.127"));
+        assert_eq!(f.foreign(), Some("104.16.1.1"));
         // The name's address still passes the certificate preflight.
         assert_eq!(f.reaching(), vec!["198.51.100.127", "10.0.0.5", "104.16.1.1"]);
 
@@ -480,6 +512,7 @@ mod tests {
     fn behind_nat_the_hostnames_address_is_the_servers_public_one() {
         let f = v4(&["198.51.100.127"], &[("ens5", "172.31.20.4")]);
         assert_eq!(f.address().as_deref(), Some("198.51.100.127"));
+        assert_eq!(f.foreign(), None);
         assert_eq!(f.reaching(), vec!["198.51.100.127", "172.31.20.4"]);
         // The interfaces could not be read: as before, the name is believed.
         let f = v4(&["198.51.100.127"], &[]);
@@ -492,6 +525,7 @@ mod tests {
         assert_eq!(f.address().as_deref(), Some("198.51.100.127"));
         let f = v4(&[], &[("eth0", "10.0.0.5"), ("docker0", "172.17.0.1")]);
         assert_eq!(f.address().as_deref(), Some("10.0.0.5"));
+        assert_eq!(f.foreign(), None);
         assert_eq!(v4(&[], &[]).address(), None);
     }
 
