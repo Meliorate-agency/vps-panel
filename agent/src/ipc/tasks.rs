@@ -258,6 +258,17 @@ impl TaskTracker {
         Some((state, g.tx.subscribe()))
     }
 
+    /// The id of a still-running task of exactly this kind.
+    pub fn live_task_id(&self, kind: &str) -> Option<String> {
+        self.live
+            .lock()
+            .unwrap()
+            .values()
+            .map(|t| t.lock().unwrap())
+            .find(|t| t.state.kind == kind)
+            .map(|t| t.state.id.clone())
+    }
+
     /// True when a still-running task's kind starts with `prefix`. Used as a
     /// cheap mutual-exclusion check for operations that must not overlap
     /// (e.g. two concurrent SQL-dump imports racing each other's DROP/CREATE).
@@ -683,5 +694,15 @@ mod tests {
         let id = task.id.clone();
         task.finish(true);
         assert_eq!(stored_log(&tasks, &id), "one\ntwo");
+    }
+
+    #[test]
+    fn a_running_task_is_found_by_its_kind() {
+        let (_dir, tasks) = tracker();
+        let task = tasks.create("apps.create:shop");
+        assert_eq!(tasks.live_task_id("apps.create:shop"), Some(task.id.clone()));
+        assert_eq!(tasks.live_task_id("apps.create:shop-test"), None);
+        task.finish(true);
+        assert_eq!(tasks.live_task_id("apps.create:shop"), None);
     }
 }

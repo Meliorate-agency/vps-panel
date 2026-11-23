@@ -1762,6 +1762,16 @@ pub async fn delete(
     Query(q): Query<DeleteQuery>,
 ) -> AgentResult<Json<OkResponse>> {
     validate_name(&name)?;
+    // A deploy or update that is still running went on after the delete: it
+    // wrote the unit and the vhost again, for an app the panel no longer
+    // lists. Its npm steps end by themselves now (NPM_STEP_LIMIT), so the
+    // delete waits for it.
+    if let Some((what, id)) = running_app_task(&state, &name) {
+        return Err(AgentError::Conflict(format!(
+            "{name} cannot be deleted while its {what} is running (task {id} on the Tasks page) - \
+             wait for it to finish, then delete the app"
+        )));
+    }
     // Read before anything is removed: it names the container, image tags and
     // volumes to clean up.
     let docker = docker_apps::read_config(&name).await;
@@ -1953,14 +1963,23 @@ pub async fn update(
 /// One deploy stage or update per app at a time. Two runs in the same checkout
 /// corrupt node_modules/.next, and they would share the app's build snapshot.
 pub(crate) fn refuse_if_app_task_running(state: &AppState, name: &str) -> AgentResult<()> {
-    for kind in [format!("apps.create:{name}"), format!("apps.update:{name}")] {
-        if state.tasks.any_live_kind(&kind) {
-            return Err(AgentError::Conflict(format!(
-                "a deploy or update of {name} is already running - wait for it to finish"
-            )));
-        }
+    if running_app_task(state, name).is_some() {
+        return Err(AgentError::Conflict(format!(
+            "a deploy or update of {name} is already running - wait for it to finish"
+        )));
     }
     Ok(())
+}
+
+/// The app's task that is still running, as (what it is, task id): a deploy
+/// stage or an update.
+fn running_app_task(state: &AppState, name: &str) -> Option<(&'static str, String)> {
+    [
+        ("deploy", format!("apps.create:{name}")),
+        ("update", format!("apps.update:{name}")),
+    ]
+    .into_iter()
+    .find_map(|(what, kind)| state.tasks.live_task_id(&kind).map(|id| (what, id)))
 }
 
 /// `slot_port` is None for an app with no routing slot: it is built but not
