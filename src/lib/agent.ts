@@ -61,12 +61,63 @@ export function agentRequest<T = unknown>(opts: RequestOptions): Promise<T> {
             reject(new AgentError(500, `non-json response: ${body.slice(0, 200)}`));
           }
         });
+        // The agent went away mid-answer (a restart, a self-update). Without
+        // this the response never ends and the caller waits forever.
+        res.on("error", reject);
       },
     );
     req.on("error", reject);
     if (data) req.write(data);
     req.end();
   });
+}
+
+/**
+ * An agent response body as a web stream, for the routes that relay one to
+ * the browser (file download, terminal output). The agent is only read as
+ * fast as the browser takes the data: pushing every chunk as it arrived kept
+ * whatever the browser had not downloaded yet in the panel's memory, a whole
+ * multi-GB file on a slow connection. Cancelling (the browser went away)
+ * closes the agent connection.
+ */
+export function relayBody(res: http.IncomingMessage, onCancel?: () => void): ReadableStream<Uint8Array> {
+  return new ReadableStream<Uint8Array>(
+    {
+      start(controller) {
+        res.on("data", (chunk: Buffer) => {
+          try {
+            controller.enqueue(new Uint8Array(chunk));
+          } catch {
+            // already closed (the browser went away)
+            return;
+          }
+          if ((controller.desiredSize ?? 0) <= 0) res.pause();
+        });
+        res.on("end", () => {
+          try {
+            controller.close();
+          } catch {
+            // already closed
+          }
+        });
+        res.on("error", (e) => {
+          try {
+            controller.error(e);
+          } catch {
+            // already closed
+          }
+        });
+      },
+      pull() {
+        res.resume();
+      },
+      cancel() {
+        res.destroy();
+        onCancel?.();
+      },
+    },
+    { highWaterMark: 1024 * 1024, size: (chunk) => chunk.byteLength },
+  );
 }
 
 export const agent = {
@@ -785,7 +836,8 @@ export const agent = {
 
   tasks: {
     list: () => agentRequest<TaskState[]>({ method: "GET", path: "/tasks" }),
-    get: (id: string) => agentRequest<TaskState>({ method: "GET", path: `/tasks/${id}` }),
+    get: (id: string) =>
+      agentRequest<TaskState>({ method: "GET", path: `/tasks/${encodeURIComponent(id)}` }),
   },
 
   quickInstall: {

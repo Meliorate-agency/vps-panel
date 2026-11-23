@@ -53,6 +53,8 @@ export async function GET(
               new TextEncoder().encode(`event: error\ndata: agent ${res.statusCode}\n\n`),
             );
             controller.close();
+            // Discard the error body, or the agent connection stays open.
+            res.resume();
             return;
           }
           res.on("data", (chunk: Buffer) => {

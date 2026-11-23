@@ -1,5 +1,6 @@
 import { NextRequest } from "next/server";
 import http from "node:http";
+import { relayBody } from "@/lib/agent";
 import { config } from "@/lib/config";
 import { getSession } from "@/lib/auth";
 import { writeAudit } from "@/lib/audit";
@@ -103,38 +104,10 @@ export async function POST(req: NextRequest) {
           return;
         }
 
-        const stream = new ReadableStream<Uint8Array>({
-          start(controller) {
-            res.on("data", (chunk: Buffer) => {
-              try {
-                controller.enqueue(new Uint8Array(chunk));
-              } catch {
-                // controller already closed
-              }
-            });
-            res.on("end", () => {
-              try {
-                controller.close();
-              } catch {
-                // already closed
-              }
-            });
-            res.on("error", (e) => {
-              try {
-                controller.error(e);
-              } catch {
-                // already closed
-              }
-            });
-          },
-          cancel() {
-            // The operator hit Stop or closed the tab. Destroying the socket
-            // propagates to the agent, which drops the response body and kills
-            // the command's whole process group.
-            res.destroy();
-            upstream.destroy();
-          },
-        });
+        // The operator hit Stop or closed the tab: closing the connection
+        // reaches the agent, which drops the response body and kills the
+        // command's whole process group.
+        const stream = relayBody(res, () => upstream.destroy());
 
         resolve(
           new Response(stream, {

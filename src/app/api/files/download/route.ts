@@ -1,5 +1,6 @@
 import { NextRequest } from "next/server";
 import http from "node:http";
+import { relayBody } from "@/lib/agent";
 import { config } from "@/lib/config";
 import { getSession } from "@/lib/auth";
 
@@ -62,34 +63,7 @@ export async function GET(req: NextRequest) {
           return;
         }
 
-        const body = new ReadableStream<Uint8Array>({
-          start(controller) {
-            res.on("data", (chunk: Buffer) => {
-              try {
-                controller.enqueue(new Uint8Array(chunk));
-              } catch {
-                // controller already closed (client went away)
-              }
-            });
-            res.on("end", () => {
-              try {
-                controller.close();
-              } catch {
-                // already closed
-              }
-            });
-            res.on("error", (e) => {
-              try {
-                controller.error(e);
-              } catch {
-                // already closed
-              }
-            });
-          },
-          cancel() {
-            res.destroy();
-          },
-        });
+        const body = relayBody(res);
 
         const headers = new Headers();
         for (const h of [
