@@ -4,6 +4,7 @@ import { revalidatePath } from "next/cache";
 import { agent } from "@/lib/agent";
 import { requireAdmin } from "@/lib/auth";
 import { writeAudit } from "@/lib/audit";
+import { agentErrorMessage } from "@/lib/redirects";
 
 export type RunBackupResult = { ok: true; taskId: string } | { ok: false; error: string };
 
@@ -16,7 +17,7 @@ export async function runBackupAction(): Promise<RunBackupResult> {
     writeAudit({ actorId: s.userId, action: "backups.run", result: "ok" });
     return { ok: true, taskId: resp.task_id };
   } catch (e: unknown) {
-    const msg = e instanceof Error ? e.message : String(e);
+    const msg = agentErrorMessage(e).replace(/^(conflict|invalid input): /, "");
     writeAudit({ actorId: s.userId, action: "backups.run", result: "error", message: msg });
     return { ok: false, error: msg };
   }
@@ -30,7 +31,7 @@ export async function restoreBackupAction(snapshot: string, target: string): Pro
     writeAudit({ actorId: s.userId, action: "backups.restore", target: `${snapshot}->${target}`, result: "ok" });
     return { ok: true, taskId: resp.task_id };
   } catch (e: unknown) {
-    const msg = e instanceof Error ? e.message : String(e);
+    const msg = agentErrorMessage(e).replace(/^(conflict|invalid input): /, "");
     writeAudit({
       actorId: s.userId,
       action: "backups.restore",
