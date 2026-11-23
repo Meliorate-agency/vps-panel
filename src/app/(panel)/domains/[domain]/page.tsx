@@ -32,6 +32,7 @@ import AddDomainForm from "../AddDomainForm";
 import ReconcileButton from "./ReconcileButton";
 import DomainDeleteButton from "../DomainDeleteButton";
 import SiteDeleteButton from "../SiteDeleteButton";
+import SslIssuingBadge from "../SslIssuingBadge";
 
 export const dynamic = "force-dynamic";
 
@@ -429,7 +430,9 @@ function renderSslStatus(site: SiteRow, status: SiteStatus | null) {
     );
   }
   if (site.ssl_requested === 1 && site.last_ssl_error === null) {
-    return <StatusBadge text="SSL issuing..." tone="warn" />;
+    // Re-renders the page until the reconciler settles the row, as on the
+    // list: a plain badge stayed on "issuing..." until a manual reload.
+    return <SslIssuingBadge label="SSL issuing..." />;
   }
   if (site.ssl_requested === 1 && site.last_ssl_error !== null) {
     return (
