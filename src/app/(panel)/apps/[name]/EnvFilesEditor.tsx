@@ -121,6 +121,7 @@ export default function EnvFilesEditor({
             name={name}
             sourceDir={sourceDir}
             preDeploy={preDeploy}
+            existing={data.files.map((f) => f.path)}
             onCreated={load}
           />
         </>
@@ -182,17 +183,32 @@ function FileCard({
 }) {
   const [open, setOpen] = useState(false);
   const [content, setContent] = useState(file.content);
+  // What is on disk as far as this card knows: the listed content, or what
+  // it last saved. The listing is not re-read after a save.
+  const [saved, setSaved] = useState(file.content);
   const [status, setStatus] = useState<SaveStatus>({ kind: "idle" });
   const [confirmOpen, setConfirmOpen] = useState(false);
   const [deleting, setDeleting] = useState(false);
   const [delErr, setDelErr] = useState<string | null>(null);
 
-  const dirty = !file.too_large && content !== file.content;
+  // A Rescan (or, on the deploy form, another app name's listing) brings new
+  // content for this path: show it unless there are unsaved edits, so Save
+  // never writes back a stale copy over what is on disk now.
+  const [listed, setListed] = useState(file.content);
+  if (file.content !== listed) {
+    setListed(file.content);
+    setSaved(file.content);
+    if (content === saved) setContent(file.content);
+  }
+
+  const dirty = !file.too_large && content !== saved;
 
   const save = async (restart: boolean) => {
     setStatus({ kind: "saving" });
-    const r = await saveAppEnvFileAction(name, file.path, content, restart);
+    const body = content;
+    const r = await saveAppEnvFileAction(name, file.path, body, restart);
     if (r.ok) {
+      setSaved(body);
       setStatus({ kind: "ok", msg: savedMessage(restart, r.restarted, preDeploy) });
     } else {
       setStatus({ kind: "err", msg: r.error });
@@ -413,11 +429,14 @@ function CreateForm({
   name,
   sourceDir,
   preDeploy,
+  existing,
   onCreated,
 }: {
   name: string;
   sourceDir: string;
   preDeploy: boolean;
+  /** Paths of the files listed above. */
+  existing: string[];
   onCreated: () => Promise<void>;
 }) {
   const [path, setPath] = useState(".env");
@@ -431,6 +450,15 @@ function CreateForm({
       setStatus({
         kind: "err",
         msg: "File name must start with .env (e.g. .env, .env.local, .env.production).",
+      });
+      return;
+    }
+    // The agent overwrites an existing file: the default ".env" here would
+    // silently replace the app's real one with what was typed below.
+    if (existing.includes(trimmed.replace(/^(\.\/)+/, ""))) {
+      setStatus({
+        kind: "err",
+        msg: `${trimmed} already exists. Edit it above instead.`,
       });
       return;
     }
