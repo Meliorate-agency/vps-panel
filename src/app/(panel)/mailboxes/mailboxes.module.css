@@ -273,6 +273,14 @@
   /* visible by default */
 }
 
+/* The table card's backdrop-filter makes it a stacking context, so the Edit
+ * popover of the last rows, which hangs below the table, was painted over by
+ * the Forwarders card after it. Lift the whole table above the cards below. */
+.mailboxTable {
+  position: relative;
+  z-index: 1;
+}
+
 @media (max-width: 768px) {
   .desktopActions {
     display: none;

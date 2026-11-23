@@ -2,6 +2,7 @@
 
 import { useActionState, useEffect, useState, useTransition } from "react";
 import { useRouter } from "next/navigation";
+import { createPortal } from "react-dom";
 import ConfirmDialog from "@/components/ConfirmDialog/ConfirmDialog";
 import pageStyles from "@/components/page.module.css";
 import local from "./mailboxes.module.css";
@@ -129,6 +130,8 @@ export default function MailboxActions({
     });
   }
 
+  // The dialogs are portaled: the table card's backdrop-filter would trap
+  // their fixed positioning inside the table, under the cards below it.
   return (
     <div className={local.mobileKebab}>
       <button
@@ -145,7 +148,9 @@ export default function MailboxActions({
         </svg>
       </button>
 
-      {open && view === "menu" && (
+      {open &&
+        view === "menu" &&
+        createPortal(
         <ConfirmDialog
           open
           title={email}
@@ -205,10 +210,13 @@ export default function MailboxActions({
               Close
             </button>
           </div>
-        </ConfirmDialog>
-      )}
+        </ConfirmDialog>,
+          document.body,
+        )}
 
-      {open && view === "edit" && (
+      {open &&
+        view === "edit" &&
+        createPortal(
         <ConfirmDialog
           open
           title={`Edit ${email}`}
@@ -286,10 +294,13 @@ export default function MailboxActions({
               </button>
             </div>
           </form>
-        </ConfirmDialog>
-      )}
+        </ConfirmDialog>,
+          document.body,
+        )}
 
-      {open && view === "delete" && (
+      {open &&
+        view === "delete" &&
+        createPortal(
         <ConfirmDialog
           open
           title="Delete mailbox?"
@@ -338,8 +349,9 @@ export default function MailboxActions({
               {deletePending ? "Deleting..." : "Delete"}
             </button>
           </div>
-        </ConfirmDialog>
-      )}
+        </ConfirmDialog>,
+          document.body,
+        )}
     </div>
   );
 }
