@@ -4,6 +4,7 @@ import { revalidatePath } from "next/cache";
 import { agent, type FileListing, type TrashRow } from "@/lib/agent";
 import { requireAdmin } from "@/lib/auth";
 import { writeAudit } from "@/lib/audit";
+import { agentErrorMessage } from "@/lib/redirects";
 
 /**
  * Server actions behind /files.
@@ -18,9 +19,10 @@ import { writeAudit } from "@/lib/audit";
 export type FilesResult = { ok: true } | { ok: false; error: string };
 
 /** Narrowed to the failure arm so it composes with the actions that return a
- *  richer success shape (`{ok:true, listing}`), not just `{ok:true}`. */
+ *  richer success shape (`{ok:true, listing}`), not just `{ok:true}`.
+ *  The agent's sentence, not `agent 400: {"error":"invalid input: ..."}`. */
 function fail(e: unknown): { ok: false; error: string } {
-  return { ok: false, error: e instanceof Error ? e.message : String(e) };
+  return { ok: false, error: agentErrorMessage(e).replace(/^(conflict|invalid input): /, "") };
 }
 
 /** Absolute path of `rel` inside `root`, for audit rows. */
