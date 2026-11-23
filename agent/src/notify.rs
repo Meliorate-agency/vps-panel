@@ -175,6 +175,13 @@ async fn send(
             if !(target.starts_with("https://") || target.starts_with("http://")) {
                 return Err(AgentError::Invalid(format!("not an http(s) URL: {target}")));
             }
+            // The URL is written into a curl config file below, one option
+            // per line: a line break in it would start a second option.
+            if target.chars().any(|c| c.is_control()) {
+                return Err(AgentError::Invalid(
+                    "the webhook URL must not contain line breaks or control characters".into(),
+                ));
+            }
             // Discord rejects content over 2000 characters.
             let mut text = format!("{subject}\n{body}");
             if text.len() > 1900 {
@@ -457,6 +464,12 @@ mod tests {
         let path = f.path().to_path_buf();
         drop(f);
         assert!(!path.exists());
+    }
+
+    #[tokio::test]
+    async fn a_webhook_url_with_a_line_break_is_refused() {
+        let url = "https://hooks.example.com/x\noutput = \"/tmp/y\"";
+        assert!(send("webhook", url, None, None, "test", "Subject", "Body").await.is_err());
     }
 
     /// The whole webhook path through the real curl, against a local listener.
