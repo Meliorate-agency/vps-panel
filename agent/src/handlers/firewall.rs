@@ -483,12 +483,14 @@ fn is_valid_ip(s: &str) -> bool {
     s.parse::<std::net::IpAddr>().is_ok()
 }
 
+/// The values after `key` on its line. Everything after the key, not the
+/// text up to the next colon: that cut a banned IPv6 address down to its
+/// first group (`2001`), which showed in the list and could not be unbanned.
 fn parse_field_list(content: &str, key: &str) -> Vec<String> {
     content
         .lines()
-        .find(|l| l.contains(key))
-        .and_then(|l| l.split(':').nth(1))
-        .map(|s| {
+        .find_map(|l| l.split_once(key))
+        .map(|(_, s)| {
             s.split_whitespace()
                 .map(|s| s.to_string())
                 .filter(|s| !s.is_empty())
@@ -504,4 +506,29 @@ fn parse_field_int(content: &str, key: &str) -> i64 {
         .and_then(|l| l.split(':').nth(1))
         .and_then(|s| s.trim().parse().ok())
         .unwrap_or(0)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{parse_field_int, parse_field_list};
+
+    const JAIL_STATUS: &str = "Status for the jail: sshd\n\
+        |- Filter\n\
+        |  |- Currently failed:\t1\n\
+        |  |- Total failed:\t42\n\
+        |  `- Journal matches:\t_SYSTEMD_UNIT=ssh.service + _COMM=sshd\n\
+        `- Actions\n\
+        \x20  |- Currently banned:\t2\n\
+        \x20  |- Total banned:\t5\n\
+        \x20  `- Banned IP list:\t203.0.113.7 2001:db8::1\n";
+
+    #[test]
+    fn banned_list_keeps_ipv6_addresses_whole() {
+        assert_eq!(
+            parse_field_list(JAIL_STATUS, "Banned IP list:"),
+            vec!["203.0.113.7".to_string(), "2001:db8::1".to_string()]
+        );
+        assert_eq!(parse_field_int(JAIL_STATUS, "Total failed:"), 42);
+        assert!(parse_field_list("no such line\n", "Banned IP list:").is_empty());
+    }
 }
