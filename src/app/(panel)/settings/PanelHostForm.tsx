@@ -1,6 +1,7 @@
 "use client";
 
 import { useState, useTransition } from "react";
+import { createPortal } from "react-dom";
 import styles from "@/components/page.module.css";
 import ConfirmDialog from "@/components/ConfirmDialog/ConfirmDialog";
 import StatusBadge from "@/components/StatusBadge/StatusBadge";
@@ -168,6 +169,8 @@ export default function PanelHostForm({
     setPhase({ kind: "idle" });
   };
 
+  const dialogOpen = phase.kind !== "idle" && phase.kind !== "error";
+
   const targetUrl =
     phase.kind === "done" && phase.intent === "save" && trimmed.length > 0
       ? `https://${trimmed}/`
@@ -243,6 +246,12 @@ export default function PanelHostForm({
         </div>
       )}
 
+      {dialogOpen &&
+        typeof document !== "undefined" &&
+        // Portaled: the settings card's backdrop-filter would trap the
+        // dialogs' fixed positioning inside the card, under the next cards.
+        createPortal(
+      <>
       {/* Save confirmation */}
       <ConfirmDialog
         open={phase.kind === "confirming" && phase.intent === "save"}
@@ -521,6 +530,9 @@ export default function PanelHostForm({
           </button>
         </div>
       </ConfirmDialog>
+      </>,
+          document.body,
+        )}
     </div>
   );
 }
