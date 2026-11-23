@@ -58,11 +58,15 @@ const DEFAULT_PATHS: &[&str] = &[
 /// default set only when it exists. Copied live, like /srv/apps.
 const DOCKER_VOLUMES: &str = "/var/lib/docker/volumes";
 
-/// What a backup without an explicit path list covers.
+/// What a backup without an explicit path list covers. The dump folder is
+/// made by the dumps, which run first; like Docker's volumes it is only named
+/// when it is there.
 fn default_backup_paths() -> Vec<String> {
     let mut paths: Vec<String> = DEFAULT_PATHS.iter().map(|s| s.to_string()).collect();
-    if std::path::Path::new(DOCKER_VOLUMES).is_dir() {
-        paths.push(DOCKER_VOLUMES.to_string());
+    for optional in [DUMP_ROOT, DOCKER_VOLUMES] {
+        if std::path::Path::new(optional).is_dir() {
+            paths.push(optional.to_string());
+        }
     }
     paths
 }
@@ -82,7 +86,7 @@ fn validate_backup_path(p: &str) -> AgentResult<()> {
     }
     let allowed = DEFAULT_PATHS
         .iter()
-        .chain(std::iter::once(&DOCKER_VOLUMES))
+        .chain([&DUMP_ROOT, &DOCKER_VOLUMES])
         .any(|root| p == *root || p.starts_with(&format!("{root}/")));
     if !allowed {
         return Err(AgentError::Invalid(format!(
@@ -183,6 +187,9 @@ pub async fn run(
             task.finish(false);
             return;
         }
+        if adopt_old_dump_root(std::path::Path::new(OLD_DUMP_ROOT), std::path::Path::new(DUMP_ROOT)).await {
+            task.log(format!("moved {OLD_DUMP_ROOT} to {DUMP_ROOT}: database dumps are written there now"));
+        }
         // A failed dump fails the task (it used to be a warning under a
         // "succeeded" task), but the files are still backed up.
         let mut problems: Vec<String> = Vec::new();
@@ -198,6 +205,7 @@ pub async fn run(
         for p in &problems {
             task.log(p.clone());
         }
+        let dumps_ok = problems.is_empty();
         let paths: Vec<String> = req.paths.clone().unwrap_or_else(default_backup_paths);
         let mut args: Vec<String> = vec!["backup".into(), "--json".into()];
         for exclude in BACKUP_EXCLUDES {
@@ -228,6 +236,14 @@ pub async fn run(
             task.log(format!("restic backup failed (exit {code})"));
             task.finish(false);
             return;
+        }
+        // The dumps of this run are in a snapshot from their new folder: what
+        // an earlier version left in the old one, where it could not be
+        // moved, can go.
+        if dumps_ok && paths.iter().any(|p| p == DUMP_ROOT) && remove_old_dump_root().await {
+            task.log(format!(
+                "removed {OLD_DUMP_ROOT}: database dumps are written to {DUMP_ROOT} now"
+            ));
         }
         // The repository lives on the same disk by default: without pruning
         // every snapshot was kept forever until the disk filled.
@@ -280,8 +296,14 @@ impl StatusThrottle {
     }
 }
 
-/// Snapshots kept after each backup (restic forget).
-const RETENTION: &[&str] = &["--keep-daily", "7", "--keep-weekly", "4", "--keep-monthly", "6"];
+/// Snapshots kept after each backup (restic forget). Counted per host, not
+/// per host and list of paths, which is restic's default: the snapshots made
+/// before a path joined the list (the dump folder, Docker's volumes) were a
+/// group of their own that no later backup added to, so its last seven days
+/// and six months were kept for ever.
+const RETENTION: &[&str] = &[
+    "--group-by", "host", "--keep-daily", "7", "--keep-weekly", "4", "--keep-monthly", "6",
+];
 
 /// Rebuildable or transient trees left out of every snapshot.
 const BACKUP_EXCLUDES: &[&str] = &[
@@ -290,14 +312,72 @@ const BACKUP_EXCLUDES: &[&str] = &[
     "/var/lib/vps-panel/build-snapshots",
 ];
 
-/// Where database dumps are written before restic picks them up (inside
-/// /var/lib/vps-panel, a backup root). Root-only: the parent is group
-/// readable by the panel's group, and a dump holds every database.
-const DUMP_ROOT: &str = "/var/lib/vps-panel/db-dumps";
+/// Where database dumps are written before restic picks them up; a backup
+/// root of its own. Root-only, and under a folder only root can write. Not
+/// inside /var/backups/vps-panel next to it: that is the restic repository,
+/// which operators copy to other machines, and a dump is every database in
+/// plain text.
+const DUMP_ROOT: &str = "/var/backups/vps-panel-db-dumps";
 
-/// Both levels are made root's as well as 0700: a re-run of an older
-/// install.sh did `chown -R vps-panel` over /var/lib/vps-panel, and a folder
-/// the panel user owns stays readable to it whatever its mode.
+/// Where the dumps were until they moved. /var/lib/vps-panel belongs to the
+/// panel's user, who could not read the root-only folder but could rename it
+/// away and put one of its own, or a link, in its place just before a backup
+/// wrote the next dump there. Snapshots from that time still hold the dumps
+/// under this path, and a restore puts them back under it.
+const OLD_DUMP_ROOT: &str = "/var/lib/vps-panel/db-dumps";
+
+/// Moves the dump folder of an earlier version to where it is now, with the
+/// dumps in it: written next to them, the new dumps needed their size a
+/// second time, and on a full disk every backup from then on would have
+/// failed at the dump. Only a real folder of the agent's own user (root) is
+/// moved, since the panel's user can put anything else in that place, and
+/// only when nothing is at the new place yet. Across filesystems the rename
+/// fails and the old folder stays until a backup has succeeded. True when it
+/// was moved.
+async fn adopt_old_dump_root(old: &std::path::Path, new: &std::path::Path) -> bool {
+    use std::os::unix::fs::MetadataExt;
+    let ours = |m: &std::fs::Metadata| m.is_dir() && m.uid() == nix::unistd::getuid().as_raw();
+    if tokio::fs::symlink_metadata(new).await.is_ok() {
+        return false;
+    }
+    if !tokio::fs::symlink_metadata(old).await.is_ok_and(|m| ours(&m)) {
+        return false;
+    }
+    if tokio::fs::rename(old, new).await.is_err() {
+        return false;
+    }
+    // The old place can be changed between the look and the move: what
+    // arrived is looked at again, and anything else is thrown out.
+    if tokio::fs::symlink_metadata(new).await.is_ok_and(|m| ours(&m)) {
+        return true;
+    }
+    if tokio::fs::remove_dir_all(new).await.is_err() {
+        let _ = tokio::fs::remove_file(new).await;
+    }
+    false
+}
+
+/// Deletes the old dump folder; true when there was one. A link put in its
+/// place is removed itself, never followed.
+async fn remove_old_dump_root() -> bool {
+    if tokio::fs::symlink_metadata(OLD_DUMP_ROOT).await.is_err() {
+        return false;
+    }
+    match tokio::fs::remove_dir_all(OLD_DUMP_ROOT).await {
+        Ok(()) => true,
+        // Not a directory: a file somebody put there.
+        Err(_) => tokio::fs::remove_file(OLD_DUMP_ROOT).await.is_ok(),
+    }
+}
+
+/// Where a restored snapshot has its database dumps: new location, then the
+/// one snapshots from before the move have.
+fn restored_dump_dirs(target: &str) -> [String; 2] {
+    [format!("{target}{DUMP_ROOT}"), format!("{target}{OLD_DUMP_ROOT}")]
+}
+
+/// Both levels are made root's as well as 0700, whatever they were before: a
+/// folder another user owns stays readable to it whatever its mode.
 async fn private_dump_dir(name: &str) -> AgentResult<std::path::PathBuf> {
     let root = std::path::Path::new(DUMP_ROOT);
     crate::fs_atomic::ensure_dir(root, 0o700).await?;
@@ -386,6 +466,12 @@ pub async fn restore(
         )
         .await
         .unwrap_or(-1);
+        // Older snapshots have the dumps in another place than newer ones.
+        for dir in restored_dump_dirs(&target) {
+            if std::path::Path::new(&dir).is_dir() {
+                task.log(format!("database dumps of this snapshot: {dir}"));
+            }
+        }
         task.finish(code == 0);
     });
     Ok(Json(TaskAccepted { task_id }))
@@ -515,8 +601,8 @@ fn repo_env_from_cfg(cfg: &crate::config::Config) -> Vec<(&'static str, String)>
 #[cfg(test)]
 mod tests {
     use super::{
-        ensure_repo_at, repo_is_missing, validate_backup_path, validate_restore, StatusThrottle,
-        RESTORE_ROOT, STATUS_EVERY,
+        adopt_old_dump_root, ensure_repo_at, repo_is_missing, restored_dump_dirs, validate_backup_path,
+        validate_restore, StatusThrottle, DUMP_ROOT, OLD_DUMP_ROOT, RESTORE_ROOT, RETENTION, STATUS_EVERY,
     };
     use crate::error::AgentError;
 
@@ -561,6 +647,54 @@ mod tests {
         for bad in ["/var/lib/docker", "/var/lib/docker/image", "/var/lib/docker/volumes/../containers", "/etc/shadow"] {
             assert!(validate_backup_path(bad).is_err(), "{bad} should be refused");
         }
+    }
+
+    #[test]
+    fn dumps_have_a_backup_root_of_their_own_outside_the_repository() {
+        assert_eq!(DUMP_ROOT, "/var/backups/vps-panel-db-dumps");
+        assert!(validate_backup_path(DUMP_ROOT).is_ok());
+        assert!(validate_backup_path("/var/backups/vps-panel-db-dumps/mariadb").is_ok());
+        // The repository itself and the rest of /var/backups are not.
+        for bad in ["/var/backups", "/var/backups/vps-panel", "/var/backups/vps-panel-db-dumps-old"] {
+            assert!(validate_backup_path(bad).is_err(), "{bad} should be refused");
+        }
+        // The old place is still inside a backup root; snapshots made before
+        // the move restore their dumps under it.
+        assert!(validate_backup_path(OLD_DUMP_ROOT).is_ok());
+        assert_eq!(
+            restored_dump_dirs("/srv/drive/restores/abc123-20260101-000000"),
+            [
+                "/srv/drive/restores/abc123-20260101-000000/var/backups/vps-panel-db-dumps",
+                "/srv/drive/restores/abc123-20260101-000000/var/lib/vps-panel/db-dumps",
+            ]
+        );
+        // One retention for all of this host's snapshots, whatever paths they
+        // were made with.
+        assert_eq!(RETENTION[..2], ["--group-by", "host"]);
+    }
+
+    #[tokio::test]
+    async fn the_old_dump_folder_moves_to_the_new_place_once() {
+        let dir = tempfile::tempdir().unwrap();
+        let (old, new) = (dir.path().join("db-dumps"), dir.path().join("vps-panel-db-dumps"));
+        // Nothing to move.
+        assert!(!adopt_old_dump_root(&old, &new).await);
+        std::fs::create_dir_all(old.join("mariadb")).unwrap();
+        std::fs::write(old.join("mariadb/all-databases.sql"), "-- dump").unwrap();
+        assert!(adopt_old_dump_root(&old, &new).await);
+        assert!(!old.exists());
+        assert_eq!(std::fs::read_to_string(new.join("mariadb/all-databases.sql")).unwrap(), "-- dump");
+
+        // Never over what is at the new place, and never a link.
+        std::fs::create_dir(&old).unwrap();
+        assert!(!adopt_old_dump_root(&old, &new).await);
+        assert!(old.is_dir());
+        std::fs::remove_dir_all(&new).unwrap();
+        std::fs::remove_dir(&old).unwrap();
+        std::os::unix::fs::symlink(dir.path(), &old).unwrap();
+        assert!(!adopt_old_dump_root(&old, &new).await);
+        assert!(!new.exists());
+        assert!(old.is_symlink());
     }
 
     fn restic_failed(code: i32, stderr: &str) -> AgentError {
