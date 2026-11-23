@@ -28,7 +28,7 @@ import { writeAudit } from "@/lib/audit";
 export function pollSslTaskAndReconcile(
   domain: string,
   taskId: string,
-  actorId: number,
+  actorId: number | null,
 ): void {
   const POLL_INTERVAL_MS = 5_000;
   const MAX_TOTAL_MS = 15 * 60 * 1000; // 15 min hard cap

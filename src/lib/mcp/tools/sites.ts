@@ -1,5 +1,7 @@
 import "server-only";
-import { agent, type SiteMode } from "@/lib/agent";
+import { agent, type CreateSite, type CreateSiteResponse } from "@/lib/agent";
+import { db } from "@/lib/db";
+import { pollSslTaskAndReconcile } from "@/lib/sslReconciler";
 import {
   optionalBoolean,
   optionalNumber,
@@ -7,6 +9,46 @@ import {
   requireString,
   type Tool,
 } from "../types";
+
+function routeArgs(args: Record<string, unknown>): Omit<CreateSite, "domain"> {
+  return {
+    mode: requireString(args, "mode") as CreateSite["mode"],
+    upstream_port: optionalNumber(args, "upstream_port") ?? null,
+    folder_path: optionalString(args, "folder_path") ?? null,
+    force_www_redirect: optionalBoolean(args, "force_www_redirect") ?? false,
+    issue_ssl: optionalBoolean(args, "issue_ssl") ?? true,
+  };
+}
+
+/**
+ * The panel.db row for a site the agent just created or changed, written as
+ * the /domains forms write it. Without it a site made over MCP showed on
+ * /domains as a vhost the panel does not manage, and apps.set_domain refused
+ * it as a routing slot; a changed port left the slot pickers on the old one.
+ */
+function recordSite(domain: string, r: Omit<CreateSite, "domain">, resp: CreateSiteResponse): void {
+  db()
+    .prepare(
+      `INSERT INTO sites (domain, mode, upstream_port, folder_path, force_www_redirect, ssl_requested)
+       VALUES (?, ?, ?, ?, ?, ?)
+       ON CONFLICT(domain) DO UPDATE SET
+         mode = excluded.mode, upstream_port = excluded.upstream_port,
+         folder_path = excluded.folder_path, force_www_redirect = excluded.force_www_redirect,
+         ssl_requested = excluded.ssl_requested`,
+    )
+    .run(
+      domain,
+      r.mode,
+      r.mode === "port" ? r.upstream_port : null,
+      r.mode === "folder" ? r.folder_path : null,
+      r.force_www_redirect ? 1 : 0,
+      r.issue_ssl ? 1 : 0,
+    );
+  if (resp.task_id) {
+    db().prepare(`UPDATE sites SET last_ssl_error = NULL WHERE domain = ?`).run(domain);
+    pollSslTaskAndReconcile(domain, resp.task_id, null);
+  }
+}
 
 export const TOOLS: Tool[] = [
   {
@@ -67,15 +109,13 @@ export const TOOLS: Tool[] = [
       required: ["domain", "mode"],
       additionalProperties: false,
     },
-    call: async (args) =>
-      agent.sites.create({
-        domain: requireString(args, "domain"),
-        mode: requireString(args, "mode") as SiteMode,
-        upstream_port: optionalNumber(args, "upstream_port") ?? null,
-        folder_path: optionalString(args, "folder_path") ?? null,
-        force_www_redirect: optionalBoolean(args, "force_www_redirect") ?? false,
-        issue_ssl: optionalBoolean(args, "issue_ssl") ?? true,
-      }),
+    call: async (args) => {
+      const domain = requireString(args, "domain");
+      const route = routeArgs(args);
+      const resp = await agent.sites.create({ domain, ...route });
+      recordSite(domain, route, resp);
+      return resp;
+    },
   },
   {
     page: "Domains",
@@ -94,13 +134,22 @@ export const TOOLS: Tool[] = [
       required: ["domain", "mode"],
       additionalProperties: false,
     },
-    call: async (args) =>
-      agent.sites.update(requireString(args, "domain"), {
-        mode: requireString(args, "mode") as SiteMode,
-        upstream_port: optionalNumber(args, "upstream_port") ?? null,
-        folder_path: optionalString(args, "folder_path") ?? null,
-        force_www_redirect: optionalBoolean(args, "force_www_redirect") ?? false,
-        issue_ssl: optionalBoolean(args, "issue_ssl") ?? true,
-      }),
+    call: async (args) => {
+      const domain = requireString(args, "domain");
+      const route = routeArgs(args);
+      // As on /domains: the bound app's unit carries this port, so the slot
+      // keeps it until the app is moved.
+      const bound = db().prepare(`SELECT name, port FROM apps WHERE subdomain = ?`).get(domain) as
+        | { name: string; port: number }
+        | undefined;
+      if (bound && (route.mode !== "port" || route.upstream_port !== bound.port)) {
+        throw new Error(
+          `${domain} is bound to app "${bound.name}" on port ${bound.port} - move the app with apps.set_domain first, or keep the port`,
+        );
+      }
+      const resp = await agent.sites.update(domain, route);
+      recordSite(domain, route, resp);
+      return resp;
+    },
   },
 ];

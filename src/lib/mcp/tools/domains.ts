@@ -1,5 +1,6 @@
 import "server-only";
 import { agent } from "@/lib/agent";
+import { db } from "@/lib/db";
 import {
   optionalBoolean,
   optionalNumber,
@@ -43,8 +44,14 @@ export const TOOLS: Tool[] = [
       required: ["name"],
       additionalProperties: false,
     },
-    call: async (args) =>
-      agent.dns.createZone(requireString(args, "name"), optionalString(args, "seed_ip")),
+    call: async (args) => {
+      const zone = await agent.dns.createZone(requireString(args, "name"), optionalString(args, "seed_ip"));
+      // Listed as one of the panel's zones, as when it is added on /domains
+      // (it showed there as a foreign zone to adopt, and Add mailbox did not
+      // offer it).
+      db().prepare(`INSERT OR IGNORE INTO domains (name) VALUES (?)`).run(zone.name);
+      return zone;
+    },
   },
   {
     page: "Domains",
