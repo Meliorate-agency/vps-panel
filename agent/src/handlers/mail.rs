@@ -344,12 +344,37 @@ pub async fn ensure_ssl(
 ///
 /// Idempotent: when the file already exists with byte-equal content and the
 /// symlink is in place, the function is a no-op (no write, no nginx reload).
+///
+/// Only when nothing else serves `mail.<tenant>` over HTTP:
+/// - A panel site on that name (webmail) answers the challenge path itself.
+///   The helper's file sorts before `site-mail.<tenant>` in sites-enabled,
+///   so nginx gave the helper port 80 for the name and http://mail.<tenant>
+///   was a 404 instead of the site. The helper is removed.
+/// - An app on that name, or a vhost made by hand, lives in the very file the
+///   helper is written to. It was replaced by the helper, taking the app
+///   offline, on every certificate order and renewal check. It is left alone.
 pub(crate) async fn ensure_mail_http_vhost(tenant: &str) -> AgentResult<()> {
     let body = mail_helper_vhost_body(tenant);
     let vhost_path = PathBuf::from(format!("/etc/nginx/sites-available/mail.{tenant}"));
     let vhost_link = PathBuf::from(format!("/etc/nginx/sites-enabled/mail.{tenant}"));
 
     let existing = tokio::fs::read(&vhost_path).await.ok();
+    let is_helper = is_mail_helper_vhost(existing.as_deref());
+    let site_link = format!("/etc/nginx/sites-enabled/site-mail.{tenant}");
+    if tokio::fs::symlink_metadata(&site_link).await.is_ok() {
+        if is_helper {
+            fs_atomic::remove_if_exists(&vhost_link).await?;
+            fs_atomic::remove_if_exists(&vhost_path).await?;
+            if crate::handlers::nginx::test_config().await.is_ok() {
+                let _ = exec::run("systemctl", ["reload", "nginx"]).await;
+            }
+        }
+        return Ok(());
+    }
+    if existing.is_some() && !is_helper {
+        return Ok(());
+    }
+
     let needs_write = match &existing {
         Some(bytes) => bytes.as_slice() != body.as_bytes(),
         None => true,
@@ -384,6 +409,12 @@ pub(crate) async fn ensure_mail_http_vhost(tenant: &str) -> AgentResult<()> {
     }
     exec::run("systemctl", ["reload", "nginx"]).await?;
     Ok(())
+}
+
+/// Is this vhost file the ACME helper (any version of it), going by the
+/// marker on its first line?
+fn is_mail_helper_vhost(content: Option<&[u8]>) -> bool {
+    content.is_some_and(|c| c.starts_with(b"# vps-acme-helper:"))
 }
 
 fn mail_helper_vhost_body(tenant: &str) -> String {
@@ -786,7 +817,16 @@ fn random_password() -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::mailbox_parts;
+    use super::{is_mail_helper_vhost, mail_helper_vhost_body, mailbox_parts};
+
+    #[test]
+    fn only_the_acme_helper_is_recognised_as_the_helper() {
+        assert!(is_mail_helper_vhost(Some(mail_helper_vhost_body("example.com").as_bytes())));
+        // An app deployed on mail.<tenant> has the same file name.
+        assert!(!is_mail_helper_vhost(Some(b"# vps-app:webmail\nserver {\n}\n")));
+        assert!(!is_mail_helper_vhost(Some(b"server {\n    server_name mail.example.com;\n}\n")));
+        assert!(!is_mail_helper_vhost(None));
+    }
 
     #[test]
     fn mailbox_parts_lowercases_real_addresses() {
