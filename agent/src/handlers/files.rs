@@ -140,6 +140,24 @@ const PROTECTED: &[&str] = &[
     "/root/.ssh",
 ];
 
+/// Directories the server's data and the panel itself live in. Unlike
+/// [`PROTECTED`], what is in them stays free to manage; the directory itself
+/// may not be renamed, moved, deleted or replaced. On the `fs` root
+/// `/srv/apps` or `/var/vmail` could be trashed whole: restorable, but apps,
+/// databases or mail were down until someone did. Every path in [`ROOTS`]
+/// counts as one of these too.
+const KEPT_DIRS: &[&str] = &[
+    // The panel's own code.
+    "/opt/vps-panel",
+    // Where certificates are issued and renewed through.
+    crate::nginx_template::ACME_WEBROOT,
+    // Databases (PowerDNS zones are in MariaDB), Docker apps, mailboxes.
+    "/var/lib/mysql",
+    "/var/lib/postgresql",
+    "/var/lib/docker",
+    "/var/vmail",
+];
+
 /// General-purpose storage for the operator's own files.
 ///
 /// `/srv` is the FHS home for site-specific data this system serves, which
@@ -203,21 +221,45 @@ fn is_top_level(p: &Path) -> bool {
         <= 1
 }
 
+/// True when `p` is one of [`KEPT_DIRS`] or a root, or contains one.
+fn holds_kept_dir(p: &Path) -> bool {
+    KEPT_DIRS
+        .iter()
+        .copied()
+        .chain(ROOTS.iter().map(|r| r.path))
+        .any(|kept| Path::new(kept).starts_with(p))
+}
+
 /// True when `p` may not be renamed, moved or deleted.
 fn entry_locked(p: &Path) -> bool {
-    is_protected(p) || is_protected_ancestor(p) || is_top_level(p)
+    is_protected(p) || is_protected_ancestor(p) || is_top_level(p) || holds_kept_dir(p)
 }
 
 /// Gate for every mutating operation. `root` must be writable, and the target
 /// must not be locked.
 fn guard_write(root: &RootDef, target: &Path) -> AgentResult<()> {
+    guard_restore(root, target)?;
+    if holds_kept_dir(target) {
+        return Err(AgentError::Invalid(format!(
+            "{} is a folder the server depends on: what is in it can be changed, \
+             the folder itself cannot be renamed, moved or deleted",
+            target.display()
+        )));
+    }
+    Ok(())
+}
+
+/// [`guard_write`] for putting a trashed item back where it was. One of the
+/// [`KEPT_DIRS`] trashed before they were locked has to be restorable:
+/// putting it back is the repair.
+fn guard_restore(root: &RootDef, target: &Path) -> AgentResult<()> {
     if !root.writable {
         return Err(AgentError::Invalid(format!(
             "the {} root is browse-only",
             root.label
         )));
     }
-    if entry_locked(target) {
+    if is_protected(target) || is_protected_ancestor(target) || is_top_level(target) {
         return Err(AgentError::Invalid(format!(
             "{} is a protected system path",
             target.display()
@@ -1343,7 +1385,7 @@ pub async fn trash_restore(Json(req): Json<RestoreReq>) -> AgentResult<Json<Rest
     let original = PathBuf::from(&meta.original_path);
     // Re-run the guard on restore: the protected list may have grown, or the
     // original location may now sit inside one.
-    guard_write(root, &original)?;
+    guard_restore(root, &original)?;
     let target = restore_target(root, &original).await?;
     if fs::symlink_metadata(&target).await.is_ok() {
         return Err(AgentError::Conflict(format!(
@@ -1382,7 +1424,7 @@ async fn restore_target(root: &RootDef, original: &Path) -> AgentResult<PathBuf>
         )));
     }
     let target = dir.join(name);
-    guard_write(root, &target)?;
+    guard_restore(root, &target)?;
     Ok(target)
 }
 
@@ -1569,6 +1611,54 @@ mod tests {
         );
         let drive = ROOTS.iter().find(|r| r.id == "drive").unwrap();
         assert!(guard_new_entry(drive, p("/srv/drive"), name("passwd")).is_ok());
+    }
+
+    #[test]
+    fn folders_the_server_depends_on_are_locked_and_their_contents_are_not() {
+        let fs_root = ROOTS.iter().find(|r| r.id == "fs").unwrap();
+        for dir in [
+            "/srv/apps",
+            "/srv/drive",
+            "/var/www",
+            "/var/www/vps-panel-acme",
+            "/var/backups",
+            "/var/log",
+            "/etc/nginx",
+            "/var/lib/mysql",
+            "/var/lib/postgresql",
+            "/var/lib/docker",
+            "/var/vmail",
+            "/opt/vps-panel",
+        ] {
+            // Trash, rename and move all go through guard_write.
+            assert!(entry_locked(p(dir)), "{dir}");
+            assert!(guard_write(fs_root, p(dir)).is_err(), "{dir}");
+            // What is in it is managed as before.
+            assert!(guard_write_into(fs_root, p(dir)).is_ok(), "{dir}");
+            assert!(guard_write(fs_root, &p(dir).join("item")).is_ok(), "{dir}");
+        }
+        // Not replaced either: an upload, a new folder or a move onto the name.
+        let name = |s: &'static str| std::ffi::OsStr::new(s);
+        assert!(guard_new_entry(fs_root, p("/srv"), name("apps")).is_err());
+        assert!(guard_new_entry(fs_root, p("/var"), name("vmail")).is_err());
+        // Compared by component, like the protected list.
+        assert!(!entry_locked(p("/srv/apps-old")));
+        assert!(!entry_locked(p("/var/vmail/example.com/adrian")));
+        assert!(!entry_locked(p("/var/lib/mysql/shop")));
+    }
+
+    #[test]
+    fn a_kept_folder_in_the_trash_can_still_be_put_back() {
+        let fs_root = ROOTS.iter().find(|r| r.id == "fs").unwrap();
+        // Trashed before the folder was locked: restoring it is the repair.
+        assert!(guard_restore(fs_root, p("/var/vmail")).is_ok());
+        assert!(guard_restore(fs_root, p("/srv/apps")).is_ok());
+        // The protected list still applies to a restore.
+        assert!(guard_restore(fs_root, p("/etc/vps-panel/.env")).is_err());
+        assert!(guard_restore(fs_root, p("/etc")).is_err());
+        assert!(guard_restore(fs_root, p("/srv")).is_err());
+        let logs = ROOTS.iter().find(|r| r.id == "logs").unwrap();
+        assert!(guard_restore(logs, p("/var/log/syslog")).is_err());
     }
 
     #[cfg(unix)]
