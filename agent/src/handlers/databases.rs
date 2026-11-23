@@ -226,8 +226,94 @@ fn grant_db_spellings(db: &str) -> Vec<String> {
     }
 }
 
+/// "There is no such grant": 1141 for a database, 1147 for a table, 1403 for
+/// a routine.
 fn is_no_such_grant(e: &mysql_async::Error) -> bool {
-    matches!(e, mysql_async::Error::Server(s) if s.code == 1141)
+    matches!(e, mysql_async::Error::Server(s) if matches!(s.code, 1141 | 1147 | 1403))
+}
+
+/// A name read back from the grant tables, as an identifier. Unlike `escape`
+/// it leaves a single quote alone, and inside backticks a backslash is
+/// literal under every sql_mode.
+fn quote_ident(s: &str) -> String {
+    format!("`{}`", s.replace('`', "``"))
+}
+
+/// `user`@`host` for a GRANT / REVOKE. The anonymous user has no identifier
+/// spelling.
+fn quote_account(user: &str, host: &str) -> String {
+    let user = if user.is_empty() { "''".to_string() } else { quote_ident(user) };
+    format!("{user}@{}", quote_ident(host))
+}
+
+/// The statements that take everything `account` holds on `on` (`db`.*, a
+/// table, `PROCEDURE db.name`). GRANT OPTION first: once REVOKE ALL
+/// PRIVILEGES has removed the row, revoking it fails with "no such grant",
+/// and left for last it is the row that stays behind.
+fn revoke_statements(on: &str, account: &str) -> [String; 2] {
+    [
+        format!("REVOKE GRANT OPTION ON {on} FROM {account}"),
+        format!("REVOKE ALL PRIVILEGES ON {on} FROM {account}"),
+    ]
+}
+
+/// MariaDB keeps every grant on a database when the database is dropped: the
+/// rows stay in mysql.db (and, for grants on one table, column or routine,
+/// in tables_priv and procs_priv). A database created later under the same
+/// name was open to the old users from its first second. Returns how many
+/// grants were removed.
+async fn revoke_grants_of_dropped_db(
+    conn: &mut mysql_async::Conn,
+    db: &str,
+) -> Result<usize, mysql_async::Error> {
+    // (what the grant is on, user, host)
+    let mut grants: Vec<(String, String, String)> = Vec::new();
+    // Both spellings a grant on this one database can have. A pattern that
+    // covers several databases (`shop%`) is somebody's choice and stays.
+    for spelling in grant_db_spellings(db) {
+        let rows: Vec<(String, String)> = conn
+            .exec("SELECT User, Host FROM mysql.db WHERE Db = ?", (spelling.as_str(),))
+            .await?;
+        let on = format!("{}.*", quote_ident(&spelling));
+        grants.extend(rows.into_iter().map(|(user, host)| (on.clone(), user, host)));
+    }
+    // Column grants have their row in tables_priv too, and go with it.
+    let tables: Vec<(String, String, String)> = conn
+        .exec("SELECT User, Host, Table_name FROM mysql.tables_priv WHERE Db = ?", (db,))
+        .await?;
+    for (user, host, table) in tables {
+        grants.push((format!("{}.{}", quote_ident(db), quote_ident(&table)), user, host));
+    }
+    let routines: Vec<(String, String, String, String)> = conn
+        .exec(
+            "SELECT User, Host, Routine_name, Routine_type FROM mysql.procs_priv WHERE Db = ?",
+            (db,),
+        )
+        .await?;
+    for (user, host, routine, kind) in routines {
+        let kind = kind.to_ascii_uppercase();
+        if !matches!(kind.as_str(), "FUNCTION" | "PROCEDURE" | "PACKAGE" | "PACKAGE BODY") {
+            continue;
+        }
+        grants.push((
+            format!("{kind} {}.{}", quote_ident(db), quote_ident(&routine)),
+            user,
+            host,
+        ));
+    }
+    for (on, user, host) in &grants {
+        for stmt in revoke_statements(on, &quote_account(user, host)) {
+            if let Err(e) = conn.query_drop(stmt).await {
+                if !is_no_such_grant(&e) {
+                    return Err(e);
+                }
+            }
+        }
+    }
+    if !grants.is_empty() {
+        conn.query_drop("FLUSH PRIVILEGES").await?;
+    }
+    Ok(grants.len())
 }
 
 pub async fn create_user(
@@ -508,6 +594,17 @@ pub async fn delete_database(
     let mut conn = state.mariadb.pool().get_conn().await?;
     conn.query_drop(format!("DROP DATABASE IF EXISTS `{}`", escape(&name)))
         .await?;
+    // After the drop, never before it: a drop that fails must not leave the
+    // database there with its users locked out.
+    match revoke_grants_of_dropped_db(&mut conn, &name).await {
+        Ok(0) => {}
+        Ok(n) => tracing::info!(database = %name, grants = n, "revoked the grants on a dropped database"),
+        Err(e) => {
+            return Err(AgentError::Other(anyhow::anyhow!(
+                "database `{name}` was dropped, but not all grants on it could be removed (a new database of this name would be open to the users that had them): {e}"
+            )))
+        }
+    }
     Ok(Json(crate::ipc::OkResponse::default()))
 }
 
@@ -1147,5 +1244,21 @@ mod tests {
         assert_eq!(password_or_random(Some("s3cret".into())), "s3cret");
         assert!(password_or_random(Some(String::new())).len() >= 24);
         assert!(password_or_random(None).len() >= 24);
+    }
+
+    #[test]
+    fn grants_of_a_dropped_database_are_revoked_under_any_name() {
+        assert_eq!(
+            revoke_statements(&format!("{}.*", quote_ident(r"shop\_1")), &quote_account("app", "localhost")),
+            [
+                r"REVOKE GRANT OPTION ON `shop\_1`.* FROM `app`@`localhost`",
+                r"REVOKE ALL PRIVILEGES ON `shop\_1`.* FROM `app`@`localhost`",
+            ]
+        );
+        // Names as they come out of the grant tables: quotes and backslashes
+        // stay as they are, only a backtick is doubled.
+        assert_eq!(quote_ident("we`ird 't"), "`we``ird 't`");
+        assert_eq!(quote_account(r"it's\me", "%.example"), r"`it's\me`@`%.example`");
+        assert_eq!(quote_account("", "localhost"), "''@`localhost`");
     }
 }
