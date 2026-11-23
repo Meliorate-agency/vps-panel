@@ -139,7 +139,7 @@ pub async fn list(State(state): State<AppState>) -> AgentResult<Json<Vec<Snapsho
     let env = repo_env(&state);
     let out = exec::run_envs(
         "restic",
-        ["snapshots", "--json"],
+        ["snapshots", "--no-lock", "--json"],
         env,
     )
     .await?;
@@ -322,6 +322,7 @@ pub async fn restore(
     let cfg = state.config.clone();
     tokio::spawn(async move {
         task.start();
+        remove_stale_locks(&cfg).await;
         let env = repo_env_owned(&cfg);
         let env_refs: Vec<(&str, &str)> = env.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect();
         task.log(format!("restoring snapshot {} into {target}", req.snapshot));
@@ -340,13 +341,27 @@ pub async fn restore(
 
 async fn is_repo_initialized(state: &AppState) -> AgentResult<bool> {
     let env = repo_env(state);
-    match exec::run_envs("restic", ["snapshots", "--last", "--json"], env).await {
+    // --no-lock: reading the list needs none, and with one the page showed
+    // "No snapshots yet" for as long as a prune held its exclusive lock.
+    match exec::run_envs("restic", ["snapshots", "--no-lock", "--last", "--json"], env).await {
         Ok(_) => Ok(true),
         Err(_) => Ok(false),
     }
 }
 
+/// Removes the locks a killed restic left in the repository (the OOM killer
+/// during a prune, a power cut, an agent stopped mid-run). `restic unlock`
+/// only removes stale ones: of a process that is gone, or not refreshed for
+/// 30 minutes. With such a lock every later `forget --prune` failed with
+/// "repository is already locked", and after a killed prune so did the
+/// backup itself (as a misleading "init error") and every restore.
+async fn remove_stale_locks(cfg: &crate::config::Config) {
+    // Fails when there is no repository yet; ensure_repo creates it.
+    let _ = exec::run_envs("restic", ["unlock"], repo_env_from_cfg(cfg)).await;
+}
+
 async fn ensure_repo(cfg: &crate::config::Config) -> AgentResult<()> {
+    remove_stale_locks(cfg).await;
     let env = repo_env_from_cfg(cfg);
     match exec::run_envs("restic", ["snapshots", "--last"], env.clone()).await {
         Ok(_) => Ok(()),
