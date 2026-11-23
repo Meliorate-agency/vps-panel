@@ -220,12 +220,20 @@ install -d -m 0750 -o root      -g apps      "$ETC_DIR/apps"
 install -d -m 0750 -o root      -g vps-panel "$ETC_DIR/certs"
 install -d -m 0750 -o root      -g root      /var/backups/vps-panel
 
-# Setgid + recursive chown so panel.db (and -wal/-shm) created by either
-# process (agent as root, panel as vps-panel) end up with group=vps-panel
-# and are read/write to both.
-chmod g+s "$VAR_DIR"
-chown -R vps-panel:vps-panel "$VAR_DIR"
-chmod -R u=rwX,g=rwX,o= "$VAR_DIR"
+# Setgid so panel.db (and -wal/-shm) created by either process (agent as
+# root, panel as vps-panel) end up with group=vps-panel and are read/write
+# to both. The directory only, never its contents: on a re-run a recursive
+# chown/chmod handed the panel's user the agent's root-only folders (database
+# dumps, the Files trash) and changed the owner of everything in the trash,
+# and of a running app's files that a build snapshot hard-links.
+chmod 2770 "$VAR_DIR"
+# Back to root what an earlier re-run gave away.
+for d in "$VAR_DIR/db-dumps" "$VAR_DIR/trash" "$VAR_DIR/build-snapshots"; do
+  if [[ -d "$d" ]]; then
+    chown root "$d"
+    chmod 0700 "$d"
+  fi
+done
 
 
 # Pre-create panel.db with explicit vps-panel:vps-panel ownership + 0660 perms.
