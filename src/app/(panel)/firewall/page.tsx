@@ -44,9 +44,10 @@ export default async function FirewallPage() {
         <p style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
           <span>
             Status:{" "}
+            {/* No answer from the agent is not "inactive". */}
             <StatusBadge
-              text={status?.ufw_enabled ? "active" : "inactive"}
-              tone={status?.ufw_enabled ? "ok" : "danger"}
+              text={!status ? "unknown" : status.ufw_enabled ? "active" : "inactive"}
+              tone={!status ? "muted" : status.ufw_enabled ? "ok" : "danger"}
             />
           </span>
           {status && !status.ufw_enabled && (
@@ -61,8 +62,14 @@ export default async function FirewallPage() {
           </div>
         )}
         <RulesByProto rules={status?.rules ?? []} />
-        {(!status || status.rules.length === 0) && (
-          <div className={styles.empty} style={{ marginTop: 12 }}>No rules added.</div>
+        {!status ? (
+          <div className={styles.error} style={{ marginTop: 12 }}>
+            Could not read the firewall state from the agent.
+          </div>
+        ) : (
+          status.rules.length === 0 && (
+            <div className={styles.empty} style={{ marginTop: 12 }}>No rules added.</div>
+          )
         )}
         <div style={{ marginTop: 16 }}>
           <PortForm action={firewallPortAction} />
@@ -132,7 +139,7 @@ export default async function FirewallPage() {
             <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
               <span className={styles.muted}>Status:</span>
               <StatusBadge
-                text={status?.fail2ban_active ? "active" : "inactive"}
+                text={!status ? "unknown" : status.fail2ban_active ? "active" : "inactive"}
                 tone={status?.fail2ban_active ? "ok" : "muted"}
               />
             </div>
