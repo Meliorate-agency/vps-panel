@@ -259,6 +259,15 @@ export async function createSiteAction(
   const collision = checkAppSubdomainCollision(domain);
   if (collision) return collision;
 
+  // Before the DNS zone and the mail domain are set up: a refused request
+  // must not have created them on the way.
+  if (
+    route.mode !== "dns_only" &&
+    db().prepare(`SELECT 1 FROM sites WHERE domain = ?`).get(domain)
+  ) {
+    return { ok: false, error: "site already exists" };
+  }
+
   const warnings: string[] = [];
   if (createDnsZone) {
     const w = await ensureDnsZone(s.userId, domain);
@@ -278,21 +287,14 @@ export async function createSiteAction(
 
   let siteResult: ActionResult = { ok: true };
   if (route.mode !== "dns_only") {
-    const existingSite = db()
-      .prepare(`SELECT 1 FROM sites WHERE domain = ?`)
-      .get(domain);
-    if (existingSite) {
-      siteResult = { ok: false, error: "site already exists" };
-    } else {
-      siteResult = await doCreate(
-        s.userId,
-        domain,
-        { mode: route.mode, upstreamPort: route.upstreamPort, folderPath: route.folderPath },
-        forceWwwRedirect,
-        issueSsl,
-        "sites.create",
-      );
-    }
+    siteResult = await doCreate(
+      s.userId,
+      domain,
+      { mode: route.mode, upstreamPort: route.upstreamPort, folderPath: route.folderPath },
+      forceWwwRedirect,
+      issueSsl,
+      "sites.create",
+    );
   }
 
   revalidatePath("/domains");

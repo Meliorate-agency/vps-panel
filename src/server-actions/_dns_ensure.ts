@@ -93,6 +93,8 @@ export async function ensureDnsZone(actorId: number, domain: string): Promise<st
           });
           recordCreated = true;
         }
+      } else {
+        warning = `No DNS record was added for ${domain}: this server's public IP address could not be found. Add an A record for it on the ${parent} zone page.`;
       }
       writeAudit({
         actorId,

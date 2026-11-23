@@ -259,7 +259,8 @@ export async function createRecordAction(
     name: String(fd.get("name") ?? "").trim(),
     type: String(fd.get("type") ?? "A").trim().toUpperCase(),
     content: String(fd.get("content") ?? "").trim(),
-    ttl: Number(fd.get("ttl") ?? 3600),
+    // An emptied TTL field means the default (the agent's 3600), not 0.
+    ttl: fd.get("ttl") ? Number(fd.get("ttl")) : undefined,
     prio: Number(fd.get("prio") ?? 0),
   };
   try {
