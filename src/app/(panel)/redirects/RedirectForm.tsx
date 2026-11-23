@@ -1,6 +1,6 @@
 "use client";
 
-import { useActionState, useEffect, useState } from "react";
+import { useActionState, useEffect, useRef, useState } from "react";
 import styles from "@/components/page.module.css";
 import local from "./redirects.module.css";
 
@@ -29,8 +29,21 @@ export default function RedirectForm({
     }
   }, [state]);
 
+  // React 19 resets a form after its action, which put the Domain and Type
+  // pickers back on the first domain and 301 (after an error too): the next
+  // rule went to the first domain unless the operator noticed. The reset is
+  // cancelled; the effect above clears what should be cleared.
+  const formRef = useRef<HTMLFormElement>(null);
+  useEffect(() => {
+    const form = formRef.current;
+    if (!form) return;
+    const keep = (e: Event) => e.preventDefault();
+    form.addEventListener("reset", keep);
+    return () => form.removeEventListener("reset", keep);
+  }, []);
+
   return (
-    <form action={formAction}>
+    <form ref={formRef} action={formAction}>
       <div className={styles.formRow}>
         <label className={styles.field}>
           Domain
