@@ -299,8 +299,19 @@ function buildGroupedRows({
     | { kind: "dnsSubdomain"; domain: string; data: DnsSubdomainItem }
     | { kind: "syntheticApex"; domain: string };
 
+  // A DNS-only zone whose name the agent also serves (the panel host on the
+  // apex, say) is listed once, as the agent's row with the zone's DNS badge
+  // and delete. Listed twice it had a duplicate key, and the zone's row
+  // offered Install SSL, which the existing vhost refuses.
+  const agentOnlySet = new Set(agentOnly);
+  const zoneOnAgent = new Set(
+    rows.filter((r) => r.mode === null && agentOnlySet.has(r.domain)).map((r) => r.domain),
+  );
+
   const items: Item[] = [
-    ...rows.map<Item>((r) => ({ kind: "tracked", domain: r.domain, data: r })),
+    ...rows
+      .filter((r) => !zoneOnAgent.has(r.domain))
+      .map<Item>((r) => ({ kind: "tracked", domain: r.domain, data: r })),
     ...agentOnly.map<Item>((d) => ({ kind: "agentOnly", domain: d })),
     ...untrackedZones.map<Item>((d) => ({ kind: "untracked", domain: d })),
     ...dnsSubdomains.map<Item>((d) => ({
@@ -363,13 +374,7 @@ function buildGroupedRows({
           ssl: renderSslCell(r, statusByDomain.get(r.domain)),
           dns:
             r.has_dns === 1 ? (
-              <span style={{ display: "inline-flex", alignItems: "center" }}>
-                <StatusBadge text="managed" tone="ok" />
-                <InfoTooltip
-                  label="What does Managed mean?"
-                  text="The PowerDNS zone for this domain lives on this VPS and is tracked by the panel. The DNS records you see on the domain detail page are what's actually served — provided the registrar's nameservers point here."
-                />
-              </span>
+              renderManagedDns()
             ) : (
               <span style={{ display: "inline-flex", alignItems: "center" }}>
                 <StatusBadge text="external" tone="muted" />
@@ -445,6 +450,28 @@ function buildGroupedRows({
         const isMailHelper =
           domain.startsWith("mail.") && mailTenants.has(domain.slice("mail.".length));
         const canRemove = (vhostKind === "external" || vhostKind === "site") && !isMailHelper;
+        const hasZone = zoneOnAgent.has(domain);
+        const agentAction = canRemove ? (
+          <SiteDeleteButton
+            domain={domain}
+            action={removeAgentOnlySiteAction}
+            label="Remove from agent"
+            pendingLabel="Removing..."
+            title={`Remove ${domain} from the agent?`}
+          />
+        ) : vhostKind === "app" ? (
+          <Link
+            href={`/apps`}
+            className={styles.btnGhost}
+            title="Managed on the Apps page"
+          >
+            Open Apps
+          </Link>
+        ) : (
+          <span className={styles.muted} title="Panel UI vhost; not deletable from here">
+            protected
+          </span>
+        );
         cells = {
           domain: (
             <Link
@@ -462,7 +489,9 @@ function buildGroupedRows({
             statusByDomain.get(domain),
             domain.startsWith("mail.") && mailTenants.has(domain.slice("mail.".length)),
           ),
-          dns: (
+          dns: hasZone ? (
+            renderManagedDns()
+          ) : (
             <span style={{ display: "inline-flex", alignItems: "center" }}>
               <StatusBadge text="external" tone="muted" />
               <InfoTooltip
@@ -471,26 +500,19 @@ function buildGroupedRows({
               />
             </span>
           ),
-          actions: canRemove ? (
-            <SiteDeleteButton
-              domain={domain}
-              action={removeAgentOnlySiteAction}
-              label="Remove from agent"
-              pendingLabel="Removing..."
-              title={`Remove ${domain} from the agent?`}
-            />
-          ) : vhostKind === "app" ? (
-            <Link
-              href={`/apps`}
-              className={styles.btnGhost}
-              title="Managed on the Apps page"
-            >
-              Open Apps
-            </Link>
+          actions: hasZone ? (
+            // The zone's delete leaves panel-host and app vhosts in place
+            // (it only removes site and external ones).
+            <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
+              {agentAction}
+              <DomainDeleteButton
+                zone={domain}
+                action={deleteDomainAction}
+                subSiteCount={subSiteCountByZone.get(domain) ?? 0}
+              />
+            </div>
           ) : (
-            <span className={styles.muted} title="Panel UI vhost; not deletable from here">
-              protected
-            </span>
+            agentAction
           ),
         };
         break;
@@ -628,6 +650,18 @@ function buildGroupedRows({
 
     return { key: item.domain, apex, isApex, hasChildren, cells };
   });
+}
+
+function renderManagedDns() {
+  return (
+    <span style={{ display: "inline-flex", alignItems: "center" }}>
+      <StatusBadge text="managed" tone="ok" />
+      <InfoTooltip
+        label="What does Managed mean?"
+        text="The PowerDNS zone for this domain lives on this VPS and is tracked by the panel. The DNS records you see on the domain detail page are what's actually served — provided the registrar's nameservers point here."
+      />
+    </span>
+  );
 }
 
 function renderModeBadge(r: DomainRow) {
