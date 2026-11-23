@@ -5,6 +5,7 @@ import { agent } from "@/lib/agent";
 import { db } from "@/lib/db";
 import { requireAdmin } from "@/lib/auth";
 import { writeAudit } from "@/lib/audit";
+import { parseCidr } from "@/lib/ipMatch";
 import { UPLOAD_LIMIT_KEY, UPLOAD_LIMIT_MAX_MB } from "@/lib/uploadLimit";
 import { nsPairValue } from "@/lib/nsPair";
 import { TAB_TITLE_KEY, tabTitleValue } from "@/lib/tabTitle";
@@ -23,6 +24,24 @@ export async function setSettingAction(key: string, value: string): Promise<Acti
     const pair = rest.length > 0 ? { error: "Two nameservers at most." } : nsPairValue(ns1, ns2);
     if ("error" in pair) return { ok: false, error: pair.error };
     value = pair.value;
+  }
+  // The agent splits this list on commas and writes each entry into
+  // fail2ban's ignoreip as it is (firewall.rs sync_operator_ignoreip), so
+  // every entry has to be an IP address or a CIDR range. The form checks
+  // that too, but the action can be called without the form.
+  if (key === "panel.ip_allowlist") {
+    const entries = value
+      .split(",")
+      .map((e) => e.trim())
+      .filter(Boolean);
+    const bad = entries.find((e) => parseCidr(e) === null);
+    if (bad !== undefined) {
+      return {
+        ok: false,
+        error: `Not an IP address or CIDR range: ${bad.slice(0, 80)}. Separate entries with commas.`,
+      };
+    }
+    value = entries.join(", ");
   }
   db()
     .prepare(
