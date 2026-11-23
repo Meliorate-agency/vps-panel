@@ -159,7 +159,7 @@ async fn send(
                 "url = \"https://api.telegram.org/bot{token}/sendMessage\"\n\
                  header = \"Content-Type: application/json\"\n\
                  data-binary = \"{}\"\n",
-                payload.to_string().replace('\\', "\\\\").replace('"', "\\\"")
+                curl_quote(&payload.to_string())
             );
             let out = exec::run_with_input("curl", ["-sS", "-m", "10", "-K", "-"], &config).await?;
             // No -f: a refusal comes back as {"ok":false,"description":...},
@@ -193,12 +193,19 @@ async fn send(
                 "text": text,
                 "content": text,
             });
+            // A Slack or Discord webhook URL is the whole credential: whoever
+            // has it can post to the channel. Like the Telegram token it
+            // stays off argv (the process list); curl reads it from a
+            // root-only config file, and the payload from stdin. -g: the URL
+            // is used as typed, where curl took {a,b} in it as a list of URLs.
+            let url_file = curl_url_file(target).map_err(AgentError::Io)?;
+            let url_config = url_file.path().to_string_lossy().into_owned();
             exec::run_with_input(
                 "curl",
                 [
-                    "-fsS", "-m", "10", "-X", "POST",
+                    "-fsS", "-g", "-m", "10", "-X", "POST",
                     "-H", "Content-Type: application/json",
-                    "--data-binary", "@-", target,
+                    "--data-binary", "@-", "-K", url_config.as_str(),
                 ],
                 &payload.to_string(),
             )
@@ -207,6 +214,25 @@ async fn send(
         other => return Err(AgentError::Invalid(format!("unknown channel {other}"))),
     }
     Ok(())
+}
+
+/// `s` inside a double-quoted value of a curl config file.
+fn curl_quote(s: &str) -> String {
+    s.replace('\\', "\\\\").replace('"', "\\\"")
+}
+
+/// A curl config (`-K`) that holds only the URL, in a file only root reads.
+/// /run is RAM; the file goes when the returned handle drops.
+fn curl_url_file(url: &str) -> std::io::Result<tempfile::NamedTempFile> {
+    use std::io::Write;
+    let dir = std::path::Path::new("/run/vps-panel");
+    let mut b = tempfile::Builder::new();
+    b.prefix("notify-url-");
+    // 0600 by default.
+    let mut f = if dir.is_dir() { b.tempfile_in(dir)? } else { b.tempfile()? };
+    writeln!(f, "url = \"{}\"", curl_quote(url))?;
+    f.flush()?;
+    Ok(f)
 }
 
 /// Send `event` to every channel subscribed to it, in the background.
@@ -381,7 +407,7 @@ pub async fn test(
 
 #[cfg(test)]
 mod tests {
-    use super::{event_for_task, is_bot_token, is_chat_id, parse_df_pct, subscribes};
+    use super::{curl_url_file, event_for_task, is_bot_token, is_chat_id, parse_df_pct, send, subscribes};
 
     #[test]
     fn telegram_token_and_chat_id() {
@@ -413,6 +439,72 @@ mod tests {
         assert!(subscribes(" , ", "disk.full"));
         assert!(subscribes("backup.fail, ssl.fail", "ssl.fail"));
         assert!(!subscribes("backup.fail", "ssl.fail"));
+    }
+
+    #[test]
+    fn webhook_url_goes_into_a_private_curl_config() {
+        let f = curl_url_file(r#"https://hooks.example.com/services/T0/B0/se"cr\et"#).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(f.path()).unwrap(),
+            "url = \"https://hooks.example.com/services/T0/B0/se\\\"cr\\\\et\"\n"
+        );
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(f.path()).unwrap().permissions().mode();
+            assert_eq!(mode & 0o077, 0, "only its owner reads it");
+        }
+        let path = f.path().to_path_buf();
+        drop(f);
+        assert!(!path.exists());
+    }
+
+    /// The whole webhook path through the real curl, against a local listener.
+    #[tokio::test]
+    async fn webhook_posts_the_payload_to_the_url_as_typed() {
+        use std::io::{Read, Write};
+        if std::process::Command::new("curl").arg("--version").output().is_err() {
+            return; // no curl on this machine
+        }
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server = std::thread::spawn(move || {
+            let (mut s, _) = listener.accept().unwrap();
+            let mut req = Vec::new();
+            let mut chunk = [0u8; 4096];
+            loop {
+                let n = s.read(&mut chunk).unwrap();
+                req.extend_from_slice(&chunk[..n]);
+                let text = String::from_utf8_lossy(&req).into_owned();
+                if let Some((head, body)) = text.split_once("\r\n\r\n") {
+                    let len: usize = head
+                        .lines()
+                        .find_map(|l| l.to_ascii_lowercase().strip_prefix("content-length:").map(|v| v.trim().parse().unwrap()))
+                        .unwrap_or(0);
+                    if body.len() >= len {
+                        break;
+                    }
+                }
+                if n == 0 {
+                    break;
+                }
+            }
+            s.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok").unwrap();
+            String::from_utf8_lossy(&req).into_owned()
+        });
+        // Braces and brackets are what curl would expand without -g.
+        let url = format!("http://127.0.0.1:{port}/hook/{{a,b}}?ids[]=1");
+        send("webhook", &url, None, None, "test", "Subject", "Body \"quoted\"\nline 2")
+            .await
+            .unwrap();
+        let req = server.join().unwrap();
+        assert!(req.starts_with("POST /hook/{a,b}?ids[]=1 HTTP/1.1\r\n"), "{req}");
+        assert!(req.to_ascii_lowercase().contains("content-type: application/json"), "{req}");
+        let body = req.split_once("\r\n\r\n").unwrap().1;
+        let v: serde_json::Value = serde_json::from_str(body).unwrap();
+        assert_eq!(v["event"], "test");
+        assert_eq!(v["message"], "Body \"quoted\"\nline 2");
+        assert!(v["text"].as_str().unwrap().ends_with("Subject\nBody \"quoted\"\nline 2"));
     }
 
     #[test]
