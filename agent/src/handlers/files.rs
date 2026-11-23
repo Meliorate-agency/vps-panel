@@ -571,6 +571,13 @@ fn mode_string(meta: &std::fs::Metadata) -> String {
     format!("{:04o}", meta.permissions().mode() & 0o7777)
 }
 
+/// rwx bits only: a replaced file does not hand setuid on to new content.
+#[cfg(unix)]
+fn perm_bits(meta: &std::fs::Metadata) -> u32 {
+    use std::os::unix::fs::PermissionsExt;
+    meta.permissions().mode() & 0o777
+}
+
 #[cfg(unix)]
 fn owner_uid(meta: &std::fs::Metadata) -> u32 {
     use std::os::unix::fs::MetadataExt;
@@ -630,6 +637,11 @@ async fn inherit_owner(parent: &Path, child: &Path) {
 #[cfg(not(unix))]
 fn mode_string(_meta: &std::fs::Metadata) -> String {
     "0000".to_string()
+}
+
+#[cfg(not(unix))]
+fn perm_bits(_meta: &std::fs::Metadata) -> u32 {
+    0o644
 }
 
 #[cfg(not(unix))]
@@ -938,8 +950,19 @@ pub async fn upload(
         return Err(e);
     }
 
-    fs_atomic::chmod(&tmp, 0o644).await?;
-    inherit_owner(&dir, &tmp).await;
+    // A file that is replaced keeps its mode and owner. Every upload used to
+    // end up 0644 and owned like the folder, so replacing a 0600 `.env`
+    // made it readable by every user on the server.
+    match fs::symlink_metadata(&target).await {
+        Ok(old) if old.is_file() => {
+            fs_atomic::chmod(&tmp, perm_bits(&old)).await?;
+            let _ = fs_atomic::chown_blocking(&tmp, owner_uid(&old), owner_gid(&old));
+        }
+        _ => {
+            fs_atomic::chmod(&tmp, 0o644).await?;
+            inherit_owner(&dir, &tmp).await;
+        }
+    }
     if let Err(e) = fs::rename(&tmp, &target).await {
         let _ = fs::remove_file(&tmp).await;
         return Err(AgentError::Io(e));
