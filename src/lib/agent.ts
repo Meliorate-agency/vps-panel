@@ -13,7 +13,22 @@ type RequestOptions = {
   path: string;
   body?: unknown;
   query?: Record<string, string | number | boolean | undefined>;
+  /** Give up after this long: the request is closed and the call rejects
+   *  with an AgentError (status 504). No limit when left out. */
+  timeoutMs?: number;
 };
+
+// Limits for the reads that pages make on every load. Without one, a handler
+// that hung in the agent (a stuck systemctl, df on a dead mount, a database
+// that stopped answering) held the page until nginx gave up after 300 s.
+// Both are far above what the answer honestly takes, on a loaded server too.
+// Nothing that works for long has one: uploads, imports, streams, deploys,
+// certificate orders, the folder sizes, the git / image status checks and
+// the mail checks.
+/** Answered without running anything: /health, /tasks. */
+const QUICK_MS = 15_000;
+/** Lists and status reads: a few local commands, files or queries. */
+const READ_MS = 60_000;
 
 function buildPath(p: string, q?: RequestOptions["query"]): string {
   if (!q) return p;
@@ -28,7 +43,16 @@ function buildPath(p: string, q?: RequestOptions["query"]): string {
 
 export function agentRequest<T = unknown>(opts: RequestOptions): Promise<T> {
   const data = opts.body === undefined ? null : JSON.stringify(opts.body);
-  return new Promise<T>((resolve, reject) => {
+  return new Promise<T>((settle, fail) => {
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const resolve = (v: T) => {
+      clearTimeout(timer);
+      settle(v);
+    };
+    const reject = (e: unknown) => {
+      clearTimeout(timer);
+      fail(e);
+    };
     const req = http.request(
       {
         socketPath: config.agentSocket,
@@ -67,6 +91,20 @@ export function agentRequest<T = unknown>(opts: RequestOptions): Promise<T> {
       },
     );
     req.on("error", reject);
+    if (opts.timeoutMs) {
+      const ms = opts.timeoutMs;
+      timer = setTimeout(() => {
+        reject(
+          new AgentError(
+            504,
+            `the agent did not answer ${opts.method} ${opts.path} within ${Math.round(ms / 1000)} s`,
+          ),
+        );
+        // Closes the connection; the error that causes is ignored, the
+        // call is already settled.
+        req.destroy();
+      }, ms);
+    }
     if (data) req.write(data);
     req.end();
   });
@@ -121,8 +159,13 @@ export function relayBody(res: http.IncomingMessage, onCancel?: () => void): Rea
 }
 
 export const agent = {
-  health: () => agentRequest<{ ok: boolean; version: string; now: string }>({ method: "GET", path: "/health" }),
-  sysinfo: () => agentRequest<SysInfo>({ method: "GET", path: "/sysinfo" }),
+  health: () =>
+    agentRequest<{ ok: boolean; version: string; now: string }>({
+      method: "GET",
+      path: "/health",
+      timeoutMs: QUICK_MS,
+    }),
+  sysinfo: () => agentRequest<SysInfo>({ method: "GET", path: "/sysinfo", timeoutMs: READ_MS }),
   /** How much of / each key folder takes. The agent runs `du` (slow on a big
    *  disk) and serves the result for 10 minutes; `refresh` measures again. */
   folderSizes: (refresh = false) =>
@@ -133,8 +176,13 @@ export const agent = {
     }),
 
   apps: {
-    list: () => agentRequest<AppRow[]>({ method: "GET", path: "/apps" }),
-    get: (name: string) => agentRequest<AppRow>({ method: "GET", path: `/apps/${encodeURIComponent(name)}` }),
+    list: () => agentRequest<AppRow[]>({ method: "GET", path: "/apps", timeoutMs: READ_MS }),
+    get: (name: string) =>
+      agentRequest<AppRow>({
+        method: "GET",
+        path: `/apps/${encodeURIComponent(name)}`,
+        timeoutMs: READ_MS,
+      }),
     create: (body: CreateApp) => agentRequest<TaskAccepted>({ method: "POST", path: "/apps", body }),
     delete: (name: string, opts?: { wipe?: boolean }) =>
       agentRequest<Ok>({
@@ -171,6 +219,7 @@ export const agent = {
       agentRequest<{ state: "missing" | "empty" | "populated" }>({
         method: "GET",
         path: `/apps/${encodeURIComponent(name)}/source-state`,
+        timeoutMs: READ_MS,
       }),
     /** List every `.env*` file in the app's source dir (the files the app's
      *  own framework reads, e.g. Next.js `.env.local`). */
@@ -178,6 +227,7 @@ export const agent = {
       agentRequest<AppEnvFilesResp>({
         method: "GET",
         path: `/apps/${encodeURIComponent(name)}/env-files`,
+        timeoutMs: READ_MS,
       }),
     /** Create or overwrite a `.env*` file in the source dir, then optionally
      *  restart the app. `path` is relative to the source dir. */
@@ -213,12 +263,14 @@ export const agent = {
       agentRequest<{ env: { key: string; value: string }[] }>({
         method: "GET",
         path: `/apps/${encodeURIComponent(name)}/env`,
+        timeoutMs: READ_MS,
       }),
     /** Docker apps: saved settings, image ids and where the volumes live. */
     dockerInfo: (name: string) =>
       agentRequest<DockerAppInfo>({
         method: "GET",
         path: `/apps/${encodeURIComponent(name)}/docker`,
+        timeoutMs: READ_MS,
       }),
     /** Docker apps: does the registry have a newer image (network call). */
     imageStatus: (name: string) =>
@@ -241,7 +293,7 @@ export const agent = {
   },
 
   docker: {
-    status: () => agentRequest<DockerStatus>({ method: "GET", path: "/docker/status" }),
+    status: () => agentRequest<DockerStatus>({ method: "GET", path: "/docker/status", timeoutMs: READ_MS }),
     /** What a pulled image, or an app's last build from Git, declares
      *  (EXPOSE ports, VOLUME folders). 404 when there is no such image. */
     imageInfo: (of: { image: string } | { app: string }) =>
@@ -249,7 +301,7 @@ export const agent = {
   },
 
   services: {
-    list: () => agentRequest<ServiceRow[]>({ method: "GET", path: "/services" }),
+    list: () => agentRequest<ServiceRow[]>({ method: "GET", path: "/services", timeoutMs: READ_MS }),
     action: (unit: string, action: string) =>
       agentRequest<Ok>({
         method: "POST",
@@ -259,7 +311,7 @@ export const agent = {
 
   system: {
     services: () =>
-      agentRequest<CoreServiceState[]>({ method: "GET", path: "/system/services" }),
+      agentRequest<CoreServiceState[]>({ method: "GET", path: "/system/services", timeoutMs: READ_MS }),
     /**
      * List Linux users from /etc/passwd suitable for running cron jobs etc.
      * Filtered to root + UID >= 33 (excludes kernel pseudo-users + nobody),
@@ -271,6 +323,7 @@ export const agent = {
       agentRequest<SystemUserRow[]>({
         method: "GET",
         path: "/system/users",
+        timeoutMs: READ_MS,
       }),
     createUser: (body: {
       name: string;
@@ -324,14 +377,14 @@ export const agent = {
     selfUpdate: () =>
       agentRequest<TaskAccepted>({ method: "POST", path: "/system/self-update" }),
     /** The swap file the panel manages (/swapfile), other swap, RAM and disk room. */
-    swap: () => agentRequest<SwapStatus>({ method: "GET", path: "/system/swap" }),
+    swap: () => agentRequest<SwapStatus>({ method: "GET", path: "/system/swap", timeoutMs: READ_MS }),
     /** Create or resize (size_mb > 0) or remove (0) /swapfile and set
      *  vm.swappiness, as a task. Refused (409) when the disk or free RAM
      *  cannot take the change. */
     setSwap: (body: { size_mb: number; swappiness: number }) =>
       agentRequest<TaskAccepted>({ method: "PUT", path: "/system/swap", body }),
     /** The server's own hostname (not PANEL_HOST) and whether cloud-init would reset it. */
-    hostname: () => agentRequest<HostnameStatus>({ method: "GET", path: "/system/hostname" }),
+    hostname: () => agentRequest<HostnameStatus>({ method: "GET", path: "/system/hostname", timeoutMs: READ_MS }),
     /** hostnamectl + the 127.0.1.1 line in /etc/hosts + a cloud-init drop-in
      *  so the name survives reboots. `steps` says what changed. */
     setHostname: (hostname: string) =>
@@ -343,7 +396,7 @@ export const agent = {
   },
 
   ssl: {
-    list: () => agentRequest<CertRow[]>({ method: "GET", path: "/ssl" }),
+    list: () => agentRequest<CertRow[]>({ method: "GET", path: "/ssl", timeoutMs: READ_MS }),
     /** Re-issue the cert for `domain` with the full SAN set (www when forced,
      *  mail.<domain> when it is a mail tenant). Returns the agent task id so
      *  the UI can follow it; the cert lands when the task succeeds. */
@@ -352,7 +405,7 @@ export const agent = {
   },
 
   dns: {
-    listZones: () => agentRequest<ZoneRow[]>({ method: "GET", path: "/dns/zones" }),
+    listZones: () => agentRequest<ZoneRow[]>({ method: "GET", path: "/dns/zones", timeoutMs: READ_MS }),
     createZone: (name: string, seedIp?: string) =>
       agentRequest<ZoneRow>({
         method: "POST",
@@ -372,6 +425,7 @@ export const agent = {
       agentRequest<RecordRow[]>({
         method: "GET",
         path: `/dns/zones/${encodeURIComponent(zone)}/records`,
+        timeoutMs: READ_MS,
       }),
     createRecord: (zone: string, body: CreateRecord) =>
       agentRequest<RecordRow>({
@@ -386,7 +440,7 @@ export const agent = {
   },
 
   mail: {
-    listDomains: () => agentRequest<MailDomainRow[]>({ method: "GET", path: "/mail/domains" }),
+    listDomains: () => agentRequest<MailDomainRow[]>({ method: "GET", path: "/mail/domains", timeoutMs: READ_MS }),
     /** `issueSsl` (default true) lets the agent get a cert covering
      *  mail.<name> right away. Pass false when the caller is about to issue
      *  the site cert itself, which will carry mail.<name> as a SAN. */
@@ -404,7 +458,7 @@ export const agent = {
         method: "POST",
         path: `/mail/domains/${encodeURIComponent(name)}/ssl`,
       }),
-    listMailboxes: () => agentRequest<MailboxListResp>({ method: "GET", path: "/mail/mailboxes" }),
+    listMailboxes: () => agentRequest<MailboxListResp>({ method: "GET", path: "/mail/mailboxes", timeoutMs: READ_MS }),
     createMailbox: (body: { email: string; password?: string; quota_mb?: number }) =>
       agentRequest<{ email: string; initial_password: string }>({
         method: "POST",
@@ -431,7 +485,7 @@ export const agent = {
       }),
     /** Forwarders: one row per (source, destination). source `@domain` is
      *  the domain's catch-all. */
-    listAliases: () => agentRequest<MailAliasRow[]>({ method: "GET", path: "/mail/aliases" }),
+    listAliases: () => agentRequest<MailAliasRow[]>({ method: "GET", path: "/mail/aliases", timeoutMs: READ_MS }),
     createAlias: (source: string, destinations: string[]) =>
       agentRequest<{ added: number }>({
         method: "POST",
@@ -450,7 +504,7 @@ export const agent = {
       }),
     /** Outgoing mail over IPv4 or IPv6: the server default and every domain's
      *  choice. No network lookups. */
-    ipSettings: () => agentRequest<MailIpSettings>({ method: "GET", path: "/mail/ip-settings" }),
+    ipSettings: () => agentRequest<MailIpSettings>({ method: "GET", path: "/mail/ip-settings", timeoutMs: READ_MS }),
     /** 409 when `ipv6` is chosen while the IPv6 side is not ready, unless
      *  `force` is true. */
     setIpSettings: (body: { default_protocol: MailIpProtocol; force?: boolean }) =>
@@ -465,7 +519,7 @@ export const agent = {
         body,
       }),
     // The two checks do live DNS lookups and can take several seconds.
-    // agentRequest sets no timeout, so they are not cut short.
+    // They get no timeoutMs, so they are not cut short.
     ipCheck: () => agentRequest<MailIpCheck>({ method: "GET", path: "/mail/ip-check" }),
     domainDnsCheck: (name: string) =>
       agentRequest<MailDomainDnsCheck>({
@@ -475,8 +529,8 @@ export const agent = {
   },
 
   databases: {
-    listUsers: () => agentRequest<DbUser[]>({ method: "GET", path: "/db/users" }),
-    listDatabases: () => agentRequest<DbDatabase[]>({ method: "GET", path: "/db/databases" }),
+    listUsers: () => agentRequest<DbUser[]>({ method: "GET", path: "/db/users", timeoutMs: READ_MS }),
+    listDatabases: () => agentRequest<DbDatabase[]>({ method: "GET", path: "/db/databases", timeoutMs: READ_MS }),
     createUser: (body: { user: string; password?: string; host?: string }) =>
       agentRequest<{ user: string; host: string; initial_password: string }>({
         method: "POST",
@@ -526,9 +580,9 @@ export const agent = {
   // engine has its own routes, types, and reserved-name list.
   postgres: {
     listUsers: () =>
-      agentRequest<PgRole[]>({ method: "GET", path: "/pg/users" }),
+      agentRequest<PgRole[]>({ method: "GET", path: "/pg/users", timeoutMs: READ_MS }),
     listDatabases: () =>
-      agentRequest<PgDatabase[]>({ method: "GET", path: "/pg/databases" }),
+      agentRequest<PgDatabase[]>({ method: "GET", path: "/pg/databases", timeoutMs: READ_MS }),
     createRole: (body: { user: string; password?: string; superuser?: boolean }) =>
       agentRequest<{ user: string; initial_password: string }>({
         method: "POST",
@@ -574,6 +628,7 @@ export const agent = {
       agentRequest<{ available: boolean; enabled: string[] }>({
         method: "GET",
         path: "/pg/pgvector",
+        timeoutMs: READ_MS,
       }),
     enablePgvector: (database: string) =>
       agentRequest<Ok>({
@@ -741,7 +796,7 @@ export const agent = {
   },
 
   cron: {
-    list: () => agentRequest<CronJobRow[]>({ method: "GET", path: "/cron/jobs" }),
+    list: () => agentRequest<CronJobRow[]>({ method: "GET", path: "/cron/jobs", timeoutMs: READ_MS }),
     create: (body: { schedule: string; user: string; command: string; label?: string }) =>
       agentRequest<CronJobRow>({ method: "POST", path: "/cron/jobs", body }),
     delete: (id: string) =>
@@ -753,12 +808,13 @@ export const agent = {
   // canonicalises and refuses anything resolving outside it. Deletes go to a
   // 30-day trash, never straight to `rm`.
   files: {
-    roots: () => agentRequest<FileRoot[]>({ method: "GET", path: "/files/roots" }),
+    roots: () => agentRequest<FileRoot[]>({ method: "GET", path: "/files/roots", timeoutMs: READ_MS }),
     /** List one directory. `path` is relative to the root; "" is the root. */
     list: (root: string, path = "") =>
       agentRequest<FileListing>({
         method: "GET",
         path: "/files/list",
+        timeoutMs: READ_MS,
         query: { root, path },
       }),
     mkdir: (root: string, path: string, name: string) =>
@@ -809,7 +865,7 @@ export const agent = {
   },
 
   sites: {
-    list: () => agentRequest<SiteListEntry[]>({ method: "GET", path: "/sites" }),
+    list: () => agentRequest<SiteListEntry[]>({ method: "GET", path: "/sites", timeoutMs: READ_MS }),
     create: (body: CreateSite) =>
       agentRequest<CreateSiteResponse>({ method: "POST", path: "/sites", body }),
     update: (domain: string, body: UpdateSite) =>
@@ -827,6 +883,7 @@ export const agent = {
       agentRequest<SiteStatus>({
         method: "GET",
         path: `/sites/${encodeURIComponent(domain)}/status`,
+        timeoutMs: READ_MS,
       }),
   },
   redirects: {
@@ -844,9 +901,9 @@ export const agent = {
   },
 
   tasks: {
-    list: () => agentRequest<TaskState[]>({ method: "GET", path: "/tasks" }),
+    list: () => agentRequest<TaskState[]>({ method: "GET", path: "/tasks", timeoutMs: QUICK_MS }),
     get: (id: string) =>
-      agentRequest<TaskState>({ method: "GET", path: `/tasks/${encodeURIComponent(id)}` }),
+      agentRequest<TaskState>({ method: "GET", path: `/tasks/${encodeURIComponent(id)}`, timeoutMs: QUICK_MS }),
   },
 
   quickInstall: {
@@ -858,6 +915,7 @@ export const agent = {
       agentRequest<QuickInstallRecipe[]>({
         method: "GET",
         path: "/quick-install",
+        timeoutMs: READ_MS,
         query: opts?.checkUpdates ? { check_updates: true } : undefined,
       }),
     run: (slug: string) =>
@@ -878,6 +936,7 @@ export const agent = {
       agentRequest<RoundcubeSettings>({
         method: "GET",
         path: "/quick-install/roundcube/settings",
+        timeoutMs: READ_MS,
       }),
     /** Recreate the Roundcube container with the supplied values + wipe
      *  the cached config volume. Returns a task id so the UI can stream
@@ -899,6 +958,7 @@ export const agent = {
       agentRequest<N8nSettings>({
         method: "GET",
         path: "/quick-install/n8n/settings",
+        timeoutMs: READ_MS,
       }),
     /** Recreate the n8n container with N8N_HOST / N8N_PROTOCOL /
      *  WEBHOOK_URL / N8N_EDITOR_BASE_URL set from the operator's input.
@@ -930,6 +990,7 @@ export const agent = {
       agentRequest<PhpMyAdminSettings>({
         method: "GET",
         path: "/quick-install/phpmyadmin/settings",
+        timeoutMs: READ_MS,
       }),
     /** Recreate the phpMyAdmin container with PMA_ABSOLUTE_URI set from
      *  the operator's input. Empty string clears the env var. Preserves
@@ -948,7 +1009,7 @@ export const agent = {
     /** State, this server's tailnet address, machines, settings and, while a
      *  login started here waits, the login link. The link lets whoever opens
      *  it put this server in their tailnet: admins only. */
-    status: () => agentRequest<TailscaleStatus>({ method: "GET", path: "/tailscale/status" }),
+    status: () => agentRequest<TailscaleStatus>({ method: "GET", path: "/tailscale/status", timeoutMs: READ_MS }),
     /** `tailscale up --reset` with the options, as task `tailscale:up`: waits
      *  up to 15 min for someone to open the link, or logs in with the key. */
     login: (body: TailscaleOptions & { auth_key: string }) =>
