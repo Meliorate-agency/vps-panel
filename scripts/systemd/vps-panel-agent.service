@@ -22,28 +22,23 @@ StandardOutput=journal
 StandardError=journal
 NoNewPrivileges=false
 
-# ProtectHome= used to be `read-only` here, but the agent legitimately needs
-# write access to BOTH /home (for `useradd -m`, `userdel -r`, SSH key writes
-# under /home/<user>/.ssh/) and /root (for `git pull` / `cargo build` from
-# the self-update endpoint). ReadWritePaths= and BindPaths= can in theory
-# "punch holes" through ProtectHome=, and that works reliably for
-# subdirectories of /root, but in practice systemd re-applies ProtectHome's
-# read-only flag AFTER BindPaths= for top-level /home, leaving it read-only
-# in the agent's namespace despite BindPaths=/home being present. Rather
-# than fight the systemd ordering, we drop ProtectHome entirely. The agent
-# runs as root with no privilege restrictions and a bearer-token-gated unix
-# socket — ProtectHome was security theatre, not real defense in depth.
-# ProtectHome=read-only
-# Self-update endpoints (POST /system/self-update + GET /system/update-check)
-# still rely on these paths existing; the `-` prefix marks each as optional
-# (no error if absent on a fresh box where /root/.cargo doesn't exist yet).
-# We keep the ReadWritePaths= list as a documentation aid even though,
-# without ProtectHome=, the kernel doesn't restrict access to /root.
+# No ProtectHome=, ReadWritePaths= or any other mount sandboxing here. The
+# agent runs as root behind a token-gated unix socket and needs /home
+# (`useradd -m`, `userdel -r`, SSH keys) and /root (`git pull` / `cargo build`
+# for the self-update, /root/.ssh, /root/.npm), so they restricted nothing.
+# ReadWritePaths= stayed here for a while "as documentation" and was not
+# harmless: any such option puts the unit in a private mount namespace whose
+# mounts never reach the host. A volume mounted from the panel's terminal
+# showed up in the terminal and in Files, was invisible to every other
+# service, and was unmounted again by the next agent restart (every update).
+# Do not add one in a drop-in either; the checkout can live anywhere.
 #
-# If you cloned the repo somewhere other than /root/vps-panel-src, add a
-# drop-in at /etc/systemd/system/vps-panel-agent.service.d/repo-paths.conf
-# with `ReadWritePaths=-/your/path -/your/cargo` and `systemctl daemon-reload`.
-ReadWritePaths=-/root/vps-panel-src -/root/.cargo -/root/.ssh -/root/.npm
+# App builds, the terminal and backups run in this unit's cgroup. With the
+# default OOMPolicy=stop, the kernel killing one of them for memory (a `next
+# build` on a small server) made systemd stop the whole agent: every running
+# task and terminal died, the panel restarted, and the failed build's
+# previous node_modules/.next were never put back.
+OOMPolicy=continue
 RuntimeDirectory=vps-panel
 RuntimeDirectoryMode=0755
 

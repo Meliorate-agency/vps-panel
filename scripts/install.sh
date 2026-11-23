@@ -845,16 +845,11 @@ mkdir -p /var/log/journal
 sed -i 's/#Storage=auto/Storage=persistent/; s/#SystemMaxUse=.*/SystemMaxUse=1G/' /etc/systemd/journald.conf
 systemctl restart systemd-journald
 
-# Pre-create /root/.ssh so the agent's `ReadWritePaths=-/root/.ssh`
-# whitelist pin attaches at service start. Without an existing directory,
-# the path is skipped (the `-` prefix swallows missing-path errors) and the
-# agent can't later `mkdir /root/.ssh` to generate a keypair — ProtectHome
-# blocks the parent write with EROFS.
+# /root/.ssh (the agent's keypairs) and /root/.npm (npm's cache, for build
+# steps that shell out to a child `npm install`) exist before the agent
+# starts. The unit used to whitelist both with ReadWritePaths=, which only
+# pins a path that is there at start; it no longer sandboxes /root at all.
 install -d -m 0700 -o root -g root /root/.ssh
-
-# Same reasoning for /root/.npm (npm's global package cache). Required so
-# build steps that shell out to a child `npm install` (Next.js TS auto-
-# install, postinstall scripts, etc.) can write to ~/.npm/_cacache/.
 install -d -m 0755 -o root -g root /root/.npm
 
 log "configuring SSH (password + root login allowed by default)"

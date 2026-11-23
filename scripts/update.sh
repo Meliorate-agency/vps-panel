@@ -175,16 +175,12 @@ migrate_acme_webroot() {
 }
 migrate_acme_webroot || true
 
-# Pre-create /root/.ssh so the agent's ReadWritePaths whitelist for it
-# attaches at restart (ProtectHome=read-only would otherwise block any
-# mkdir under /root from the agent). Idempotent.
+# /root/.ssh and /root/.npm (npm's cache, for builds that shell out to a
+# child `npm install`) exist before the agent restarts, as install.sh leaves
+# them. The unit used to whitelist both with ReadWritePaths=, which only
+# pins a path that is there at start; it no longer sandboxes /root at all.
+# Idempotent.
 install -d -m 0700 -o root -g root /root/.ssh
-
-# Same reasoning for /root/.npm — npm's global package cache. Next.js and
-# other framework "auto-install missing deps" features shell out to npm
-# during builds, and that inner npm writes to ~/.npm/_cacache/. Without
-# the dir existing at agent-restart time, ReadWritePaths can't pin it and
-# every build that triggers an auto-install fails with EROFS.
 install -d -m 0755 -o root -g root /root/.npm
 
 install -m 0644 "$REPO_DIR/scripts/systemd/vps-panel-agent.service" \
