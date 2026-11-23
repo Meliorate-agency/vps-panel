@@ -209,14 +209,89 @@ async fn admin_reset(args: Vec<String>) -> Result<()> {
     let path: std::path::PathBuf = std::env::var("PANEL_DB_PATH")
         .unwrap_or_else(|_| "/var/lib/vps-panel/panel.db".to_string())
         .into();
-    let conn = rusqlite::Connection::open(&path).context("open panel db")?;
-    let updated = conn.execute(
+    let mut conn = rusqlite::Connection::open(&path).context("open panel db")?;
+    let signed_out = reset_password_rows(&mut conn, &email, &hash)?;
+    println!("password reset for {email}; TOTP cleared; {signed_out} open session(s) signed out.");
+    Ok(())
+}
+
+/// Store the new hash, clear two-factor and revoke the user's sessions, in
+/// one transaction. Returns how many sessions were revoked. The sessions
+/// used to be left alone, so whoever was signed in under the old password
+/// (the reason for many resets) stayed signed in until the session expired.
+fn reset_password_rows(conn: &mut rusqlite::Connection, email: &str, hash: &str) -> Result<usize> {
+    let tx = conn.transaction()?;
+    let updated = tx.execute(
         "UPDATE users SET password_hash = ?1, totp_enabled = 0, totp_secret = NULL WHERE email = ?2",
         rusqlite::params![hash, email],
     )?;
     if updated == 0 {
         anyhow::bail!("no user found with email {email}");
     }
-    println!("password reset for {email}; TOTP cleared.");
-    Ok(())
+    // The panel creates `sessions` with the rest of its schema; a database
+    // from before that has none to revoke.
+    let has_sessions: bool = tx.query_row(
+        "SELECT EXISTS (SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'sessions')",
+        [],
+        |row| row.get(0),
+    )?;
+    let signed_out = if has_sessions {
+        tx.execute(
+            "UPDATE sessions SET revoked = 1
+             WHERE revoked = 0 AND user_id = (SELECT id FROM users WHERE email = ?1)",
+            rusqlite::params![email],
+        )?
+    } else {
+        0
+    };
+    tx.commit()?;
+    Ok(signed_out)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::reset_password_rows;
+
+    const USERS: &str = "CREATE TABLE users (id INTEGER PRIMARY KEY, email TEXT NOT NULL UNIQUE,
+        password_hash TEXT NOT NULL, totp_secret TEXT, totp_enabled INTEGER NOT NULL DEFAULT 0);
+        INSERT INTO users (id, email, password_hash, totp_secret, totp_enabled)
+        VALUES (1, 'a@example.com', 'old', 'S', 1), (2, 'b@example.com', 'old', NULL, 0);";
+
+    #[test]
+    fn a_password_reset_signs_the_user_out_everywhere() {
+        let mut conn = rusqlite::Connection::open_in_memory().unwrap();
+        conn.execute_batch(USERS).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE sessions (jti TEXT PRIMARY KEY, user_id INTEGER NOT NULL,
+                expires_at TEXT NOT NULL, revoked INTEGER NOT NULL DEFAULT 0);
+             INSERT INTO sessions VALUES ('a1', 1, 'x', 0), ('a2', 1, 'x', 0), ('b1', 2, 'x', 0);",
+        )
+        .unwrap();
+
+        assert_eq!(reset_password_rows(&mut conn, "a@example.com", "new").unwrap(), 2);
+        let live: Vec<String> = conn
+            .prepare("SELECT jti FROM sessions WHERE revoked = 0")
+            .unwrap()
+            .query_map([], |r| r.get(0))
+            .unwrap()
+            .map(|r| r.unwrap())
+            .collect();
+        assert_eq!(live, vec!["b1".to_string()]);
+        let (hash, totp): (String, i64) = conn
+            .query_row("SELECT password_hash, totp_enabled FROM users WHERE id = 1", [], |r| {
+                Ok((r.get(0)?, r.get(1)?))
+            })
+            .unwrap();
+        assert_eq!((hash.as_str(), totp), ("new", 0));
+
+        // An unknown address changes nothing.
+        assert!(reset_password_rows(&mut conn, "nobody@example.com", "new").is_err());
+    }
+
+    #[test]
+    fn a_password_reset_works_before_the_panel_made_its_sessions_table() {
+        let mut conn = rusqlite::Connection::open_in_memory().unwrap();
+        conn.execute_batch(USERS).unwrap();
+        assert_eq!(reset_password_rows(&mut conn, "b@example.com", "new").unwrap(), 0);
+    }
 }
