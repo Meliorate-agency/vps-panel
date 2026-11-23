@@ -44,6 +44,9 @@ pub struct SshServerConfigUpdate {
     pub idle_timeout_minutes: Option<u32>,
     pub password_auth: Option<bool>,
     pub permit_root_login: Option<String>,
+    /// Save although nobody could log in over SSH afterwards.
+    #[serde(default)]
+    pub force: bool,
 }
 
 /// The settings sshd actually runs with.
@@ -53,6 +56,8 @@ struct Effective {
     password_auth: bool,
     kbd_interactive: bool,
     permit_root_login: String,
+    /// `AuthorizedKeysFile` patterns.
+    authorized_keys_files: Vec<String>,
 }
 
 pub async fn config_get() -> AgentResult<Json<SshServerConfig>> {
@@ -153,7 +158,192 @@ fn parse_effective(dump: &str) -> Effective {
         password_auth: first("passwordauthentication").as_deref() != Some("no"),
         kbd_interactive: first("kbdinteractiveauthentication").as_deref() != Some("no"),
         permit_root_login,
+        authorized_keys_files: dump_values(dump, "authorizedkeysfile")
+            .iter()
+            .flat_map(|v| v.split_whitespace())
+            .map(str::to_string)
+            .collect(),
     }
+}
+
+/// How sshd lets accounts in, as far as the panel changes it.
+#[derive(Clone, PartialEq)]
+struct LoginPolicy {
+    /// Typing a password works (`PasswordAuthentication` or, through PAM,
+    /// `KbdInteractiveAuthentication`).
+    passwords: bool,
+    /// `PermitRootLogin`.
+    root_login: String,
+}
+
+/// An account with a login shell.
+struct LoginAccount {
+    uid: u32,
+    has_password: bool,
+    /// A line in its authorized_keys that opens a shell.
+    has_key: bool,
+}
+
+fn can_log_in(a: &LoginAccount, policy: &LoginPolicy) -> bool {
+    let by_password = policy.passwords && a.has_password;
+    if a.uid != 0 {
+        return a.has_key || by_password;
+    }
+    match policy.root_login.as_str() {
+        "yes" => a.has_key || by_password,
+        "prohibit-password" => a.has_key,
+        // forced-commands-only runs a key's fixed command, never a shell.
+        _ => false,
+    }
+}
+
+/// Why a change from `before` to `after` is refused without `force`: an
+/// account can log in over SSH now and none could afterwards. Turning
+/// password login off, or tightening root login on a server where only root
+/// logs in, while nobody has a key did exactly that. A change that takes no
+/// way in away is never refused.
+fn lockout_reason(
+    before: &LoginPolicy,
+    after: &LoginPolicy,
+    accounts: &[LoginAccount],
+) -> Option<String> {
+    if before == after
+        || !accounts.iter().any(|a| can_log_in(a, before))
+        || accounts.iter().any(|a| can_log_in(a, after))
+    {
+        return None;
+    }
+    let why = if !after.passwords {
+        "password login would be off and no account that may log in has a key in authorized_keys"
+    } else if after.root_login == "prohibit-password" {
+        "root would need a key and has none in authorized_keys, and no other account has a \
+         password or a key"
+    } else {
+        "root could no longer log in, and no other account has a password or a key"
+    };
+    Some(format!(
+        "nobody could log in over SSH after this change: {why}. Add an SSH key first. \
+         The panel terminal would still work."
+    ))
+}
+
+/// Accounts in /etc/passwd with a login shell, as (name, uid, home, has a
+/// password). A password is usable when its /etc/shadow field is a hash:
+/// not empty, and not locked with `!` or `*`.
+fn parse_login_accounts(passwd: &str, shadow: &str) -> Vec<(String, u32, PathBuf, bool)> {
+    let with_password: Vec<&str> = shadow
+        .lines()
+        .filter_map(|l| {
+            let mut f = l.split(':');
+            let name = f.next()?;
+            let hash = f.next()?;
+            (!hash.is_empty() && !hash.starts_with(['!', '*'])).then_some(name)
+        })
+        .collect();
+    passwd
+        .lines()
+        .filter_map(|l| {
+            let f: Vec<&str> = l.split(':').collect();
+            if f.len() < 7 || f[0].is_empty() || f[0].starts_with('#') {
+                return None;
+            }
+            let uid: u32 = f[2].parse().ok()?;
+            let shell = f[6].trim().rsplit('/').next().unwrap_or("");
+            if matches!(shell, "nologin" | "false") {
+                return None;
+            }
+            Some((f[0].to_string(), uid, PathBuf::from(f[5]), with_password.contains(&f[0])))
+        })
+        .collect()
+}
+
+/// The files sshd reads an account's keys from: the `AuthorizedKeysFile`
+/// patterns with `%h`, `%u` and `%%` filled in, relative ones under the home.
+fn authorized_keys_files(patterns: &[String], user: &str, home: &std::path::Path) -> Vec<PathBuf> {
+    const DEFAULT: [&str; 2] = [".ssh/authorized_keys", ".ssh/authorized_keys2"];
+    let patterns: Vec<&str> = if patterns.is_empty() {
+        DEFAULT.to_vec()
+    } else {
+        patterns.iter().map(String::as_str).collect()
+    };
+    patterns
+        .into_iter()
+        .filter(|p| !p.eq_ignore_ascii_case("none"))
+        .map(|p| {
+            let path = p
+                .replace("%%", "\0")
+                .replace("%h", &home.to_string_lossy())
+                .replace("%u", user)
+                .replace('\0', "%");
+            home.join(path)
+        })
+        .collect()
+}
+
+/// Whether an authorized_keys line can open a shell: a key line whose
+/// options, if it has any, do not force a command. Cloud images give root a
+/// key with `command="echo 'Please login as the user ...'"`.
+fn line_opens_a_shell(line: &str) -> bool {
+    let line = line.trim();
+    if line.is_empty() || line.starts_with('#') {
+        return false;
+    }
+    let first = line.split_whitespace().next().unwrap_or("");
+    if ["ssh-", "ecdsa-", "sk-"].iter().any(|t| first.starts_with(t)) {
+        return true;
+    }
+    // Options end at the first blank outside double quotes.
+    let mut quoted = false;
+    let mut escaped = false;
+    let mut end = line.len();
+    for (i, c) in line.char_indices() {
+        match c {
+            '\\' if !escaped => {
+                escaped = true;
+                continue;
+            }
+            '"' if !escaped => quoted = !quoted,
+            ' ' | '\t' if !quoted => {
+                end = i;
+                break;
+            }
+            _ => {}
+        }
+        escaped = false;
+    }
+    !line[..end]
+        .split(',')
+        .any(|o| o.trim_start().to_ascii_lowercase().starts_with("command="))
+}
+
+async fn has_login_key(files: &[PathBuf]) -> bool {
+    for file in files {
+        // Lossy: one byte outside UTF-8 in a comment does not hide the keys.
+        let Ok(bytes) = fs::read(file).await else {
+            continue;
+        };
+        for line in String::from_utf8_lossy(&bytes).lines() {
+            if line_opens_a_shell(line) && fingerprint(line.trim()).await.is_ok() {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+async fn login_accounts(key_patterns: &[String]) -> Vec<LoginAccount> {
+    let passwd = fs::read_to_string("/etc/passwd").await.unwrap_or_default();
+    let shadow = fs::read_to_string("/etc/shadow").await.unwrap_or_default();
+    let mut out = Vec::new();
+    for (name, uid, home, has_password) in parse_login_accounts(&passwd, &shadow) {
+        let files = authorized_keys_files(key_patterns, &name, &home);
+        out.push(LoginAccount {
+            uid,
+            has_password,
+            has_key: has_login_key(&files).await,
+        });
+    }
+    out
 }
 
 /// Minutes from a `channeltimeout` value such as `session=30m`; 0 when no
@@ -340,6 +530,25 @@ pub async fn config_set(
     let _guard = LOCK.get_or_init(|| tokio::sync::Mutex::new(())).lock().await;
 
     let before = effective_config().await?;
+    if !req.force {
+        let login_before = LoginPolicy {
+            passwords: before.password_auth || before.kbd_interactive,
+            root_login: before.permit_root_login.clone(),
+        };
+        let login_after = LoginPolicy {
+            passwords: req.password_auth.unwrap_or(login_before.passwords),
+            root_login: req
+                .permit_root_login
+                .clone()
+                .unwrap_or_else(|| login_before.root_login.clone()),
+        };
+        if login_after != login_before {
+            let accounts = login_accounts(&before.authorized_keys_files).await;
+            if let Some(why) = lockout_reason(&login_before, &login_after, &accounts) {
+                return Err(AgentError::Conflict(why));
+            }
+        }
+    }
     let old_port = before.ports.first().copied().unwrap_or(22);
     let new_port = req.port.filter(|p| *p != old_port);
     if let Some(p) = new_port {
@@ -1387,6 +1596,130 @@ mod tests {
         assert!(super::parse_socket_ports("Listen=\n").is_empty());
     }
 
+    use super::lockout_reason;
+
+    fn policy(passwords: bool, root_login: &str) -> super::LoginPolicy {
+        super::LoginPolicy { passwords, root_login: root_login.to_string() }
+    }
+
+    fn account(uid: u32, has_password: bool, has_key: bool) -> super::LoginAccount {
+        super::LoginAccount { uid, has_password, has_key }
+    }
+
+    #[test]
+    fn a_change_that_takes_the_last_way_in_is_refused() {
+        let open = policy(true, "yes");
+        // A fresh VPS: root with a password and no key.
+        let root_pw = [account(0, true, false)];
+        let why = lockout_reason(&open, &policy(false, "yes"), &root_pw).unwrap();
+        assert!(why.contains("password login would be off"), "{why}");
+        let why = lockout_reason(&open, &policy(true, "prohibit-password"), &root_pw).unwrap();
+        assert!(why.contains("root would need a key"), "{why}");
+        let why = lockout_reason(&open, &policy(true, "no"), &root_pw).unwrap();
+        assert!(why.contains("root could no longer log in"), "{why}");
+
+        // Root's key does not help once root login is off.
+        let root_key = [account(0, true, true)];
+        assert!(lockout_reason(&open, &policy(false, "prohibit-password"), &root_key).is_none());
+        assert!(lockout_reason(&open, &policy(false, "no"), &root_key).is_some());
+        assert!(lockout_reason(&open, &policy(false, "forced-commands-only"), &root_key).is_some());
+
+        // Another account keeps SSH usable by its password, or by its key.
+        let with_user = [account(0, true, false), account(1000, true, false)];
+        assert!(lockout_reason(&open, &policy(true, "prohibit-password"), &with_user).is_none());
+        assert!(lockout_reason(&open, &policy(false, "yes"), &with_user).is_some());
+        let user_key = [account(0, true, false), account(1000, false, true)];
+        assert!(lockout_reason(&open, &policy(false, "no"), &user_key).is_none());
+        // A service account with a shell and a locked password is no way in.
+        let with_service = [account(0, true, false), account(114, false, false)];
+        assert!(lockout_reason(&open, &policy(true, "no"), &with_service).is_some());
+    }
+
+    #[test]
+    fn a_change_that_takes_no_way_in_is_not_refused() {
+        let root_pw = [account(0, true, false)];
+        // Nothing about logging in changes (a port or timeout save).
+        assert!(lockout_reason(&policy(true, "yes"), &policy(true, "yes"), &root_pw).is_none());
+        // Loosening.
+        let closed = policy(false, "prohibit-password");
+        assert!(lockout_reason(&closed, &policy(true, "yes"), &root_pw).is_none());
+        // Nobody could log in before either, as far as the panel can tell.
+        assert!(lockout_reason(&closed, &policy(false, "no"), &root_pw).is_none());
+        assert!(lockout_reason(&policy(true, "yes"), &policy(false, "no"), &[]).is_none());
+    }
+
+    #[test]
+    fn login_accounts_from_passwd_and_shadow() {
+        let passwd = "root:x:0:0:root:/root:/bin/bash\n\
+                      daemon:x:1:1:daemon:/usr/sbin:/usr/sbin/nologin\n\
+                      postgres:x:114:120:PostgreSQL:/var/lib/postgresql:/bin/bash\n\
+                      apps:x:998:998::/srv/apps:/bin/bash\n\
+                      adrian:x:1000:1000:,,,:/home/adrian:/bin/zsh\n\
+                      ghost:x:1001:1001::/home/ghost:/bin/false\n\
+                      broken line\n";
+        let shadow = "root:$y$j9T$salt$hash:19000:0:99999:7:::\n\
+                      daemon:*:19000:0:99999:7:::\n\
+                      postgres:!:19000::::::\n\
+                      apps:!*:19000::::::\n\
+                      adrian:$6$salt$hash:19000:0:99999:7:::\n\
+                      ghost:$6$salt$hash:19000:0:99999:7:::\n";
+        let accounts = super::parse_login_accounts(passwd, shadow);
+        let summary: Vec<(&str, u32, &str, bool)> = accounts
+            .iter()
+            .map(|(n, uid, home, pw)| (n.as_str(), *uid, home.to_str().unwrap(), *pw))
+            .collect();
+        assert_eq!(
+            summary,
+            vec![
+                ("root", 0, "/root", true),
+                ("postgres", 114, "/var/lib/postgresql", false),
+                ("apps", 998, "/srv/apps", false),
+                ("adrian", 1000, "/home/adrian", true),
+            ]
+        );
+        // No shadow (not readable): nobody counts as having a password.
+        assert!(super::parse_login_accounts(passwd, "").iter().all(|a| !a.3));
+    }
+
+    #[test]
+    fn authorized_keys_files_follow_the_sshd_setting() {
+        let home = std::path::Path::new("/home/adrian");
+        let files = |patterns: &[&str]| {
+            let patterns: Vec<String> = patterns.iter().map(|p| p.to_string()).collect();
+            super::authorized_keys_files(&patterns, "adrian", home)
+                .iter()
+                .map(|p| p.to_string_lossy().into_owned())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            files(&[]),
+            vec!["/home/adrian/.ssh/authorized_keys", "/home/adrian/.ssh/authorized_keys2"]
+        );
+        assert_eq!(
+            files(&["%h/.ssh/keys", "/etc/ssh/keys/%u", "%%u"]),
+            vec!["/home/adrian/.ssh/keys", "/etc/ssh/keys/adrian", "/home/adrian/%u"]
+        );
+        assert!(files(&["none"]).is_empty());
+        let e = parse_effective("authorizedkeysfile .ssh/authorized_keys .ssh/authorized_keys2\n");
+        assert_eq!(e.authorized_keys_files, vec![".ssh/authorized_keys", ".ssh/authorized_keys2"]);
+    }
+
+    #[test]
+    fn a_key_with_a_forced_command_does_not_open_a_shell() {
+        let key = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIGh laptop";
+        assert!(super::line_opens_a_shell(key));
+        assert!(super::line_opens_a_shell(&format!("from=\"10.0.0.0/8, 192.168.1.1\" {key}")));
+        assert!(super::line_opens_a_shell(&format!("no-port-forwarding,no-pty {key}")));
+        // A comment may say anything.
+        assert!(super::line_opens_a_shell(&format!("{key} command=\"x\"")));
+        assert!(!super::line_opens_a_shell(&format!(
+            "no-port-forwarding,command=\"echo 'Please login as the user \\\"ubuntu\\\"';exit 142\" {key}"
+        )));
+        assert!(!super::line_opens_a_shell(&format!("Command=\"/bin/backup\" {key}")));
+        assert!(!super::line_opens_a_shell("# ssh-ed25519 AAAA"));
+        assert!(!super::line_opens_a_shell("   "));
+    }
+
     #[test]
     fn effective_config_keeps_root_login_no_distinct() {
         let e = parse_effective("port 22\npermitrootlogin no\nchanneltimeout none\n");
@@ -1620,6 +1953,22 @@ mod tests {
         assert_eq!(line(rows[1].fingerprint.clone()).await, Some(pasted));
         assert_eq!(line(rows[2].fingerprint.clone()).await, Some(deploy));
         assert_eq!(line("SHA256:unknown".into()).await, None);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn only_a_key_that_opens_a_shell_counts_as_a_way_in() {
+        let dir = scratch_ssh_dir();
+        let key = keygen(&dir, "a", "laptop");
+        let ak = dir.join("authorized_keys");
+        let files = [dir.join("missing"), ak.clone()];
+        std::fs::write(&ak, format!("# {key}\nnot a key\ncommand=\"echo no\" {key}\n")).unwrap();
+        assert!(!super::has_login_key(&files).await);
+        // One byte outside UTF-8 in a comment does not hide the key after it.
+        let mut body = b"ssh-ed25519 AAAA jos\xe9@laptop\n".to_vec();
+        body.extend_from_slice(format!("no-pty {key}\n").as_bytes());
+        std::fs::write(&ak, body).unwrap();
+        assert!(super::has_login_key(&files).await);
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
