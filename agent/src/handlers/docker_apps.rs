@@ -680,7 +680,7 @@ async fn deploy(
         })
     })?;
 
-    apps::write_deploy_env(cfg, req.env.as_deref(), &env_path, task).await?;
+    apps::write_deploy_env(cfg, req.env.as_deref(), true, &env_path, task).await?;
     task.log(format!("writing {}", config_path(name).display()));
     write_config(name, spec).await?;
 

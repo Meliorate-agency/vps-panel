@@ -836,7 +836,7 @@ async fn run_deploy(
         }
     }
 
-    write_deploy_env(cfg, req.env.as_deref(), &env_path, task).await?;
+    write_deploy_env(cfg, req.env.as_deref(), false, &env_path, task).await?;
     let exec_start = match &req.exec_start {
         Some(s) => s.clone(),
         None => existing_exec_start(&unit_path)
@@ -902,10 +902,12 @@ async fn run_deploy(
 }
 
 /// The deploy's EnvironmentFile: the request's variables replace the file,
-/// none keeps it (an empty one for a new app). root:apps 0640.
+/// none keeps it (an empty one for a new app). root:apps 0640. `docker`: the
+/// file is for `docker run --env-file`, not a unit (see render_app_env).
 pub(crate) async fn write_deploy_env(
     cfg: &crate::config::Config,
     env: Option<&[EnvKv]>,
+    docker: bool,
     env_path: &std::path::Path,
     task: &crate::ipc::tasks::TaskHandle,
 ) -> AgentResult<()> {
@@ -913,7 +915,7 @@ pub(crate) async fn write_deploy_env(
         Some(env) => {
             task.log(format!("writing env file {}", env_path.display()));
             fs_atomic::ensure_dir(env_path.parent().unwrap(), 0o750).await?;
-            fs_atomic::write(env_path, render_env_file(env).as_bytes(), 0o640).await?;
+            fs_atomic::write(env_path, render_app_env(env, docker).as_bytes(), 0o640).await?;
         }
         None if env_path.exists() => {
             task.log(format!("keeping the existing env file {}", env_path.display()));
@@ -1974,7 +1976,8 @@ pub async fn patch_env(
     }
     validate_env_keys(&req.env)?;
     let env_path = PathBuf::from(format!("/etc/vps-panel/apps/{name}.env"));
-    let mut entries = parse_env_file(&tokio::fs::read_to_string(&env_path).await.unwrap_or_default());
+    let docker = docker_apps::is_docker_app(&name);
+    let mut entries = parse_app_env(&tokio::fs::read_to_string(&env_path).await.unwrap_or_default(), docker);
     for kv in req.env {
         match entries.iter_mut().find(|e| e.key == kv.key) {
             Some(existing) => existing.value = kv.value,
@@ -1982,7 +1985,7 @@ pub async fn patch_env(
         }
     }
     fs_atomic::ensure_dir(env_path.parent().unwrap(), 0o750).await?;
-    fs_atomic::write(&env_path, render_env_file(&entries).as_bytes(), 0o640).await?;
+    fs_atomic::write(&env_path, render_app_env(&entries, docker).as_bytes(), 0o640).await?;
     if state.config.apps_gid != 0 {
         let _ = fs_atomic::chown_blocking(&env_path, 0, state.config.apps_gid);
     }
@@ -2000,8 +2003,9 @@ pub async fn patch_env(
 
 #[derive(Serialize)]
 pub struct EnvResp {
-    /// The EnvironmentFile's KEY=VALUE pairs in file order, values as stored
-    /// (newlines escaped as `\n`). Empty when the file does not exist.
+    /// The EnvironmentFile's KEY=VALUE pairs in file order. A Docker app's
+    /// values as stored (newlines escaped as `\n`), a Node app's as the app
+    /// gets them. Empty when the file does not exist.
     pub env: Vec<EnvKv>,
 }
 
@@ -2012,7 +2016,9 @@ pub async fn get_env(Path(name): Path<String>) -> AgentResult<Json<EnvResp>> {
     let body = tokio::fs::read_to_string(format!("/etc/vps-panel/apps/{name}.env"))
         .await
         .unwrap_or_default();
-    Ok(Json(EnvResp { env: parse_env_file(&body) }))
+    Ok(Json(EnvResp {
+        env: parse_app_env(&body, docker_apps::is_docker_app(&name)),
+    }))
 }
 
 /// List every `.env*` file inside an app's source directory. These are the
@@ -2603,8 +2609,206 @@ fn validate_env_keys(env: &[EnvKv]) -> AgentResult<()> {
     Ok(())
 }
 
-/// KEY=VALUE pairs of an EnvironmentFile written by `render_env_file`, in
-/// file order. Values come back as stored (newlines stay escaped), so
+/// An app's env file has two readers. `docker run --env-file` takes every
+/// line literally. systemd (a Node app's EnvironmentFile) drops backslashes,
+/// strips a leading quote and joins lines after a trailing backslash: written
+/// the literal way, a JSON value lost the `\` of its `\n`s, a newline became
+/// the letter `n`, and a value starting with `'` swallowed the variables after
+/// it. So a Node app's file is written quoted for systemd and read back the
+/// way systemd reads it, and the app gets exactly the value it was given.
+fn render_app_env(env: &[EnvKv], docker: bool) -> String {
+    if docker {
+        render_env_file(env)
+    } else {
+        render_unit_env_file(env)
+    }
+}
+
+fn parse_app_env(body: &str, docker: bool) -> Vec<EnvKv> {
+    if docker {
+        parse_env_file(body)
+    } else {
+        parse_unit_env_file(body)
+    }
+}
+
+/// One value as systemd's EnvironmentFile parser takes it: as is when nothing
+/// in it is special there, else in double quotes, where only `"`, `\`, `$`
+/// and a backtick need a backslash and a newline is kept.
+fn systemd_env_quote(value: &str) -> String {
+    let plain = !value.contains(['\\', '\n'])
+        && !value.starts_with(['\'', '"', ' ', '\t'])
+        && !value.ends_with([' ', '\t']);
+    if plain {
+        return value.to_string();
+    }
+    let mut out = String::with_capacity(value.len() + 2);
+    out.push('"');
+    for c in value.chars() {
+        if matches!(c, '"' | '\\' | '$' | '`') {
+            out.push('\\');
+        }
+        out.push(c);
+    }
+    out.push('"');
+    out
+}
+
+fn render_unit_env_file(env: &[EnvKv]) -> String {
+    let mut out = String::new();
+    for kv in env {
+        out.push_str(&format!("{}={}\n", kv.key, systemd_env_quote(&kv.value.replace('\r', ""))));
+    }
+    out
+}
+
+/// The variables systemd gets from an EnvironmentFile, in file order: its
+/// parser's rules (systemd.exec(5), env-file.c), so a file written before
+/// render_unit_env_file existed reads as what its app has been running with.
+pub(crate) fn parse_unit_env_file(body: &str) -> Vec<EnvKv> {
+    #[derive(Clone, Copy, PartialEq)]
+    enum S {
+        PreKey,
+        Key,
+        PreValue,
+        Value,
+        ValueEscape,
+        Single,
+        Double,
+        DoubleEscape,
+        Comment,
+        CommentEscape,
+    }
+    fn push(out: &mut Vec<EnvKv>, key: &mut String, value: &mut String) {
+        let name = key.trim_end_matches([' ', '\t']);
+        if is_valid_env_key(name) {
+            out.push(EnvKv {
+                key: name.to_string(),
+                value: value.clone(),
+            });
+        }
+        key.clear();
+        value.clear();
+    }
+    let mut out = Vec::new();
+    let mut state = S::PreKey;
+    let mut key = String::new();
+    let mut value = String::new();
+    // Where the unquoted value's trailing whitespace starts: it is dropped.
+    let mut trailing: Option<usize> = None;
+    for c in body.chars() {
+        let newline = c == '\n' || c == '\r';
+        let space = newline || c == ' ' || c == '\t';
+        match state {
+            S::PreKey => {
+                if c == '#' || c == ';' {
+                    state = S::Comment;
+                } else if !space {
+                    state = S::Key;
+                    key.push(c);
+                }
+            }
+            S::Key => {
+                if newline {
+                    state = S::PreKey;
+                    key.clear();
+                } else if c == '=' {
+                    state = S::PreValue;
+                    trailing = None;
+                } else {
+                    key.push(c);
+                }
+            }
+            S::PreValue => {
+                if newline {
+                    state = S::PreKey;
+                    push(&mut out, &mut key, &mut value);
+                } else if c == '\'' {
+                    state = S::Single;
+                } else if c == '"' {
+                    state = S::Double;
+                } else if c == '\\' {
+                    state = S::ValueEscape;
+                } else if !space {
+                    state = S::Value;
+                    value.push(c);
+                }
+            }
+            S::Value => {
+                if newline {
+                    state = S::PreKey;
+                    if let Some(at) = trailing.take() {
+                        value.truncate(at);
+                    }
+                    push(&mut out, &mut key, &mut value);
+                } else if c == '\\' {
+                    state = S::ValueEscape;
+                    trailing = None;
+                } else {
+                    if !space {
+                        trailing = None;
+                    } else if trailing.is_none() {
+                        trailing = Some(value.len());
+                    }
+                    value.push(c);
+                }
+            }
+            S::ValueEscape => {
+                state = S::Value;
+                if !newline {
+                    value.push(c);
+                }
+            }
+            S::Single => {
+                if c == '\'' {
+                    state = S::PreValue;
+                } else {
+                    value.push(c);
+                }
+            }
+            S::Double => {
+                if c == '"' {
+                    state = S::PreValue;
+                } else if c == '\\' {
+                    state = S::DoubleEscape;
+                } else {
+                    value.push(c);
+                }
+            }
+            S::DoubleEscape => {
+                state = S::Double;
+                if matches!(c, '"' | '\\' | '`' | '$') {
+                    value.push(c);
+                } else if c != '\n' {
+                    value.push('\\');
+                    value.push(c);
+                }
+            }
+            S::Comment => {
+                if c == '\\' {
+                    state = S::CommentEscape;
+                } else if newline {
+                    state = S::PreKey;
+                }
+            }
+            S::CommentEscape => {
+                state = if newline { S::PreKey } else { S::Comment };
+            }
+        }
+    }
+    if !matches!(state, S::PreKey | S::Key | S::Comment | S::CommentEscape) {
+        if state == S::Value {
+            if let Some(at) = trailing {
+                value.truncate(at);
+            }
+        }
+        push(&mut out, &mut key, &mut value);
+    }
+    out
+}
+
+/// KEY=VALUE pairs of a Docker app's env file written by `render_env_file`,
+/// in file order. Values come back as stored (newlines stay escaped), so
 /// rendering them again is lossless. Comments, blank and malformed lines are
 /// skipped.
 pub(crate) fn parse_env_file(body: &str) -> Vec<EnvKv> {
@@ -2624,13 +2828,14 @@ pub(crate) fn parse_env_file(body: &str) -> Vec<EnvKv> {
 }
 
 /// The app's EnvironmentFile as (key, value) pairs for a build, so variables
-/// read at build time (`NEXT_PUBLIC_*`, anything next.config reads) reach it.
-/// Empty when the file does not exist yet.
+/// read at build time (`NEXT_PUBLIC_*`, anything next.config reads) reach it
+/// with the values the running app gets. Empty when the file does not exist
+/// yet.
 async fn build_env_for(name: &str) -> Vec<(String, String)> {
     tokio::fs::read_to_string(format!("/etc/vps-panel/apps/{name}.env"))
         .await
         .map(|body| {
-            parse_env_file(&body)
+            parse_unit_env_file(&body)
                 .into_iter()
                 .map(|kv| (kv.key, kv.value))
                 .collect()
@@ -2803,4 +3008,58 @@ fn field(s: &str, key: &str) -> Option<String> {
     s.lines()
         .find_map(|l| l.strip_prefix(key))
         .map(|v| v.trim().to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn kv(key: &str, value: &str) -> EnvKv {
+        EnvKv {
+            key: key.into(),
+            value: value.into(),
+        }
+    }
+
+    #[test]
+    fn a_unit_env_file_gives_the_app_the_value_it_was_given() {
+        let env = vec![
+            kv("PLAIN", "postgres://u:p@127.0.0.1:5432/db?sslmode=disable"),
+            kv("EMPTY", ""),
+            kv("JSON", r#"{"private_key":"-----BEGIN KEY-----\nMIIE\n","id":"x"}"#),
+            kv("QUOTED", r#""in quotes""#),
+            kv("APOSTROPHE", "'starts with one"),
+            kv("INNER", "it's fine"),
+            kv("BACKSLASH", r"C:\data\new"),
+            kv("TRAILING", r"ends with \"),
+            kv("SHELL", "$HOME `id` \"x\""),
+            kv("SPACES", "  padded  "),
+            kv("LINES", "-----BEGIN KEY-----\nMIIE\n-----END KEY-----\n"),
+            kv("LAST", "still here"),
+        ];
+        let body = render_unit_env_file(&env);
+        assert_eq!(parse_unit_env_file(&body), env);
+        // Nothing special in it: written as before.
+        assert!(body.starts_with("PLAIN=postgres://u:p@127.0.0.1:5432/db?sslmode=disable\nEMPTY=\n"));
+        assert!(body.contains("INNER=it's fine\n"));
+        assert!(body.contains("BACKSLASH=\"C:\\\\data\\\\new\"\n"));
+        // CRLF pasted from a browser.
+        assert_eq!(render_unit_env_file(&[kv("A", "x\r\ny")]), "A=\"x\ny\"\n");
+    }
+
+    #[test]
+    fn an_older_env_file_reads_the_way_systemd_reads_it() {
+        // What render_env_file wrote for a Node app, and what systemd made
+        // of each line.
+        let body = "# comment\nA=\"x y\"\nB=it's\nC=a\\nb\nD=  padded \n\nE='single' \nBAD KEY=1\nF=\\\"q\n";
+        assert_eq!(
+            parse_unit_env_file(body),
+            vec![kv("A", "x y"), kv("B", "it's"), kv("C", "anb"), kv("D", "padded"), kv("E", "single"), kv("F", "\"q")]
+        );
+        // A value starting with a quote ran on into the next lines.
+        assert_eq!(parse_unit_env_file("A='oops\nB=2\n"), vec![kv("A", "oops\nB=2\n")]);
+        // A Docker app's file is still every line as it is.
+        assert_eq!(parse_app_env("A=\"x y\"\nC=a\\nb\n", true), vec![kv("A", "\"x y\""), kv("C", "a\\nb")]);
+        assert_eq!(render_app_env(&[kv("A", "\"x\"\ny")], true), "A=\"x\"\\ny\n");
+    }
 }
