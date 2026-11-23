@@ -1,7 +1,8 @@
 "use client";
 
-import { useActionState, useState } from "react";
+import { useState } from "react";
 import type { ActionResult } from "@/server-actions/auth";
+import { useFormActionState } from "@/lib/useFormActionState";
 import PasswordInput from "@/components/PasswordInput/PasswordInput";
 import styles from "./page.module.css";
 
@@ -10,11 +11,12 @@ type Props = {
 };
 
 export default function LoginForm({ action }: Props) {
-  const [state, formAction, pending] = useActionState<ActionResult | null, FormData>(action, null);
+  // A refused sign-in keeps the email and the Remember me box as typed.
+  const [state, formAction, pending, formRef] = useFormActionState<ActionResult | null>(action, null);
   const [showPassword, setShowPassword] = useState(false);
 
   return (
-    <form action={formAction} className={styles.form}>
+    <form ref={formRef} action={formAction} className={styles.form}>
       <label className={styles.label}>
         Email
         <input
