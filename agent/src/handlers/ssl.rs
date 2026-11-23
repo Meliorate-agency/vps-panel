@@ -677,26 +677,56 @@ pub(crate) async fn desired_san_set(state: &AppState, domain: &str) -> Vec<Strin
         })
         .unwrap_or(0)
         != 0;
-    if force_www {
-        names.push(format!("www.{domain}"));
+    let current = PathBuf::from(format!("/etc/vps-panel/certs/{domain}/fullchain.pem"));
+    // The flag is in panel.db, and a site made through the MCP sites.create
+    // tool has no row there: its cert lost www at the first renewal while
+    // nginx went on serving https://www.<domain> with it. A www name the
+    // site's vhost still serves and the current cert carries is kept.
+    let www = format!("www.{domain}");
+    if force_www || (site_vhost_serves(domain, &www).await && cert_covers(&current, &www).await) {
+        names.push(www);
     }
-    if has_mail_domain(state, domain).await {
-        names.push(format!("mail.{domain}"));
+    let mail_host = format!("mail.{domain}");
+    let wanted = match mail_domain_lookup(state, domain).await {
+        Some(is_tenant) => is_tenant,
+        // The mail database did not answer (MariaDB down or restarting).
+        // Keep the name when the current cert carries it: a renewal at that
+        // moment dropped mail.<domain>, and Postfix/Dovecot then had no
+        // cert for it until someone noticed.
+        None => cert_covers(&current, &mail_host).await,
+    };
+    if wanted {
+        names.push(mail_host);
     }
     names
 }
 
+/// Does the panel site for `domain` have a server block for `name`?
+async fn site_vhost_serves(domain: &str, name: &str) -> bool {
+    tokio::fs::read_to_string(format!("/etc/nginx/sites-enabled/site-{domain}"))
+        .await
+        .is_ok_and(|vhost| vhost_has_server_name(&vhost, name))
+}
+
+fn vhost_has_server_name(vhost: &str, name: &str) -> bool {
+    let wanted = format!("server_name {name};");
+    vhost.lines().any(|line| line.trim() == wanted)
+}
+
 async fn has_mail_domain(state: &AppState, domain: &str) -> bool {
-    let Ok(mut conn) = state.mariadb.pool().get_conn().await else {
-        return false;
-    };
-    if conn.query_drop("USE `mail`").await.is_err() {
-        return false;
-    }
-    let res: Result<Option<u32>, _> = conn
+    mail_domain_lookup(state, domain).await.unwrap_or(false)
+}
+
+/// Whether `domain` is a mail tenant; None when the mail database could not
+/// be asked.
+async fn mail_domain_lookup(state: &AppState, domain: &str) -> Option<bool> {
+    let mut conn = state.mariadb.pool().get_conn().await.ok()?;
+    conn.query_drop("USE `mail`").await.ok()?;
+    let row: Option<u32> = conn
         .exec_first("SELECT id FROM virtual_domains WHERE name = ?", (domain,))
-        .await;
-    matches!(res, Ok(Some(_)))
+        .await
+        .ok()?;
+    Some(row.is_some())
 }
 
 const POSTFIX_SNI_MAP: &str = "/etc/postfix/sni-map";
@@ -1067,7 +1097,17 @@ async fn write_mail_sni(sni: &MailSni) -> AgentResult<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::parse_san_names;
+    use super::{parse_san_names, vhost_has_server_name};
+
+    #[test]
+    fn finds_the_www_block_of_a_site_vhost() {
+        let vhost = "server {\n    listen 80;\n    server_name example.org;\n}\n\
+                     server {\n    listen 80;\n    server_name www.example.org;\n}\n";
+        assert!(vhost_has_server_name(vhost, "www.example.org"));
+        assert!(vhost_has_server_name(vhost, "example.org"));
+        assert!(!vhost_has_server_name(vhost, "www.example.org.au"));
+        assert!(!vhost_has_server_name("server_name example.org;\n", "www.example.org"));
+    }
 
     #[test]
     fn parses_openssl_san_output() {
