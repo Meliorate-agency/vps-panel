@@ -31,6 +31,9 @@ pub struct PortReq {
     pub port: u16,
     #[serde(default = "default_proto")]
     pub proto: String,
+    /// Deny the port although closing it can cut the operator off.
+    #[serde(default)]
+    pub force: bool,
 }
 
 fn default_proto() -> String {
@@ -163,8 +166,42 @@ pub async fn enable_ufw() -> AgentResult<Json<OkResponse>> {
     Ok(Json(OkResponse::default()))
 }
 
+/// What closing `port` would cut the operator off from: SSH, or the web ports
+/// the panel and every site are served on. `ssh_ports` are the ports sshd
+/// listens on.
+fn deny_lockout(port: u16, proto: &str, ssh_ports: &[u16]) -> Option<String> {
+    if proto != "tcp" {
+        return None;
+    }
+    let what = if ssh_ports.contains(&port) {
+        "is the SSH port. Denying it locks you out of SSH."
+    } else {
+        match port {
+            80 => {
+                "is HTTP: the panel, every site and certificate renewal use it. \
+                 Denying it cuts them off."
+            }
+            443 => {
+                "is HTTPS: the panel and every site use it. \
+                 Denying it cuts them off, this panel included."
+            }
+            _ => return None,
+        }
+    };
+    Some(format!("port {port}/tcp {what}"))
+}
+
 pub async fn deny(Json(req): Json<PortReq>) -> AgentResult<Json<OkResponse>> {
     validate_proto(&req.proto)?;
+    // `ufw deny` replaces an allow rule for the same port, so this is how a
+    // port gets closed. It went straight through for the SSH port and for
+    // 80 / 443; now that takes `force`.
+    if !req.force {
+        let ssh_ports = crate::handlers::ssh::effective_ports().await;
+        if let Some(why) = deny_lockout(req.port, &req.proto, &ssh_ports) {
+            return Err(AgentError::Conflict(why));
+        }
+    }
     exec::run("ufw", ["deny", &format!("{}/{}", req.port, req.proto)]).await?;
     Ok(Json(OkResponse::default()))
 }
@@ -511,6 +548,26 @@ fn parse_field_int(content: &str, key: &str) -> i64 {
 #[cfg(test)]
 mod tests {
     use super::{parse_field_int, parse_field_list};
+
+    #[test]
+    fn denying_the_ssh_or_web_ports_needs_force() {
+        use super::{deny_lockout, PortReq};
+        // sshd moved to 2222: that port is guarded, 22 no longer is.
+        let ssh = [2222];
+        assert!(deny_lockout(2222, "tcp", &ssh).unwrap().contains("SSH"));
+        assert!(deny_lockout(22, "tcp", &ssh).is_none());
+        assert!(deny_lockout(80, "tcp", &ssh).unwrap().contains("HTTP"));
+        assert!(deny_lockout(443, "tcp", &ssh).unwrap().contains("HTTPS"));
+        // Nothing listens for these over udp.
+        assert!(deny_lockout(2222, "udp", &ssh).is_none());
+        assert!(deny_lockout(443, "udp", &ssh).is_none());
+        assert!(deny_lockout(3306, "tcp", &ssh).is_none());
+
+        let req: PortReq = serde_json::from_str(r#"{"port":22}"#).unwrap();
+        assert!(!req.force && req.proto == "tcp");
+        let req: PortReq = serde_json::from_str(r#"{"port":22,"proto":"tcp","force":true}"#).unwrap();
+        assert!(req.force);
+    }
 
     const JAIL_STATUS: &str = "Status for the jail: sshd\n\
         |- Filter\n\

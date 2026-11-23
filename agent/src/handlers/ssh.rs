@@ -66,12 +66,49 @@ pub async fn config_get() -> AgentResult<Json<SshServerConfig>> {
 }
 
 /// Ports sshd listens on, for callers that must keep SSH reachable (enabling
-/// UFW). Falls back to 22 when the config cannot be read.
+/// UFW, denying a port): sshd's own and, as in install.sh, a port set on
+/// ssh.socket, where a drop-in wins over what `sshd -T` reports. Falls back
+/// to 22 when neither can be read.
 pub(crate) async fn effective_ports() -> Vec<u16> {
-    match effective_config().await {
-        Ok(e) if !e.ports.is_empty() => e.ports,
-        _ => vec![22],
+    let mut ports = effective_config().await.map(|e| e.ports).unwrap_or_default();
+    for p in socket_ports().await {
+        if !ports.contains(&p) {
+            ports.push(p);
+        }
     }
+    if ports.is_empty() {
+        ports.push(22);
+    }
+    ports
+}
+
+async fn socket_ports() -> Vec<u16> {
+    if exec::run("systemctl", ["is-active", "--quiet", "ssh.socket"]).await.is_err() {
+        return Vec::new();
+    }
+    exec::run("systemctl", ["show", "ssh.socket", "-p", "Listen"])
+        .await
+        .map(|o| parse_socket_ports(&o.stdout))
+        .unwrap_or_default()
+}
+
+/// Ports in `systemctl show ssh.socket -p Listen`, one
+/// `Listen=[::]:2222 (Stream)` line per address.
+fn parse_socket_ports(out: &str) -> Vec<u16> {
+    let mut ports = Vec::new();
+    for line in out.lines() {
+        let port = line
+            .trim()
+            .strip_suffix(" (Stream)")
+            .and_then(|l| l.rsplit_once(':'))
+            .and_then(|(_, p)| p.parse::<u16>().ok());
+        if let Some(p) = port {
+            if !ports.contains(&p) {
+                ports.push(p);
+            }
+        }
+    }
+    ports
 }
 
 /// `sshd -T` prints the merged config after every Include, so drop-ins are
@@ -1336,6 +1373,18 @@ mod tests {
         assert!(!e.password_auth);
         assert!(!e.kbd_interactive);
         assert_eq!(e.idle_timeout_minutes, 30);
+    }
+
+    #[test]
+    fn socket_ports_from_systemctl_show() {
+        assert_eq!(super::parse_socket_ports("Listen=[::]:2222 (Stream)\n"), vec![2222]);
+        assert_eq!(
+            super::parse_socket_ports(
+                "Listen=0.0.0.0:22 (Stream)\nListen=[::]:22 (Stream)\nListen=/run/x.sock (Stream)\n"
+            ),
+            vec![22]
+        );
+        assert!(super::parse_socket_ports("Listen=\n").is_empty());
     }
 
     #[test]
