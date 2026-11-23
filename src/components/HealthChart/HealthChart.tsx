@@ -37,6 +37,12 @@ export default function HealthChart({
 
   useEffect(() => {
     let cancelled = false;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    // The next sample is asked for only after the last one came back. Server
+    // actions run one at a time, so a fixed interval queued a call every
+    // tick while a slow one (or the dashboard's folder measurement) was
+    // running, and the backlog kept delaying every other action, also on
+    // the next page after leaving this one.
     async function tick() {
       try {
         const v = await fetchValue();
@@ -48,12 +54,12 @@ export default function HealthChart({
       } catch {
         // skip
       }
+      if (!cancelled) timer = setTimeout(tick, intervalMs);
     }
     tick();
-    const id = setInterval(tick, intervalMs);
     return () => {
       cancelled = true;
-      clearInterval(id);
+      if (timer !== undefined) clearTimeout(timer);
     };
   }, [fetchValue, intervalMs, max]);
 
