@@ -330,8 +330,18 @@ pub async fn put(
     if req.rules.is_empty() {
         // No vhost lookup: clearing the last rule must work even after the
         // site or app that carried it is gone.
+        let conf = conf_path(&domain);
+        let conf_before = tokio::fs::read(&conf).await.ok();
         remove_domain_files(&domain).await?;
-        nginx_handler::test_config().await?;
+        if let Err(e) = nginx_handler::test_config().await {
+            // nginx was not reloaded and still serves the rules, and the
+            // panel keeps its row on an error: put the file back so the two
+            // stay in step.
+            if let Some(prev) = conf_before {
+                let _ = fs_atomic::write(&conf, &prev, 0o644).await;
+            }
+            return Err(e);
+        }
         exec::run("systemctl", ["reload", "nginx"]).await?;
         return Ok(Json(OkResponse::default()));
     }
