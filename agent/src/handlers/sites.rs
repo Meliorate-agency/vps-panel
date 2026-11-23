@@ -156,6 +156,15 @@ fn build_route(
                     "upstream_port must be 1..=65535".into(),
                 ));
             }
+            // nginx itself listens on 80 and 443. A site that proxies there
+            // proxies to itself: every request loops until nginx is out of
+            // connections, for all sites.
+            if p == 80 || p == 443 {
+                return Err(AgentError::Invalid(format!(
+                    "upstream_port {p} is nginx itself, so the site would proxy to itself; \
+                     use the port the app listens on"
+                )));
+            }
             if folder.is_some() {
                 return Err(AgentError::Invalid(
                     "folder_path must be empty for mode=port".into(),
@@ -706,7 +715,20 @@ async fn covering_parent_cert(domain: &str) -> Option<(String, String)> {
 
 #[cfg(test)]
 mod tests {
-    use super::{https_after_update, ssl_required_names, vhost_serves_https};
+    use super::{build_route, https_after_update, ssl_required_names, vhost_serves_https};
+
+    #[test]
+    fn a_site_cannot_proxy_to_nginx_itself() {
+        for port in [80, 443] {
+            let err = build_route("port", Some(port), None, false).err().unwrap().to_string();
+            assert!(err.contains("is nginx itself"), "{err}");
+        }
+        for port in [81, 3000, 8080, 8443, 65535] {
+            assert!(build_route("port", Some(port), None, false).is_ok(), "{port}");
+        }
+        assert!(build_route("port", Some(0), None, false).is_err());
+        assert!(build_route("port", None, None, false).is_err());
+    }
 
     #[test]
     fn an_update_without_issue_ssl_keeps_the_https_the_site_has() {
