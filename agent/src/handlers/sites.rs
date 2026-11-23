@@ -421,6 +421,16 @@ pub async fn create(
         let _ = std::fs::remove_file(&vhost_path);
         return Err(e);
     }
+    // A mail tenant's ACME helper vhost for mail.<tenant> is loaded before
+    // this site and keeps port 80 for the name (its 404) until it is gone.
+    // It removes itself once the site exists, but that ran only at the next
+    // certificate order or renewal check. With the site in place the call
+    // never installs anything.
+    if let Some(tenant) = req.domain.strip_prefix("mail.") {
+        if let Err(e) = crate::handlers::mail::ensure_mail_http_vhost(tenant).await {
+            tracing::warn!(domain = %req.domain, error = %e, "could not remove the ACME helper vhost");
+        }
+    }
     exec::run("systemctl", ["reload", "nginx"]).await?;
 
     let task_id = if req.issue_ssl && !cert_ok {
