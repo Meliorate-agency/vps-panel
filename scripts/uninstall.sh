@@ -32,6 +32,10 @@ if [[ "$PURGE" -eq 1 ]]; then
   rm -rf /var/lib/vps-panel /var/log/vps-panel
   rm -f /etc/vps-panel/.env /etc/vps-panel/agent.token /etc/vps-panel/acme-account.json
   rm -f /etc/fail2ban/jail.d/zz-vps-panel-operator.conf
+  # Settings > Panel access. Only the panel vhost (removed above) includes
+  # it. Left behind, a reinstall kept enforcing the old list while the new
+  # panel, its database gone, showed none.
+  rm -f /etc/nginx/vps-panel-access.conf
   mariadb -e "DROP DATABASE IF EXISTS panel;" || true
   cat <<'EOF'
 kept (still in use by nginx, apps, DNS and mail, or needed for restores):
