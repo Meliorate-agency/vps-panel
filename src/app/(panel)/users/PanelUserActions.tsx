@@ -45,9 +45,15 @@ export default function PanelUserActions({
     Result | null,
     FormData
   >(resetAction, null);
+  // The result the dialog was opened with. useActionState keeps the last
+  // result, so without this a second Reset password (this user or, after a
+  // row above was deleted, the next one) opened on the old "Password reset."
+  // and closed itself before anything could be typed.
+  const [openedWith, setOpenedWith] = useState<Result | null>(null);
+  const result = resetState !== openedWith ? resetState : null;
 
   useEffect(() => {
-    if (resetState?.ok === true && resetOpen) {
+    if (result?.ok === true && resetOpen) {
       // Auto-close after a beat so the operator sees the success notice.
       const t = setTimeout(() => {
         setResetOpen(false);
@@ -56,7 +62,7 @@ export default function PanelUserActions({
       }, 900);
       return () => clearTimeout(t);
     }
-  }, [resetState, resetOpen]);
+  }, [result, resetOpen]);
 
   // ─── Delete dialog ─────────────────────────────────────────────────
   const [deleteOpen, setDeleteOpen] = useState(false);
@@ -87,6 +93,7 @@ export default function PanelUserActions({
           className={styles.btnGhost}
           onClick={() => {
             setRevealed(false);
+            setOpenedWith(resetState);
             setResetOpen(true);
           }}
           style={{ fontSize: 12, padding: "4px 10px" }}
@@ -158,12 +165,12 @@ export default function PanelUserActions({
             Show passwords
           </label>
 
-          {resetState?.ok === false && (
+          {result?.ok === false && (
             <div className={styles.error} style={{ marginBottom: 10 }}>
-              {resetState.error}
+              {result.error}
             </div>
           )}
-          {resetState?.ok === true && (
+          {result?.ok === true && (
             <div className={styles.notice} style={{ marginBottom: 10 }}>
               Password reset. Existing sessions revoked.
             </div>

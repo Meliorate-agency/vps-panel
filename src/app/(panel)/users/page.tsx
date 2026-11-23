@@ -86,6 +86,9 @@ export default async function UsersPage() {
             { key: "created", label: "Created", width: "180px" },
             { key: "actions", label: "", width: "220px" },
           ]}
+          // Rows hold dialog state: keyed by user so it stays with its user
+          // when a row above is added or deleted.
+          rowKey={(_r, i) => panelUsers[i].id}
           rows={panelUsers.map((u) => {
             const isSelf = u.id === currentUserId;
             return {
@@ -162,6 +165,7 @@ export default async function UsersPage() {
             { key: "sudo", label: "sudo", width: "70px" },
             { key: "actions", label: "", width: "220px" },
           ]}
+          rowKey={(_r, i) => humanLinuxUsers[i].name}
           rows={humanLinuxUsers.map((u) => {
             const isRoot = u.name === "root";
             return {
