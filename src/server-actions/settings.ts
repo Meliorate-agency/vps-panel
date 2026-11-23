@@ -12,10 +12,16 @@ import { TAB_TITLE_KEY, tabTitleValue } from "@/lib/tabTitle";
 
 export type ActionResult = { ok: true } | { ok: false; error: string };
 
+// The settings the forms save through setSettingAction. Every other key has
+// an action of its own that checks the value (the panel access list, the
+// timezone, the upload limit, the MCP token, ...): taken here, it was written
+// without those checks.
+const PLAIN_SETTING_KEYS = ["dns.ns_pair", "panel.ip_allowlist", "panel.session_ttl_minutes"];
+
 export async function setSettingAction(key: string, value: string): Promise<ActionResult> {
   const s = await requireAdmin();
-  if (!/^[a-z0-9_.\-]{1,64}$/i.test(key)) {
-    return { ok: false, error: "invalid setting key" };
+  if (!PLAIN_SETTING_KEYS.includes(key) || typeof value !== "string") {
+    return { ok: false, error: "This setting cannot be changed here." };
   }
   // Two nameservers or none: the agent ignores anything else and quietly
   // falls back to the per-zone defaults.
