@@ -34,7 +34,8 @@ type Phase =
   | { kind: "uploading"; pct: number }
   | { kind: "starting" }
   | { kind: "running"; taskId: string; database: string }
-  | { kind: "done"; taskId: string; database: string };
+  | { kind: "done"; taskId: string; database: string }
+  | { kind: "failed"; taskId: string; database: string };
 
 type ImportInput = {
   path: string;
@@ -249,15 +250,23 @@ export default function ImportSqlForm({ dbs, maxUploadMb, prepareAction, importA
     if (fileInputRef.current) fileInputRef.current.value = "";
   };
 
-  if (phase.kind === "running" || phase.kind === "done") {
+  if (phase.kind === "running" || phase.kind === "done" || phase.kind === "failed") {
     return (
       <div>
-        <div className={styles.notice} style={{ marginBottom: 10 }}>
+        <div
+          className={phase.kind === "failed" ? styles.error : styles.notice}
+          style={{ marginBottom: 10 }}
+        >
           {phase.kind === "running" ? (
             <>
               Importing into <span className={styles.code}>{phase.database}</span>.
               Leaving this page is safe — the import keeps running and its log
               lives on the Tasks page.
+            </>
+          ) : phase.kind === "failed" ? (
+            <>
+              Import into <span className={styles.code}>{phase.database}</span> failed.
+              The log below says where it stopped.
             </>
           ) : (
             <>
@@ -280,8 +289,18 @@ export default function ImportSqlForm({ dbs, maxUploadMb, prepareAction, importA
                 database: phase.database,
               });
               router.refresh();
+            } else {
+              // Keep the log visible (the error lines are in it), but stop
+              // saying the import is still running.
+              setPhase({
+                kind: "failed",
+                taskId: phase.taskId,
+                database: phase.database,
+              });
+              // A failed import may already have dropped or created the
+              // database; the list below should say so.
+              router.refresh();
             }
-            // On failure keep the log visible; the error lines are in it.
           }}
         />
         <div style={{ marginTop: 10 }}>
