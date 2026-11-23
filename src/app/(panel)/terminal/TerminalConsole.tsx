@@ -19,10 +19,18 @@ type Block = {
   command: string;
   /** Recorded per block so scrollback stays truthful after the picker changes. */
   runAs: string;
-  lines: { text: string; stream: "out" | "err" | "notice" }[];
+  lines: Line[];
+  /** Earliest lines dropped to keep the block under MAX_BLOCK_LINES. */
+  dropped: number;
   exitCode: number | null;
   running: boolean;
 };
+
+type Line = { text: string; stream: "out" | "err" | "notice" };
+
+/** Lines kept per command. A chatty command (`find /`, a long build, `yes`)
+ *  otherwise grew the page by a DOM node per line until the tab froze. */
+const MAX_BLOCK_LINES = 5000;
 
 type Frame =
   | { t: "out"; d: string }
@@ -133,13 +141,21 @@ export default function TerminalConsole({
     if (nearBottom) el.scrollTop = el.scrollHeight;
   }, [blocks]);
 
+  const appendLines = useCallback((id: number, added: Line[]) => {
+    setBlocks((prev) =>
+      prev.map((b) => {
+        if (b.id !== id) return b;
+        const lines = b.lines.concat(added);
+        const over = lines.length - MAX_BLOCK_LINES;
+        return over > 0
+          ? { ...b, lines: lines.slice(over), dropped: b.dropped + over }
+          : { ...b, lines };
+      }),
+    );
+  }, []);
   const appendLine = useCallback(
-    (id: number, text: string, stream: "out" | "err" | "notice") => {
-      setBlocks((prev) =>
-        prev.map((b) => (b.id === id ? { ...b, lines: [...b.lines, { text, stream }] } : b)),
-      );
-    },
-    [],
+    (id: number, text: string, stream: Line["stream"]) => appendLines(id, [{ text, stream }]),
+    [appendLines],
   );
 
   const run = useCallback(
@@ -177,6 +193,7 @@ export default function TerminalConsole({
           command: cmd,
           runAs,
           lines: [],
+          dropped: 0,
           exitCode: null,
           running: true,
         },
@@ -237,6 +254,9 @@ export default function TerminalConsole({
           buffer += decoder.decode(value, { stream: true });
           const lines = buffer.split("\n");
           buffer = lines.pop() ?? "";
+          // One state update per chunk, not one per line.
+          const added: Line[] = [];
+          let exitCode: number | null = null;
           for (const line of lines) {
             if (!line.trim()) continue;
             let frame: Frame;
@@ -245,15 +265,15 @@ export default function TerminalConsole({
             } catch {
               continue;
             }
-            if (frame.t === "exit") {
-              setBlocks((prev) =>
-                prev.map((b) =>
-                  b.id === id ? { ...b, running: false, exitCode: frame.code } : b,
-                ),
-              );
-            } else {
-              appendLine(id, frame.d, frame.t);
-            }
+            if (frame.t === "exit") exitCode = frame.code;
+            else added.push({ text: frame.d, stream: frame.t });
+          }
+          if (added.length > 0) appendLines(id, added);
+          if (exitCode !== null) {
+            const code = exitCode;
+            setBlocks((prev) =>
+              prev.map((b) => (b.id === id ? { ...b, running: false, exitCode: code } : b)),
+            );
           }
         }
       } catch (e: unknown) {
@@ -272,7 +292,7 @@ export default function TerminalConsole({
     // runAs, loadEnv and timeoutSecs are read inside: without them here the
     // callback kept the first render's values, so switching "run as" to
     // `apps` still ran commands as root (and left root-owned build files).
-    [cwd, running, appendLine, runAs, loadEnv, timeoutSecs],
+    [cwd, running, appendLine, appendLines, runAs, loadEnv, timeoutSecs],
   );
 
   /**
@@ -391,6 +411,11 @@ export default function TerminalConsole({
                 <span className={styles.promptSign}>{b.runAs === "root" ? "# " : "$ "}</span>
                 <span className={styles.promptCmd}>{b.command}</span>
               </div>
+              {b.dropped > 0 && (
+                <div className={styles.outNotice}>
+                  {b.dropped} earlier line{b.dropped === 1 ? "" : "s"} not shown
+                </div>
+              )}
               {b.lines.map((l, i) => (
                 <div
                   key={i}
