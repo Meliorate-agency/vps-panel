@@ -303,8 +303,14 @@ fi
 log "configuring MariaDB schemas"
 systemctl enable --now mariadb
 
-PDNS_PASS="$(openssl rand -base64 24 | tr -d '\n=' | cut -c1-24)"
-MAIL_PASS="$(openssl rand -base64 24 | tr -d '\n=' | cut -c1-24)"
+# A re-run keeps the passwords PowerDNS, Postfix and Dovecot already have.
+# New ones on every run meant that a run which stopped before those services
+# got their new config left DNS and mail with a password MariaDB no longer
+# accepted. The pattern keeps a hand-edited value out of the SQL below.
+PDNS_PASS="$(sed -n 's/^gmysql-password=//p' /etc/powerdns/pdns.conf 2>/dev/null | head -1 || true)"
+[[ "$PDNS_PASS" =~ ^[A-Za-z0-9+/]{16,}$ ]] || PDNS_PASS="$(openssl rand -base64 24 | tr -d '\n=' | cut -c1-24)"
+MAIL_PASS="$(sed -n 's/^password = //p' /etc/postfix/mysql-virtual-mailbox-maps.cf 2>/dev/null | head -1 || true)"
+[[ "$MAIL_PASS" =~ ^[A-Za-z0-9+/]{16,}$ ]] || MAIL_PASS="$(openssl rand -base64 24 | tr -d '\n=' | cut -c1-24)"
 
 mariadb <<SQL
 CREATE DATABASE IF NOT EXISTS panel CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
