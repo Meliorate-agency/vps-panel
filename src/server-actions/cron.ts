@@ -4,6 +4,7 @@ import { revalidatePath } from "next/cache";
 import { agent } from "@/lib/agent";
 import { requireAdmin } from "@/lib/auth";
 import { writeAudit } from "@/lib/audit";
+import { agentErrorMessage } from "@/lib/redirects";
 
 export type ActionResult = { ok: true } | { ok: false; error: string };
 
@@ -22,7 +23,8 @@ export async function createCronAction(
     revalidatePath("/cron");
     return { ok: true };
   } catch (e: unknown) {
-    return { ok: false, error: e instanceof Error ? e.message : String(e) };
+    // The agent's sentence, not `agent 400: {json}`.
+    return { ok: false, error: agentErrorMessage(e).replace(/^(conflict|invalid input): /, "") };
   }
 }
 
@@ -33,7 +35,7 @@ export async function deleteCronAction(id: string): Promise<ActionResult> {
   try {
     await agent.cron.delete(id);
   } catch (e: unknown) {
-    const msg = e instanceof Error ? e.message : String(e);
+    const msg = agentErrorMessage(e).replace(/^(conflict|invalid input): /, "");
     writeAudit({ actorId: s.userId, action: "cron.delete", target: id, result: "error", message: msg });
     return { ok: false, error: msg };
   }

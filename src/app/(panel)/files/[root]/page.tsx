@@ -3,6 +3,7 @@ import { notFound } from "next/navigation";
 import { agent } from "@/lib/agent";
 import { requireSession } from "@/lib/auth";
 import { uploadLimitMb } from "@/lib/uploadLimit";
+import { agentErrorMessage } from "@/lib/redirects";
 import styles from "@/components/page.module.css";
 import FileBrowser from "./FileBrowser";
 
@@ -49,7 +50,7 @@ export default async function FilesRootPage({
   try {
     listing = await agent.files.list(rootId, path);
   } catch (e: unknown) {
-    const message = e instanceof Error ? e.message : String(e);
+    const message = agentErrorMessage(e).replace(/^(conflict|invalid input): /, "");
     return (
       <div>
         <Link href="/files" className={styles.backArrow} aria-label="Back to Files">

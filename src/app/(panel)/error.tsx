@@ -14,10 +14,14 @@ import styles from "@/components/page.module.css";
  */
 export default function PanelError({
   error,
-  unstable_retry,
+  retry,
+  reset,
 }: {
   error: Error & { digest?: string };
-  unstable_retry: () => void;
+  // `retry` since Next 16.3; it was `unstable_retry` in 16.2, and this file
+  // still asked for that name, so "Try again" threw and did nothing.
+  retry?: () => void;
+  reset?: () => void;
 }) {
   useEffect(() => {
     console.error(error);
@@ -40,7 +44,7 @@ export default function PanelError({
         </p>
       )}
       <div style={{ display: "flex", gap: 8, marginTop: 12 }}>
-        <button className={styles.btn} onClick={() => unstable_retry()}>
+        <button className={styles.btn} onClick={() => (retry ?? reset)?.()}>
           Try again
         </button>
         <Link className={styles.btnGhost} href="/dashboard">

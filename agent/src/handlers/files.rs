@@ -1014,6 +1014,40 @@ pub(crate) fn available_bytes(_path: &Path) -> Option<u64> {
 /// Writes to a dotfile temp in the destination directory and renames on
 /// completion, so a half-finished 2 GB upload never appears in the listing as
 /// a real file, and an aborted one leaves nothing behind.
+/// A part file is the upload's own temporary file; it is renamed or removed
+/// when the upload ends. One whose agent was killed mid-upload (an update, a
+/// reboot) stayed in the folder for good. Those older than a day are removed
+/// when the next upload into the folder starts.
+async fn remove_stale_upload_parts(dir: &Path) {
+    let Ok(mut entries) = fs::read_dir(dir).await else {
+        return;
+    };
+    while let Ok(Some(entry)) = entries.next_entry().await {
+        let name = entry.file_name();
+        if !is_upload_part(&name.to_string_lossy()) {
+            continue;
+        }
+        let Ok(meta) = fs::symlink_metadata(entry.path()).await else {
+            continue;
+        };
+        let old = meta
+            .modified()
+            .ok()
+            .and_then(|m| m.elapsed().ok())
+            .is_some_and(|age| age > std::time::Duration::from_secs(24 * 60 * 60));
+        if meta.is_file() && old {
+            let _ = fs::remove_file(entry.path()).await;
+        }
+    }
+}
+
+/// `.vps-panel-upload.<uuid>.tmp`, the name `upload` gives its part file.
+fn is_upload_part(name: &str) -> bool {
+    name.strip_prefix(".vps-panel-upload.")
+        .and_then(|rest| rest.strip_suffix(".tmp"))
+        .is_some_and(|id| Uuid::parse_str(id).is_ok())
+}
+
 pub async fn upload(
     Query(q): Query<UploadQuery>,
     body: axum::body::Body,
@@ -1041,6 +1075,7 @@ pub async fn upload(
         }
     }
 
+    remove_stale_upload_parts(&dir).await;
     let tmp = dir.join(format!(".vps-panel-upload.{}.tmp", Uuid::new_v4()));
     let mut file = fs::File::create(&tmp).await.map_err(AgentError::Io)?;
     let mut stream = body.into_data_stream();
@@ -1687,6 +1722,14 @@ mod tests {
         assert!(guard_write(fs_root, p("/etc")).is_err());
         assert!(guard_write(fs_root, p("/srv")).is_err());
         assert!(guard_write(fs_root, p("/srv/apps/myapp")).is_ok());
+    }
+
+    #[test]
+    fn only_the_uploads_own_part_files_are_recognised() {
+        assert!(is_upload_part(&format!(".vps-panel-upload.{}.tmp", Uuid::new_v4())));
+        for other in [".vps-panel-upload.tmp", ".vps-panel-upload.notes.tmp", "upload.tmp", ".env"] {
+            assert!(!is_upload_part(other), "{other}");
+        }
     }
 
     #[test]

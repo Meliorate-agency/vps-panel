@@ -13,7 +13,7 @@ export const TOOLS: Tool[] = [
   {
     page: "System services",
     name: "services.list",
-    description: "Every systemd unit known to the agent (output of `systemctl list-units --type=service --all`).",
+    description: "Every systemd service on the server: the loaded ones (`systemctl list-units --type=service --all`) and the installed ones that are disabled and stopped.",
     inputSchema: { type: "object", properties: {}, additionalProperties: false },
     call: async () => agent.services.list(),
   },
