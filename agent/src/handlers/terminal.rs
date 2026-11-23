@@ -270,6 +270,15 @@ pub async fn exec(axum::Json(req): axum::Json<ExecReq>) -> AgentResult<Response>
         .env("GIT_PAGER", "cat")
         .env("DEBIAN_FRONTEND", "noninteractive")
         .kill_on_drop(true);
+    // A command that runs as another user must not get the agent's secrets:
+    // `runuser -p` hands it this whole environment, and it is an app's own
+    // build or migration script. Removed before the env files are sourced, so
+    // an app's own JWT_SECRET still arrives. Root can read them anyway.
+    if run_as.is_some() {
+        for name in crate::exec::AGENT_SECRET_ENV {
+            cmd.env_remove(name);
+        }
+    }
 
     #[cfg(unix)]
     {

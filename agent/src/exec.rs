@@ -27,6 +27,18 @@ const GIT_ENV: [(&str, &str); 4] = [
     ),
 ];
 
+/// The agent's own secrets, which /etc/vps-panel/.env puts in its
+/// environment. A child only gets one its caller passes explicitly (restic).
+/// Every child used to inherit them, the ones that run as another user
+/// included: git as `apps` runs the hooks of a checkout the app can write,
+/// and the terminal's "run as" commands are an app's own build scripts.
+pub const AGENT_SECRET_ENV: [&str; 4] = [
+    "AGENT_TOKEN",
+    "JWT_SECRET",
+    "ADMIN_INITIAL_PASSWORD",
+    "RESTIC_PASSWORD",
+];
+
 fn command<S, I>(cmd: &str, args: I) -> Command
 where
     S: AsRef<OsStr>,
@@ -34,6 +46,9 @@ where
 {
     let mut command = Command::new(cmd);
     command.args(args);
+    for name in AGENT_SECRET_ENV {
+        command.env_remove(name);
+    }
     if cmd == "git" {
         command.envs(GIT_ENV);
     }
@@ -180,8 +195,13 @@ where
     let stdout = child.stdout.take().expect("stdout piped");
     let stderr = child.stderr.take().expect("stderr piped");
 
-    let mut out_reader = BufReader::new(stdout).lines();
-    let mut err_reader = BufReader::new(stderr).lines();
+    // Lines are split on bytes and decoded lossily. `lines()` fails on the
+    // first byte that is not UTF-8, which ended the run (and killed the
+    // child) of any build that printed one.
+    let mut out_reader = BufReader::new(stdout);
+    let mut err_reader = BufReader::new(stderr);
+    let mut out_buf: Vec<u8> = Vec::new();
+    let mut err_buf: Vec<u8> = Vec::new();
 
     // Each stream is read until its own EOF. The old loop kept polling a
     // finished stderr (busy-spinning a core) and waited for stdout EOF even
@@ -193,14 +213,16 @@ where
     while !(out_done && err_done) {
         let deadline = drain_until.unwrap_or_else(tokio::time::Instant::now);
         tokio::select! {
-            line = out_reader.next_line(), if !out_done => match line {
-                Ok(Some(l)) => on_line(&l),
-                Ok(None) => out_done = true,
+            // read_until keeps what it has read in the buffer when another
+            // branch wins, so nothing is lost between iterations.
+            n = out_reader.read_until(b'\n', &mut out_buf), if !out_done => match n {
+                Ok(0) => out_done = true,
+                Ok(_) => on_line(&take_line(&mut out_buf)),
                 Err(e) => return Err(AgentError::Io(e)),
             },
-            line = err_reader.next_line(), if !err_done => match line {
-                Ok(Some(l)) => on_line(&l),
-                Ok(None) => err_done = true,
+            n = err_reader.read_until(b'\n', &mut err_buf), if !err_done => match n {
+                Ok(0) => err_done = true,
+                Ok(_) => on_line(&take_line(&mut err_buf)),
                 Err(e) => return Err(AgentError::Io(e)),
             },
             s = child.wait(), if exit.is_none() => {
@@ -211,6 +233,13 @@ where
         }
     }
 
+    // A last line with no newline, ended by EOF or by the drain deadline.
+    for buf in [&mut out_buf, &mut err_buf] {
+        if !buf.is_empty() {
+            on_line(&take_line(buf));
+        }
+    }
+
     let status = match exit {
         Some(s) => s,
         None => child.wait().await.map_err(AgentError::Io)?,
@@ -218,9 +247,23 @@ where
     Ok(status.code().unwrap_or(-1))
 }
 
+/// The line in `buf` without its `\n` or `\r\n`, with bytes that are not
+/// UTF-8 replaced. Leaves `buf` empty.
+fn take_line(buf: &mut Vec<u8>) -> String {
+    if buf.last() == Some(&b'\n') {
+        buf.pop();
+        if buf.last() == Some(&b'\r') {
+            buf.pop();
+        }
+    }
+    let line = String::from_utf8_lossy(buf).into_owned();
+    buf.clear();
+    line
+}
+
 #[cfg(all(test, unix))]
 mod tests {
-    use super::{run, run_streaming};
+    use super::{run, run_envs, run_streaming};
     use std::time::{Duration, Instant};
 
     #[tokio::test]
@@ -243,6 +286,33 @@ mod tests {
         assert_eq!(code, 0);
         assert!(lines.contains(&"one".to_string()) && lines.contains(&"two".to_string()));
         assert!(started.elapsed() < Duration::from_secs(10));
+    }
+
+    #[tokio::test]
+    async fn streaming_survives_output_that_is_not_utf8() {
+        let mut lines = Vec::new();
+        let code = run_streaming(
+            "sh",
+            ["-c", r"printf 'caf\351\r\n'; printf 'ok\n'; printf 'tail' >&2"],
+            |l| lines.push(l.to_string()),
+        )
+        .await
+        .unwrap();
+        assert_eq!(code, 0);
+        assert!(lines.contains(&"caf\u{fffd}".to_string()), "{lines:?}");
+        assert!(lines.contains(&"ok".to_string()) && lines.contains(&"tail".to_string()));
+    }
+
+    #[tokio::test]
+    async fn children_do_not_inherit_the_agent_secrets() {
+        std::env::set_var("JWT_SECRET", "panel-secret");
+        std::env::set_var("RESTIC_PASSWORD", "inherited");
+        let show = ["-c", "echo ${JWT_SECRET:-none} ${RESTIC_PASSWORD:-none}"];
+        let out = run("sh", show).await.unwrap();
+        assert_eq!(out.stdout.trim(), "none none");
+        // One the caller passes explicitly still arrives.
+        let out = run_envs("sh", show, [("RESTIC_PASSWORD", "explicit")]).await.unwrap();
+        assert_eq!(out.stdout.trim(), "none explicit");
     }
 
     #[tokio::test]
