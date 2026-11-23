@@ -179,7 +179,7 @@ pub async fn run(
     tokio::spawn(async move {
         task.start();
         if let Err(e) = ensure_repo(&cfg).await {
-            task.log(format!("init error: {e}"));
+            task.log(format!("cannot open the backup repository: {e}"));
             task.finish(false);
             return;
         }
@@ -414,14 +414,62 @@ async fn remove_stale_locks(cfg: &crate::config::Config) {
 
 async fn ensure_repo(cfg: &crate::config::Config) -> AgentResult<()> {
     remove_stale_locks(cfg).await;
-    let env = repo_env_from_cfg(cfg);
-    match exec::run_envs("restic", ["snapshots", "--last"], env.clone()).await {
-        Ok(_) => Ok(()),
-        Err(_) => {
-            let _ = tokio::fs::create_dir_all(&cfg.restic_repository).await;
-            exec::run_envs("restic", ["init"], env).await.map(|_| ())
-        }
+    ensure_repo_at(&cfg.restic_repository, repo_env_from_cfg(cfg)).await
+}
+
+/// Creates the repository when there is none. Every failure of `restic
+/// snapshots` used to lead to `restic init`: with a wrong RESTIC_PASSWORD, a
+/// repository that could not be reached or one that was locked, the backup
+/// then ended with init's "config file already exists" and the reason was
+/// never shown.
+async fn ensure_repo_at(repository: &str, env: Vec<(&'static str, String)>) -> AgentResult<()> {
+    let failed = match exec::run_envs("restic", ["snapshots", "--latest", "1"], env.clone()).await {
+        Ok(_) => return Ok(()),
+        Err(e) => e,
+    };
+    if !repo_is_missing(&failed, repository) {
+        return Err(failed);
     }
+    let _ = tokio::fs::create_dir_all(repository).await;
+    match exec::run_envs("restic", ["init"], env).await {
+        Ok(_) => Ok(()),
+        Err(init) => Err(AgentError::Other(anyhow::anyhow!(
+            "{init} (restic init, tried because of: {failed})"
+        ))),
+    }
+}
+
+/// Repository locations that are not a folder on this machine (restic's
+/// backend prefixes).
+const REMOTE_BACKENDS: &[&str] = &["sftp:", "s3:", "b2:", "azure:", "gs:", "swift:", "rest:", "rclone:"];
+
+/// True when a failed `restic snapshots` means there is no repository yet.
+/// restic 0.17 and later exit with 10 for exactly that. 0.16, which Ubuntu
+/// 24.04 has, exits with 1 for everything and says "unable to open config
+/// file ... Is there a repository at the following location?" when it cannot
+/// read the repository's `config`, also when that is the network's fault. So
+/// for a local repository the folder itself is asked: no `config` and no keys
+/// in it. A remote one is taken at restic's word; `init` refuses a repository
+/// that exists.
+fn repo_is_missing(failed: &AgentError, repository: &str) -> bool {
+    let AgentError::Subprocess { code, stderr, .. } = failed else {
+        return false;
+    };
+    if *code != 10 && !stderr.contains("unable to open config file") {
+        return false;
+    }
+    if REMOTE_BACKENDS.iter().any(|b| repository.starts_with(b)) {
+        return true;
+    }
+    let dir = std::path::Path::new(repository.strip_prefix("local:").unwrap_or(repository));
+    let no_config = matches!(
+        std::fs::symlink_metadata(dir.join("config")),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound
+    );
+    // Keys without a config are what is left of a damaged repository; a new
+    // one made on top of it would hide that.
+    let no_keys = std::fs::read_dir(dir.join("keys")).map_or(true, |mut d| d.next().is_none());
+    no_config && no_keys
 }
 
 async fn dump_mariadb(task: &crate::ipc::tasks::TaskHandle) -> AgentResult<()> {
@@ -466,7 +514,11 @@ fn repo_env_from_cfg(cfg: &crate::config::Config) -> Vec<(&'static str, String)>
 
 #[cfg(test)]
 mod tests {
-    use super::{validate_backup_path, validate_restore, StatusThrottle, RESTORE_ROOT, STATUS_EVERY};
+    use super::{
+        ensure_repo_at, repo_is_missing, validate_backup_path, validate_restore, StatusThrottle,
+        RESTORE_ROOT, STATUS_EVERY,
+    };
+    use crate::error::AgentError;
 
     #[test]
     fn restores_only_into_a_new_folder_under_the_restore_root() {
@@ -509,5 +561,83 @@ mod tests {
         for bad in ["/var/lib/docker", "/var/lib/docker/image", "/var/lib/docker/volumes/../containers", "/etc/shadow"] {
             assert!(validate_backup_path(bad).is_err(), "{bad} should be refused");
         }
+    }
+
+    fn restic_failed(code: i32, stderr: &str) -> AgentError {
+        AgentError::Subprocess { cmd: "restic".into(), code, stderr: stderr.into() }
+    }
+
+    #[test]
+    fn a_repository_is_only_created_where_there_is_none() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = dir.path().join("repo");
+        let repo_str = repo.to_str().unwrap();
+        // restic 0.16.4, word for word.
+        let no_repo = restic_failed(
+            1,
+            &format!("Fatal: unable to open config file: stat {repo_str}/config: no such file or directory\nIs there a repository at the following location?\n{repo_str}\n"),
+        );
+        let wrong_password = restic_failed(1, "Fatal: wrong password or no key found\n");
+        let locked = restic_failed(
+            1,
+            "unable to create lock in backend: repository is already locked by PID 4242 on host by root (UID 0, GID 0)\n",
+        );
+
+        // No folder, then an empty one (what the installer leaves).
+        assert!(repo_is_missing(&no_repo, repo_str));
+        std::fs::create_dir(&repo).unwrap();
+        assert!(repo_is_missing(&no_repo, repo_str));
+        assert!(repo_is_missing(&no_repo, &format!("local:{repo_str}")));
+        // restic 0.17+ has an exit code for it.
+        assert!(repo_is_missing(&restic_failed(10, "Fatal: repository does not exist\n"), repo_str));
+
+        assert!(!repo_is_missing(&wrong_password, repo_str));
+        assert!(!repo_is_missing(&restic_failed(12, "Fatal: wrong password or no key found\n"), repo_str));
+        assert!(!repo_is_missing(&locked, repo_str));
+        assert!(!repo_is_missing(&restic_failed(11, "repository is already locked\n"), repo_str));
+        // restic itself is not installed.
+        let not_installed = AgentError::Io(std::io::Error::from(std::io::ErrorKind::NotFound));
+        assert!(!repo_is_missing(&not_installed, repo_str));
+
+        // A repository that lost its config still has its keys: not empty.
+        std::fs::create_dir(repo.join("keys")).unwrap();
+        assert!(repo_is_missing(&no_repo, repo_str));
+        std::fs::write(repo.join("keys").join("0a1b2c"), "{}").unwrap();
+        assert!(!repo_is_missing(&no_repo, repo_str));
+        // And one whose config is there was not missing, whatever restic said.
+        std::fs::remove_dir_all(repo.join("keys")).unwrap();
+        std::fs::write(repo.join("config"), "x").unwrap();
+        assert!(!repo_is_missing(&no_repo, repo_str));
+
+        // A remote repository cannot be looked at: restic's word counts.
+        assert!(repo_is_missing(&no_repo, "sftp:backup@host:/srv/restic"));
+        assert!(!repo_is_missing(&wrong_password, "sftp:backup@host:/srv/restic"));
+    }
+
+    /// The same against the real restic (0.16.4 is what Ubuntu 24.04 has).
+    #[tokio::test]
+    #[ignore = "needs restic (cargo test -- --ignored)"]
+    async fn a_wrong_password_is_reported_and_a_missing_repository_created() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = dir.path().join("repo");
+        std::fs::create_dir(&repo).unwrap();
+        let repo_str = repo.to_str().unwrap();
+        let env = |password: &str| {
+            vec![("RESTIC_PASSWORD", password.to_string()), ("RESTIC_REPOSITORY", repo_str.to_string())]
+        };
+        ensure_repo_at(repo_str, env("right")).await.unwrap();
+        assert!(repo.join("config").is_file());
+        // A second run finds it.
+        ensure_repo_at(repo_str, env("right")).await.unwrap();
+
+        let wrong = ensure_repo_at(repo_str, env("wrong")).await.unwrap_err().to_string();
+        assert!(wrong.contains("wrong password"), "{wrong}");
+        assert!(!wrong.contains("already exists"), "{wrong}");
+
+        // Damaged: the config is gone, the keys are not. Left alone.
+        std::fs::remove_file(repo.join("config")).unwrap();
+        let damaged = ensure_repo_at(repo_str, env("right")).await.unwrap_err().to_string();
+        assert!(damaged.contains("unable to open config file"), "{damaged}");
+        assert!(!repo.join("config").exists());
     }
 }
