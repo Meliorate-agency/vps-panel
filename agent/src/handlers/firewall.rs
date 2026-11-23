@@ -465,11 +465,10 @@ fn validate_duration(s: &str, label: &str) -> AgentResult<()> {
 pub async fn sync_operator_ignoreip(
     State(state): State<AppState>,
 ) -> AgentResult<Json<OkResponse>> {
-    let operator_ips = read_operator_allowlist(&state.panel_db);
     let mut ignoreip = String::from("127.0.0.0/8 ::1 10.0.0.0/8 172.16.0.0/12 192.168.0.0/16");
-    if !operator_ips.is_empty() {
+    for entry in read_operator_allowlist(&state.panel_db) {
         ignoreip.push(' ');
-        ignoreip.push_str(&operator_ips);
+        ignoreip.push_str(&entry);
     }
     let body = format!(
         "[dovecot]\n\
@@ -493,11 +492,9 @@ pub async fn sync_operator_ignoreip(
     Ok(Json(OkResponse::default()))
 }
 
-fn read_operator_allowlist(db: &crate::db::PanelDb) -> String {
+fn read_operator_allowlist(db: &crate::db::PanelDb) -> Vec<String> {
     // Mirrors the pattern used by ssl::resolve_acme_email — read a single
-    // settings row, treat "row missing" as "empty value". The panel
-    // (IpAllowlistForm.tsx) validates each entry as IPv4/IPv6/CIDR before
-    // saving, so the value is trusted here; we only normalize whitespace.
+    // settings row, treat "row missing" as "empty value".
     let raw: String = db
         .with(|conn| {
             conn.query_row(
@@ -512,11 +509,33 @@ fn read_operator_allowlist(db: &crate::db::PanelDb) -> String {
         })
         .ok()
         .unwrap_or_default();
-    raw.split(',')
-        .map(|s| s.trim())
+    allowlist_entries(&raw)
+}
+
+/// The entries of a stored `panel.ip_allowlist` that are an IP address or a
+/// CIDR range, normalized. The rest is left out and logged: the list went
+/// into `ignoreip` as stored, and the panel checking it on save does not
+/// cover a row saved before it did, or anything else that writes panel.db.
+fn allowlist_entries(raw: &str) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for entry in raw
+        .split(|c: char| c == ',' || c.is_whitespace())
         .filter(|s| !s.is_empty())
-        .collect::<Vec<_>>()
-        .join(" ")
+    {
+        match crate::handlers::panel_access::parse_entry(entry) {
+            Some(e) => {
+                if !out.contains(&e) {
+                    out.push(e);
+                }
+            }
+            None => tracing::warn!(
+                ?entry,
+                "panel.ip_allowlist entry is not an IP address or CIDR range; \
+                 left out of fail2ban's ignoreip"
+            ),
+        }
+    }
+    out
 }
 
 fn validate_proto(s: &str) -> AgentResult<()> {
@@ -625,6 +644,21 @@ mod tests {
         assert!(!parse_jail_list(status).contains(&"logtarget"));
         assert!(parse_jail_list("Status\n|- Number of jail:\t0\n`- Jail list:\t\n").is_empty());
         assert!(parse_jail_list("").is_empty());
+    }
+
+    #[test]
+    fn trusted_ips_that_are_not_addresses_stay_out_of_ignoreip() {
+        use super::allowlist_entries;
+        assert_eq!(
+            allowlist_entries("203.0.113.7, 10.1.0.0/16,2001:DB8::/32"),
+            vec!["203.0.113.7", "10.1.0.0/16", "2001:db8::/32"]
+        );
+        assert_eq!(
+            allowlist_entries("203.0.113.7,\nexample.com, 198.51.100.0/24 [sshd], 1.2.3.4/33, 203.0.113.7"),
+            vec!["203.0.113.7", "198.51.100.0/24"]
+        );
+        assert!(allowlist_entries("").is_empty());
+        assert!(allowlist_entries(" , ").is_empty());
     }
 
     const JAIL_STATUS: &str = "Status for the jail: sshd\n\
