@@ -227,7 +227,7 @@ pub async fn create_user(
             req.user
         )));
     }
-    let password = req.password.unwrap_or_else(random_password);
+    let password = password_or_random(req.password);
     let mut conn = state.mariadb.pool().get_conn().await?;
     // MariaDB does not accept '?' placeholders in CREATE USER ... IDENTIFIED BY,
     // so the password has to be inlined as an escaped string literal.
@@ -257,7 +257,7 @@ pub async fn set_user_password(
             "'{user}' is a reserved system user — refusing to change its password"
         )));
     }
-    let password = req.password.unwrap_or_else(random_password);
+    let password = password_or_random(req.password);
     let mut conn = state.mariadb.pool().get_conn().await?;
     // Same constraint as CREATE USER: no '?' placeholders in IDENTIFIED BY,
     // so the password is inlined as an escaped string literal.
@@ -1078,6 +1078,13 @@ fn escape_string(s: &str) -> String {
     s.replace('\\', "\\\\").replace('\'', "\\'")
 }
 
+/// The caller's password, or a generated one. An empty string counts as none:
+/// `IDENTIFIED BY ''` made an account that logs in without a password (the
+/// MCP `db.create_user` tool passes "" through).
+fn password_or_random(given: Option<String>) -> String {
+    given.filter(|p| !p.is_empty()).unwrap_or_else(random_password)
+}
+
 fn random_password() -> String {
     use base64::Engine;
     let mut bytes = [0u8; 24];
@@ -1112,5 +1119,12 @@ mod tests {
         assert!(!dump_creates_database(use_only));
         // A comment that mentions it is not a statement.
         assert!(!dump_creates_database("-- run CREATE DATABASE first\nUSE shop;\n"));
+    }
+
+    #[test]
+    fn an_empty_password_is_replaced_by_a_generated_one() {
+        assert_eq!(password_or_random(Some("s3cret".into())), "s3cret");
+        assert!(password_or_random(Some(String::new())).len() >= 24);
+        assert!(password_or_random(None).len() >= 24);
     }
 }

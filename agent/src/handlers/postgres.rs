@@ -267,7 +267,7 @@ pub async fn create_role(Json(req): Json<CreateRole>) -> AgentResult<Json<Create
             req.user
         )));
     }
-    let password = req.password.unwrap_or_else(random_password);
+    let password = password_or_random(req.password);
     let attrs = if req.superuser {
         "LOGIN SUPERUSER"
     } else {
@@ -296,7 +296,7 @@ pub async fn set_role_password(
             "'{user}' is a reserved system role — refusing to change its password"
         )));
     }
-    let password = req.password.unwrap_or_else(random_password);
+    let password = password_or_random(req.password);
     let sql = format!(
         "ALTER ROLE \"{}\" WITH PASSWORD '{}';",
         user,
@@ -702,6 +702,13 @@ fn escape_string(s: &str) -> String {
     // since Postgres 9.1) which is what every supported Debian release
     // ships with.
     s.replace('\'', "''")
+}
+
+/// The caller's password, or a generated one. An empty string counts as none:
+/// `PASSWORD ''` leaves the role without a password (it cannot log in with
+/// one) while the response said the password was "".
+fn password_or_random(given: Option<String>) -> String {
+    given.filter(|p| !p.is_empty()).unwrap_or_else(random_password)
 }
 
 fn random_password() -> String {
