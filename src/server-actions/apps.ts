@@ -291,6 +291,43 @@ export async function getAppRepoUrl(name: string): Promise<string | null> {
   return row?.repo_url ?? null;
 }
 
+/**
+ * Why root's git would be refused this Repository URL, or null. The same rule
+ * as check_repo_url in agent/src/handlers/apps.rs (is_safe_git_url, then
+ * misused_alias_hint): change the two together. The agent applies it when the
+ * URL is used (pull, update, the update check), which is long after the form
+ * said Saved.
+ */
+function repoUrlProblem(url: string): string | null {
+  const safe =
+    new TextEncoder().encode(url).length <= 1024 &&
+    !/[ ;|&$`\n]/.test(url) &&
+    (url.startsWith("https://") ||
+      url.startsWith("http://") ||
+      (url.includes("@") && url.includes(":") && !url.startsWith("/")));
+  if (!safe) {
+    return "Enter a repository URL that starts with https://, or one of the form git@host:owner/repo.git, without spaces.";
+  }
+  // The SSH config Host alias written as the user (alias@github.com:...)
+  // instead of as the host (git@alias:...). Only the scp-like form has the
+  // user before the first "@".
+  if (!url.includes("://")) {
+    const at = url.indexOf("@");
+    const afterAt = url.slice(at + 1);
+    const colon = afterAt.indexOf(":");
+    const host = colon === -1 ? "" : afterAt.slice(0, colon);
+    const user = url.slice(0, at);
+    if (
+      at !== -1 &&
+      ["github.com", "gitlab.com", "bitbucket.org"].includes(host.toLowerCase()) &&
+      user !== "git"
+    ) {
+      return `${host} only accepts the SSH user "git", not "${user}". If "${user}" is a Host alias from /root/.ssh/config, write git@${user}:${afterAt.slice(colon + 1)}.`;
+    }
+  }
+  return null;
+}
+
 export async function updateAppRepoUrlAction(
   name: string,
   _prev: ActionResult | null,
@@ -298,6 +335,10 @@ export async function updateAppRepoUrlAction(
 ): Promise<ActionResult> {
   const s = await requireAdmin();
   const url = String(fd.get("repo_url") ?? "").trim();
+  if (url.length > 0) {
+    const problem = repoUrlProblem(url);
+    if (problem) return { ok: false, error: problem };
+  }
   // Empty → store null (operator wants to disconnect). Non-empty → keep as-is.
   const value = url.length > 0 ? url : null;
   db()
