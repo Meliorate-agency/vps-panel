@@ -55,7 +55,14 @@ export default async function AppDetailPage({
   const stop = stopAppAction.bind(null, name);
   const restart = restartAppAction.bind(null, name);
   const updateRepoUrl = updateAppRepoUrlAction.bind(null, name);
-  const initialRepoUrl = (await getAppRepoUrl(name)) ?? "";
+  // Secrets are for admins only (who are also the only ones the forms let
+  // save): the project env files, and a token in the repository URL
+  // (https://user:token@host/...), which is left out for everyone else.
+  const isAdmin = (await getSession())?.role === "admin";
+  const savedRepoUrl = (await getAppRepoUrl(name)) ?? "";
+  const initialRepoUrl = isAdmin
+    ? savedRepoUrl
+    : savedRepoUrl.replace(/^(https?:\/\/)[^/@]*@/i, "$1");
   const updateEntrypoint = updateAppEntrypointAction.bind(null, name);
   const initialEntrypoint = await getAppEntrypoint(name);
   const sourceMissing =
@@ -84,7 +91,7 @@ export default async function AppDetailPage({
   // to a client-side load + inline error if this comes back null.
   // External apps get the deploy form's own editor, which loads by itself.
   const initialEnvFiles =
-    app.source_dir_state === "missing" || isDocker || isExternal
+    app.source_dir_state === "missing" || isDocker || isExternal || !isAdmin
       ? null
       : await agent.apps.listEnvFiles(name).catch(() => null);
 
@@ -545,6 +552,8 @@ export default async function AppDetailPage({
             Source folder is missing - env files appear here once code is in
             place.
           </p>
+        ) : !isAdmin ? (
+          <p className={styles.muted}>Only admins can read the project env files.</p>
         ) : (
           <EnvFilesEditor name={name} initialData={initialEnvFiles} />
         )}

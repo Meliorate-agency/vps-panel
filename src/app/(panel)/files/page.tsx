@@ -1,5 +1,6 @@
 import Link from "next/link";
 import { agent } from "@/lib/agent";
+import { requireSession } from "@/lib/auth";
 import styles from "@/components/page.module.css";
 import fileStyles from "./files.module.css";
 
@@ -15,6 +16,18 @@ export const dynamic = "force-dynamic";
  * for what it is.
  */
 export default async function FilesPage() {
+  // Listings are read as root: admins only, like download and upload.
+  const s = await requireSession();
+  if (s.role !== "admin") {
+    return (
+      <div className={styles.head}>
+        <div>
+          <h1 className={styles.title}>Files</h1>
+          <div className={styles.subtitle}>Only admins can browse the server&apos;s files.</div>
+        </div>
+      </div>
+    );
+  }
   const roots = await agent.files.roots().catch(() => []);
   const trashCount = await agent.files
     .listTrash()

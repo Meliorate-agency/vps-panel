@@ -1,5 +1,6 @@
 import Link from "next/link";
 import { agent, type TrashRow } from "@/lib/agent";
+import { requireSession } from "@/lib/auth";
 import styles from "@/components/page.module.css";
 import TrashTable from "./TrashTable";
 
@@ -11,6 +12,18 @@ export const dynamic = "force-dynamic";
  * is a mistake you can walk back.
  */
 export default async function TrashPage() {
+  // The names and paths of deleted files: admins only, like the listings.
+  const s = await requireSession();
+  if (s.role !== "admin") {
+    return (
+      <div className={styles.head}>
+        <div>
+          <h1 className={styles.title}>Trash</h1>
+          <div className={styles.subtitle}>Only admins can browse the server&apos;s files.</div>
+        </div>
+      </div>
+    );
+  }
   let rows: TrashRow[];
   let error: string | null = null;
   try {

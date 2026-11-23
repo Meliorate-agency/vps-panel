@@ -1,6 +1,7 @@
 import Link from "next/link";
 import { notFound } from "next/navigation";
 import { agent } from "@/lib/agent";
+import { requireSession } from "@/lib/auth";
 import { uploadLimitMb } from "@/lib/uploadLimit";
 import styles from "@/components/page.module.css";
 import FileBrowser from "./FileBrowser";
@@ -24,6 +25,18 @@ export default async function FilesRootPage({
   params: Promise<{ root: string }>;
   searchParams: Promise<{ path?: string }>;
 }) {
+  // Listings are read as root: admins only, like download and upload.
+  const s = await requireSession();
+  if (s.role !== "admin") {
+    return (
+      <div className={styles.head}>
+        <div>
+          <h1 className={styles.title}>Files</h1>
+          <div className={styles.subtitle}>Only admins can browse the server&apos;s files.</div>
+        </div>
+      </div>
+    );
+  }
   const { root: rootId } = await params;
   const sp = await searchParams;
   const path = sp.path ?? "";
