@@ -1333,6 +1333,11 @@ pub async fn self_update(State(state): State<AppState>) -> AgentResult<Json<Task
                 unit_arg.as_str(),
                 "--collect",
                 "--property=EnvironmentFile=/etc/vps-panel/.env",
+                // The default (stop) ends the whole unit when the kernel
+                // kills one process in it for memory, the panel build on a
+                // small server: update.sh never got to its failure path and
+                // the wrapper wrote no exit code.
+                "--property=OOMPolicy=continue",
                 "--setenv=HOME=/root",
                 out_arg.as_str(),
                 err_arg.as_str(),
