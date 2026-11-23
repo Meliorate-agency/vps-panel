@@ -58,6 +58,8 @@ type Props = {
   rootKeyCount: number;
   /** Tailscale's phase and tailnet IP while it is installed, else null. */
   tailscale: TailscaleCard | null;
+  /** This admin already changed their password (an ok audit row). */
+  passwordChanged: boolean;
 };
 
 const STEP_LABELS: Record<SetupStep, string> = {
@@ -166,6 +168,7 @@ export default function Wizard(props: Props) {
       )}
       {step === "password" && (
         <PasswordStep
+          alreadyChanged={props.passwordChanged}
           onBack={() => goTo(prev())}
         />
       )}
@@ -868,8 +871,15 @@ function AppsStep({
   );
 }
 
-function PasswordStep({ onBack }: { onBack: () => void }) {
-  const [changed, setChanged] = useState(false);
+function PasswordStep({
+  alreadyChanged,
+  onBack,
+}: {
+  alreadyChanged: boolean;
+  onBack: () => void;
+}) {
+  // From the server, so a reload after the change still lets Finish through.
+  const [changed, setChanged] = useState(alreadyChanged);
   const [finishing, startFinish] = useTransition();
 
   const wrappedAction = async (
@@ -894,6 +904,11 @@ function PasswordStep({ onBack }: { onBack: () => void }) {
         The installer seeded a random password. Set your own before we finish. Minimum
         12 characters. After this you&apos;ll land on the dashboard.
       </p>
+      {alreadyChanged && (
+        <p className={shared.notice}>
+          You already changed your password. You can finish setup now, or change it again.
+        </p>
+      )}
       <ChangePasswordForm action={wrappedAction} />
       <div className={styles.footer}>
         <button className={shared.btnGhost} onClick={onBack}>

@@ -1,4 +1,6 @@
 import { config } from "@/lib/config";
+import { requireSession } from "@/lib/auth";
+import { db } from "@/lib/db";
 import { getSetting } from "@/lib/settings";
 import { agent } from "@/lib/agent";
 import { tailscaleCard } from "@/lib/tailscale";
@@ -10,7 +12,22 @@ import Wizard from "./Wizard";
 export const dynamic = "force-dynamic";
 
 export default async function SetupPage() {
+  const session = await requireSession();
   const state = await getSetupState();
+  // The Password step only lets Finish through once the installer's password
+  // was changed. Remembered by the browser alone, a reload forgot it. Every
+  // successful change writes an ok `password.change` audit row for the user
+  // (changePasswordAction; audit rows are never deleted). Comparing the
+  // stored hash with ADMIN_INITIAL_PASSWORD would not do: that only seeds
+  // the first admin, so for anyone else it reads as "changed".
+  const passwordChanged =
+    db()
+      .prepare(
+        `SELECT 1 FROM audit_log
+          WHERE actor_id = ? AND action = 'password.change' AND result = 'ok'
+          LIMIT 1`,
+      )
+      .get(session.userId) !== undefined;
   const acmeEmail = getSetting("panel.acme_email", "");
   const nsPair = getSetting("dns.ns_pair", "");
   const policy = await getFail2banPolicy();
@@ -44,6 +61,7 @@ export default async function SetupPage() {
       sshConfig={sshConfig}
       rootKeyCount={rootKeyCount}
       tailscale={tailscale}
+      passwordChanged={passwordChanged}
     />
   );
 }
