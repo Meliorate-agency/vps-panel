@@ -211,6 +211,21 @@ fn grant_db_pattern(db: &str) -> String {
     out
 }
 
+/// The names a grant on `db` can be stored under in `mysql.db`: escaped (what
+/// a new grant uses), then plain. The column holds 64 characters and MariaDB
+/// refuses a longer name, so a long name with underscores only has the plain
+/// spelling.
+fn grant_db_spellings(db: &str) -> Vec<String> {
+    let escaped = grant_db_pattern(db);
+    if escaped == db {
+        vec![escaped]
+    } else if escaped.chars().count() > 64 {
+        vec![db.to_string()]
+    } else {
+        vec![escaped, db.to_string()]
+    }
+}
+
 fn is_no_such_grant(e: &mysql_async::Error) -> bool {
     matches!(e, mysql_async::Error::Server(s) if s.code == 1141)
 }
@@ -322,8 +337,9 @@ pub async fn grant(
         return Err(AgentError::Invalid("invalid privileges spec".into()));
     }
     let mut conn = state.mariadb.pool().get_conn().await?;
-    let mut on = grant_db_pattern(&req.database);
-    if on != req.database {
+    let spellings = grant_db_spellings(&req.database);
+    let mut on = &spellings[0];
+    if let [escaped, plain] = spellings.as_slice() {
         // A grant made before the name was escaped sits in mysql.db under
         // the plain name. It is extended in place: MariaDB applies only the
         // most specific row, so a second, escaped row with fewer privileges
@@ -331,17 +347,17 @@ pub async fn grant(
         let held: Vec<String> = conn
             .exec(
                 "SELECT Db FROM mysql.db WHERE Db IN (?, ?) AND User = ? AND Host = ?",
-                (on.as_str(), req.database.as_str(), req.user.as_str(), host.as_str()),
+                (escaped.as_str(), plain.as_str(), req.user.as_str(), host.as_str()),
             )
             .await?;
-        if !held.contains(&on) && held.contains(&req.database) {
-            on = req.database.clone();
+        if !held.contains(escaped) && held.contains(plain) {
+            on = plain;
         }
     }
     conn.query_drop(format!(
         "GRANT {} ON `{}`.* TO '{}'@'{}'",
         req.privileges,
-        escape(&on),
+        escape(on),
         escape(&req.user),
         escape(&host)
     ))
@@ -382,10 +398,7 @@ pub async fn revoke(
     // grants, the mysql CLI). REVOKE only finds the spelling it is given, so
     // an escaped grant could be shown but never removed. Try both; 1141 (no
     // such grant) is the answer only when neither is there.
-    let mut spellings = vec![grant_db_pattern(&req.database)];
-    if spellings[0] != req.database {
-        spellings.push(req.database.clone());
-    }
+    let spellings = grant_db_spellings(&req.database);
     let mut revoked = false;
     let mut missing: Option<mysql_async::Error> = None;
     for db in &spellings {
@@ -1107,6 +1120,14 @@ mod tests {
         }
         // A grant stored unescaped still shows under its database.
         assert_eq!(unescape_grant_db("shop_1"), "shop_1");
+
+        assert_eq!(grant_db_spellings("plain"), ["plain"]);
+        assert_eq!(grant_db_spellings("shop_1"), [r"shop\_1", "shop_1"]);
+        // 60 characters, 5 underscores: escaped it would not fit mysql.db.
+        let long = format!("a_b_c_d_e_{}", "x".repeat(50));
+        assert_eq!(grant_db_spellings(&long), [long.clone()]);
+        let fits = format!("a_b_{}", "x".repeat(58));
+        assert_eq!(grant_db_spellings(&fits).len(), 2);
     }
 
     #[test]
