@@ -43,7 +43,8 @@ export const TOOLS: Tool[] = [
   {
     page: "Databases",
     name: "db.create_database",
-    description: "Create a MariaDB database (CREATE DATABASE IF NOT EXISTS).",
+    description:
+      "Create a MariaDB database (utf8mb4). Fails with error 1007 when a database with that name already exists; check db.list_databases first.",
     inputSchema: {
       type: "object",
       properties: { name: { type: "string", description: "Database name." } },
