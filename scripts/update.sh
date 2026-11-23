@@ -516,6 +516,56 @@ patch_panel_vhost_peer_api() {
 }
 patch_panel_vhost_peer_api
 
+# HSTS for the name itself only, in vhosts written before the agent's
+# templates dropped includeSubDomains. With it, a browser that had visited
+# https://example.com refused plain HTTP on every subdomain for two years,
+# also the ones served elsewhere or without a certificate. Only vhosts the
+# panel wrote are touched (the first line is one of the markers the agent
+# knows its own files by: the panel vhost, a site, an app, a vhost it
+# patched), and only the header exactly as the templates wrote it: a vhost
+# made by hand, or a header someone changed, stays as it is.
+# Checked with nginx -t and put back on failure. Idempotent, and never fails
+# the update.
+hsts_drop_subdomains() {
+  local dir=/etc/nginx/sites-available backup_dir=/var/backups/vps-panel-config
+  local old='add_header Strict-Transport-Security "max-age=63072000; includeSubDomains" always;'
+  local new='add_header Strict-Transport-Security "max-age=63072000" always;'
+  [[ -d "$dir" ]] && command -v nginx >/dev/null 2>&1 || return 0
+  local f first stamp files=()
+  for f in "$dir"/*; do
+    [[ -f "$f" && ! -L "$f" ]] || continue
+    case "$f" in
+      *.bak*|*.orig*|*.old*|*~) continue ;;
+    esac
+    first=""
+    IFS= read -r first < "$f" || true
+    case "$first" in
+      '# vps-panel-host:'*|'# vps-site:'*|'# vps-app:'*|'# patched-by-vps-panel'*) ;;
+      *) continue ;;
+    esac
+    grep -qF "$old" "$f" || continue
+    files+=("$f")
+  done
+  [[ ${#files[@]} -gt 0 ]] || return 0
+
+  stamp="$(date +%Y%m%d%H%M%S)"
+  install -d -m 0700 "$backup_dir"
+  for f in "${files[@]}"; do
+    cp -a "$f" "$backup_dir/$(basename "$f").hsts-$stamp"
+    sed -i "s|$old|$new|" "$f"
+  done
+  if nginx -t >/dev/null 2>&1; then
+    systemctl reload nginx || true
+    echo "HSTS no longer covers subdomains in ${#files[@]} vhost(s)"
+  else
+    echo "nginx -t failed after the HSTS change - reverting" >&2
+    for f in "${files[@]}"; do cp -a "$backup_dir/$(basename "$f").hsts-$stamp" "$f"; done
+    nginx -t >/dev/null 2>&1 || echo "WARNING: nginx config still invalid" >&2
+  fi
+  return 0
+}
+hsts_drop_subdomains || true
+
 # Backfill the Dovecot fixes install.sh now applies on a fresh box.
 #
 # 1. Drop the PAM passdb (see the comment in install.sh): with it every mailbox

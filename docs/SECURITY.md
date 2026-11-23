@@ -31,9 +31,9 @@ Adversaries we explicitly do NOT defend against:
 - A Docker app's port is published on `127.0.0.1` only and reaches the internet through nginx. Docker's own port publishing bypasses UFW, so a `0.0.0.0` publish would be public whatever the firewall says; the agent never writes one.
 
 ### Network surface (defense against #1 - internet attackers)
-- UFW default deny inbound. Allowed: SSH (22, or the port sshd is on), 25, 465, 587 (mail SMTP), 80, 443 (web), 53 (DNS), 993, 995 (IMAP/POP3 SSL), and 4190 (ManageSieve) from Docker's networks only.
+- UFW default deny inbound. Allowed: SSH (22, or the port sshd is on), 25, 465, 587 (mail SMTP), 80, 443 (web), 53 (DNS), 993, 995 (IMAP/POP3 SSL), and 4190 (ManageSieve) from Docker's networks only. The installer opens the web, mail and DNS ports once, on the first install: a port closed since stays closed when the installer is run again, which then only makes sure the SSH rule is there.
 - Panel port 10000 is bound to `127.0.0.1` only, exposed via nginx on `panel.<your-domain>` over HTTPS.
-- nginx sets `Strict-Transport-Security`, `X-Content-Type-Options: nosniff`, `X-Frame-Options: DENY`, a strict CSP, and `Referrer-Policy: same-origin`.
+- nginx sets `Strict-Transport-Security`, `X-Content-Type-Options: nosniff`, `X-Frame-Options: DENY`, a strict CSP, and `Referrer-Policy: same-origin`. HSTS (two years) covers the name that has the certificate, not its subdomains (no `includeSubDomains`): a subdomain served elsewhere, or without a certificate, stays reachable over plain HTTP. An update removes `includeSubDomains` from the vhosts the panel wrote earlier.
 - fail2ban watches SSH, dovecot, postfix-sasl. Default ban: 1h after 5 failures in 10 min.
 - Optional IP allowlist: Settings -> Access writes `allow`/`deny` directives into the panel's nginx vhost.
 
