@@ -208,19 +208,8 @@ pub async fn deny(Json(req): Json<PortReq>) -> AgentResult<Json<OkResponse>> {
 
 pub async fn jails() -> AgentResult<Json<Vec<JailRow>>> {
     let out = exec::run("fail2ban-client", ["status"]).await?;
-    let jail_line = out
-        .stdout
-        .lines()
-        .find(|l| l.contains("Jail list:"))
-        .unwrap_or("");
-    let jails: Vec<&str> = jail_line
-        .split(':')
-        .nth(1)
-        .map(|s| s.split(',').map(|s| s.trim()).filter(|s| !s.is_empty()).collect())
-        .unwrap_or_default();
-
     let mut rows = Vec::new();
-    for jail in jails {
+    for jail in parse_jail_list(&out.stdout) {
         let detail = match exec::run("fail2ban-client", ["status", jail]).await {
             Ok(o) => o.stdout,
             Err(_) => continue,
@@ -236,8 +225,33 @@ pub async fn jails() -> AgentResult<Json<Vec<JailRow>>> {
     Ok(Json(rows))
 }
 
+/// The jails fail2ban runs, from the `Jail list:` line of
+/// `fail2ban-client status`.
+fn parse_jail_list(status: &str) -> Vec<&str> {
+    status
+        .lines()
+        .find(|l| l.contains("Jail list:"))
+        .and_then(|l| l.split(':').nth(1))
+        .map(|s| s.split(',').map(|s| s.trim()).filter(|s| !s.is_empty()).collect())
+        .unwrap_or_default()
+}
+
+/// `fail2ban-client set <jail> ...` is only sent for a jail fail2ban runs.
+/// `set logtarget <target>`, `set dbfile <file>` and `set loglevel <level>`
+/// are commands of their own, so with one of those names in the jail's place
+/// an unban changed that setting of the server (its log went to a file
+/// called `unbanip`).
+async fn require_running_jail(jail: &str) -> AgentResult<()> {
+    validate_jail(jail)?;
+    let out = exec::run("fail2ban-client", ["status"]).await?;
+    if !parse_jail_list(&out.stdout).contains(&jail) {
+        return Err(AgentError::Invalid(format!("fail2ban has no jail named {jail}")));
+    }
+    Ok(())
+}
+
 pub async fn unban(Json(req): Json<UnbanReq>) -> AgentResult<Json<OkResponse>> {
-    validate_jail(&req.jail)?;
+    require_running_jail(&req.jail).await?;
     if !is_valid_ip(&req.ip) {
         return Err(AgentError::Invalid("invalid ip".into()));
     }
@@ -254,7 +268,7 @@ pub async fn unban(Json(req): Json<UnbanReq>) -> AgentResult<Json<OkResponse>> {
 /// the misconfigured client, let everyone retry" panic button after an iOS
 /// retry storm bans the operator's home / phone IPs.
 pub async fn unban_all(Json(req): Json<UnbanAllReq>) -> AgentResult<Json<OkResponse>> {
-    validate_jail(&req.jail)?;
+    require_running_jail(&req.jail).await?;
     exec::run(
         "fail2ban-client",
         ["set", &req.jail, "unbanip", "--all"],
@@ -360,13 +374,31 @@ pub struct Fail2banPolicyReq {
 pub async fn set_fail2ban_policy(
     Json(req): Json<Fail2banPolicyReq>,
 ) -> AgentResult<Json<OkResponse>> {
+    let body = policy_body(&req)?;
+    fs_atomic::write(std::path::Path::new(POLICY_PATH), body.as_bytes(), 0o644).await?;
+    // Reload (not restart) so existing bans persist. Best-effort: if fail2ban
+    // isn't running yet (fresh install), the file is on disk for the next start.
+    let _ = exec::run("systemctl", ["reload", "fail2ban"]).await;
+    Ok(Json(OkResponse::default()))
+}
+
+/// The policy file for `req`, or why it is refused. A jail name becomes a
+/// `[section]` with `enabled = true`, so only the jails the panel knows are
+/// taken: `DEFAULT` there switched on every jail fail2ban ships, and
+/// `INCLUDES` is special to its config parser too.
+fn policy_body(req: &Fail2banPolicyReq) -> AgentResult<String> {
     validate_duration(&req.bantime, "bantime")?;
     validate_duration(&req.findtime, "findtime")?;
     if !(1..=1000).contains(&req.maxretry) {
         return Err(AgentError::Invalid("maxretry must be 1..=1000".into()));
     }
     for j in &req.jails {
-        validate_jail(j)?;
+        if !KNOWN_JAILS.contains(&j.as_str()) && !RETIRED_JAILS.contains(&j.as_str()) {
+            return Err(AgentError::Invalid(format!(
+                "unknown jail {j:?}; the panel manages {}",
+                KNOWN_JAILS.join(", ")
+            )));
+        }
     }
 
     let mut body = String::new();
@@ -385,25 +417,12 @@ pub async fn set_fail2ban_policy(
     body.push_str(&format!("maxretry = {}\n", req.maxretry));
 
     // Explicit enabled=true|false for every known jail so unchecking a box in
-    // the wizard actually turns the jail off. Unknown jails the operator sent
-    // get enabled=true only (we don't auto-disable jails we don't know about).
-    let selected: std::collections::HashSet<&str> =
-        req.jails.iter().map(|s| s.as_str()).collect();
+    // the wizard actually turns the jail off.
     for jail in KNOWN_JAILS {
-        let on = selected.contains(jail);
+        let on = req.jails.iter().any(|j| j == jail);
         body.push_str(&format!("\n[{jail}]\nenabled = {}\n", if on { "true" } else { "false" }));
     }
-    for jail in &req.jails {
-        if !KNOWN_JAILS.contains(&jail.as_str()) && !RETIRED_JAILS.contains(&jail.as_str()) {
-            body.push_str(&format!("\n[{jail}]\nenabled = true\n"));
-        }
-    }
-
-    fs_atomic::write(std::path::Path::new(POLICY_PATH), body.as_bytes(), 0o644).await?;
-    // Reload (not restart) so existing bans persist. Best-effort: if fail2ban
-    // isn't running yet (fresh install), the file is on disk for the next start.
-    let _ = exec::run("systemctl", ["reload", "fail2ban"]).await;
-    Ok(Json(OkResponse::default()))
+    Ok(body)
 }
 
 fn validate_duration(s: &str, label: &str) -> AgentResult<()> {
@@ -567,6 +586,45 @@ mod tests {
         assert!(!req.force && req.proto == "tcp");
         let req: PortReq = serde_json::from_str(r#"{"port":22,"proto":"tcp","force":true}"#).unwrap();
         assert!(req.force);
+    }
+
+    fn policy(jails: &[&str]) -> super::Fail2banPolicyReq {
+        super::Fail2banPolicyReq {
+            bantime: "1h".into(),
+            findtime: "10m".into(),
+            maxretry: 5,
+            jails: jails.iter().map(|j| j.to_string()).collect(),
+        }
+    }
+
+    #[test]
+    fn policy_only_takes_the_jails_the_panel_knows() {
+        use super::policy_body;
+        let body = policy_body(&policy(&["sshd", "dovecot"])).unwrap();
+        assert!(body.contains("\n[sshd]\nenabled = true\n"));
+        assert!(body.contains("\n[postfix-sasl]\nenabled = false\n"));
+        assert!(body.contains("\n[dovecot]\nenabled = true\n"));
+        // The only [DEFAULT] is the thresholds; it never gets `enabled`.
+        assert_eq!(body.matches("[DEFAULT]").count(), 2);
+        assert_eq!(body.matches("enabled").count(), 3);
+
+        for bad in ["DEFAULT", "INCLUDES", "default", "recidive", "sshd]\n[DEFAULT", ""] {
+            assert!(policy_body(&policy(&["sshd", bad])).is_err(), "{bad:?}");
+        }
+        // A retired jail in an old saved policy is dropped, not refused.
+        let body = policy_body(&policy(&["sshd", "nginx-http-auth"])).unwrap();
+        assert!(!body.contains("nginx"));
+    }
+
+    #[test]
+    fn running_jails_from_the_status_output() {
+        use super::parse_jail_list;
+        let status = "Status\n|- Number of jail:\t3\n`- Jail list:\tdovecot, postfix-sasl, sshd\n";
+        assert_eq!(parse_jail_list(status), vec!["dovecot", "postfix-sasl", "sshd"]);
+        // The names an unban must not be sent for are never in it.
+        assert!(!parse_jail_list(status).contains(&"logtarget"));
+        assert!(parse_jail_list("Status\n|- Number of jail:\t0\n`- Jail list:\t\n").is_empty());
+        assert!(parse_jail_list("").is_empty());
     }
 
     const JAIL_STATUS: &str = "Status for the jail: sshd\n\
