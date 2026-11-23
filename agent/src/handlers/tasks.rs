@@ -82,7 +82,15 @@ fn make_stream(
                         .data(serde_json::to_string(&status).unwrap_or_default()));
                     break;
                 }
-                Err(broadcast::error::RecvError::Lagged(_)) => continue,
+                // More lines than the channel holds arrived before this
+                // stream took them, and the ones in between are gone. It used
+                // to carry on with a gap nobody could see. The panel answers
+                // an `error` event by polling GET /tasks/:id, which has every
+                // line the log keeps.
+                Err(broadcast::error::RecvError::Lagged(_)) => {
+                    yield Ok(Event::default().event("error").data("lagged"));
+                    break;
+                }
                 Err(broadcast::error::RecvError::Closed) => break,
             }
         }

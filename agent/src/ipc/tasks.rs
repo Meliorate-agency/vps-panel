@@ -56,10 +56,100 @@ pub enum TaskEvent {
 
 struct LiveTask {
     state: TaskState,
-    log: Vec<String>,
+    log: BoundedLog,
     tx: broadcast::Sender<TaskEvent>,
     /// When the log was last written to panel.db. See TaskHandle::log.
     last_flush: std::time::Instant,
+    /// `log.pushed` as of the last write that reached panel.db: a log with
+    /// nothing new since then is not written again.
+    saved: u64,
+}
+
+/// One line of a task log is cut after this many bytes (a minified bundle or
+/// a progress bar printed as one line).
+const LOG_MAX_LINE_BYTES: usize = 4 * 1024;
+/// A task log keeps its beginning (the command, the environment, the first
+/// steps) and its end (the error), and leaves out the middle of a long one.
+/// Every line used to be kept for the life of the task and written to
+/// panel.db again every LOG_FLUSH_INTERVAL: a chatty build held hundreds of
+/// megabytes and rewrote them every two seconds.
+const LOG_HEAD_LINES: usize = 1_000;
+const LOG_HEAD_BYTES: usize = 256 * 1024;
+const LOG_TAIL_LINES: usize = 5_000;
+const LOG_TAIL_BYTES: usize = 1024 * 1024;
+
+/// The lines of one task's log, within the limits above.
+#[derive(Default)]
+struct BoundedLog {
+    head: Vec<String>,
+    head_bytes: usize,
+    /// Set once the head is full: every later line goes to the tail.
+    head_full: bool,
+    tail: std::collections::VecDeque<String>,
+    tail_bytes: usize,
+    /// Lines dropped between the head and the tail.
+    omitted: u64,
+    /// Lines ever pushed.
+    pushed: u64,
+}
+
+impl BoundedLog {
+    fn push(&mut self, line: String) {
+        self.pushed += 1;
+        if !self.head_full {
+            if self.head.len() < LOG_HEAD_LINES && self.head_bytes + line.len() <= LOG_HEAD_BYTES {
+                self.head_bytes += line.len();
+                self.head.push(line);
+                return;
+            }
+            self.head_full = true;
+        }
+        self.tail_bytes += line.len();
+        self.tail.push_back(line);
+        while self.tail.len() > LOG_TAIL_LINES || (self.tail_bytes > LOG_TAIL_BYTES && self.tail.len() > 1) {
+            if let Some(dropped) = self.tail.pop_front() {
+                self.tail_bytes -= dropped.len();
+                self.omitted += 1;
+            }
+        }
+    }
+
+    /// The log as it is stored and replayed: the head, a line saying how many
+    /// lines are missing when some are, the tail.
+    fn lines(&self) -> Vec<String> {
+        let mut out = Vec::with_capacity(self.head.len() + self.tail.len() + 1);
+        out.extend(self.head.iter().cloned());
+        if self.omitted > 0 {
+            out.push(format!(
+                "[... {} lines left out here: a long log keeps its beginning and its end ...]",
+                self.omitted
+            ));
+        }
+        out.extend(self.tail.iter().cloned());
+        out
+    }
+
+    fn blob(&self) -> String {
+        self.lines().join("\n")
+    }
+
+    /// The last `n` lines, for failure notifications.
+    fn last(&self, n: usize) -> String {
+        let all: Vec<&str> = self.head.iter().chain(self.tail.iter()).map(String::as_str).collect();
+        all[all.len().saturating_sub(n)..].join("\n")
+    }
+}
+
+/// `line` cut to LOG_MAX_LINE_BYTES, saying how much is missing.
+fn cap_line(line: &str) -> String {
+    if line.len() <= LOG_MAX_LINE_BYTES {
+        return line.to_string();
+    }
+    let mut cut = LOG_MAX_LINE_BYTES;
+    while !line.is_char_boundary(cut) {
+        cut -= 1;
+    }
+    format!("{} [... {} more bytes]", &line[..cut], line.len() - cut)
 }
 
 /// How often a running task's log is saved to panel.db. Without this the log
@@ -117,9 +207,10 @@ impl TaskTracker {
 
         let live = Arc::new(Mutex::new(LiveTask {
             state,
-            log: Vec::new(),
+            log: BoundedLog::default(),
             tx,
             last_flush: std::time::Instant::now(),
+            saved: 0,
         }));
         self.live.lock().unwrap().insert(id.clone(), live.clone());
 
@@ -135,7 +226,7 @@ impl TaskTracker {
         if let Some(live) = self.live.lock().unwrap().get(id).cloned() {
             let g = live.lock().unwrap();
             let mut state = g.state.clone();
-            state.log = g.log.clone();
+            state.log = g.log.lines();
             return Some(state);
         }
         self.db
@@ -156,11 +247,14 @@ impl TaskTracker {
             .flatten()
     }
 
+    /// The log so far and every line from here on. The snapshot is what
+    /// `get` and the stored row hold (see BoundedLog::lines); the lines that
+    /// follow are the ones `log` keeps, cut the same way.
     pub fn subscribe(&self, id: &str) -> Option<(TaskState, broadcast::Receiver<TaskEvent>)> {
         let live = self.live.lock().unwrap().get(id).cloned()?;
         let g = live.lock().unwrap();
         let mut state = g.state.clone();
-        state.log = g.log.clone();
+        state.log = g.log.lines();
         Some((state, g.tx.subscribe()))
     }
 
@@ -328,24 +422,35 @@ impl TaskHandle {
         let line = line.into();
         let flush = {
             let mut g = self.inner.lock().unwrap();
-            g.log.push(line.clone());
-            let _ = g.tx.send(TaskEvent::Line { text: line });
+            // A message of several lines (an error with its hint, a
+            // command's stderr) is that many log lines: it is stored joined
+            // by newlines and read back split on them anyway, and the limits
+            // then apply to each line, not to the message as a whole.
+            for part in line.split('\n') {
+                let part = cap_line(part);
+                let _ = g.tx.send(TaskEvent::Line { text: part.clone() });
+                g.log.push(part);
+            }
             if g.last_flush.elapsed() >= LOG_FLUSH_INTERVAL {
                 g.last_flush = std::time::Instant::now();
-                Some(g.log.join("\n"))
+                Some((g.log.blob(), g.log.pushed))
             } else {
                 None
             }
         };
         // Outside the task lock: a slow write must not stall log producers.
-        if let Some(log_blob) = flush {
-            let _ = self.tracker.db.with(|conn| {
+        if let Some((log_blob, pushed)) = flush {
+            let written = self.tracker.db.with(|conn| {
                 conn.execute(
                     "UPDATE tasks SET log_blob = ?1 WHERE id = ?2",
                     params![log_blob, self.id],
                 )
                 .map(|_| ())
             });
+            if written.is_ok() {
+                let mut g = self.inner.lock().unwrap();
+                g.saved = g.saved.max(pushed);
+            }
         }
     }
 
@@ -360,27 +465,43 @@ impl TaskHandle {
             let _ = g.tx.send(TaskEvent::Done {
                 status: status.clone(),
             });
-            (g.log.join("\n"), g.state.kind.clone(), log_tail(&g.log))
+            (unsaved_log(&g), g.state.kind.clone(), g.log.last(NOTIFY_TAIL_LINES))
         };
         if !success {
             crate::notify::task_failed(&self.tracker.db, &kind, &self.id, &tail);
         }
-
-        let _ = self.tracker.db.with(|conn| {
-            conn.execute(
-                "UPDATE tasks SET status = ?1, finished_at = ?2, log_blob = ?3 WHERE id = ?4",
-                params![status.as_str(), now.to_rfc3339(), log_blob, self.id],
-            )
-            .map(|_| ())
-        });
-
+        self.tracker.settle(&self.id, status.as_str(), now, log_blob);
         self.tracker.live.lock().unwrap().remove(&self.id);
     }
 }
 
-/// The last lines of a task log, for failure notifications.
-fn log_tail(log: &[String]) -> String {
-    log[log.len().saturating_sub(15)..].join("\n")
+/// How many of a failed task's last log lines go into its notification.
+const NOTIFY_TAIL_LINES: usize = 15;
+
+/// The log to store when a task ends, or None when panel.db already has
+/// every line of it.
+fn unsaved_log(task: &LiveTask) -> Option<String> {
+    (task.saved != task.log.pushed).then(|| task.log.blob())
+}
+
+impl TaskTracker {
+    /// Store a task's final status, and its log unless the stored one is
+    /// already complete.
+    fn settle(&self, id: &str, status: &str, at: DateTime<Utc>, log_blob: Option<String>) {
+        let _ = self.db.with(|conn| {
+            match &log_blob {
+                Some(log_blob) => conn.execute(
+                    "UPDATE tasks SET status = ?1, finished_at = ?2, log_blob = ?3 WHERE id = ?4",
+                    params![status, at.to_rfc3339(), log_blob, id],
+                ),
+                None => conn.execute(
+                    "UPDATE tasks SET status = ?1, finished_at = ?2 WHERE id = ?3",
+                    params![status, at.to_rfc3339(), id],
+                ),
+            }
+            .map(|_| ())
+        });
+    }
 }
 
 impl Drop for TaskHandle {
@@ -399,16 +520,10 @@ impl Drop for TaskHandle {
             let _ = g.tx.send(TaskEvent::Done {
                 status: TaskStatus::Failed,
             });
-            (g.log.join("\n"), g.state.kind.clone(), log_tail(&g.log))
+            (unsaved_log(&g), g.state.kind.clone(), g.log.last(NOTIFY_TAIL_LINES))
         };
         crate::notify::task_failed(&self.tracker.db, &kind, &self.id, &tail);
-        let _ = self.tracker.db.with(|conn| {
-            conn.execute(
-                "UPDATE tasks SET status = 'failed', finished_at = ?1, log_blob = ?2 WHERE id = ?3",
-                params![now.to_rfc3339(), log_blob, self.id],
-            )
-            .map(|_| ())
-        });
+        self.tracker.settle(&self.id, "failed", now, log_blob);
         self.tracker.live.lock().unwrap().remove(&self.id);
     }
 }
@@ -437,4 +552,136 @@ fn row_to_state(row: &rusqlite::Row<'_>) -> rusqlite::Result<TaskState> {
             log_blob.split('\n').map(String::from).collect()
         },
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A TaskTracker on a throwaway panel.db.
+    fn tracker() -> (tempfile::TempDir, TaskTracker) {
+        let dir = tempfile::tempdir().unwrap();
+        let db = PanelDb::open(&dir.path().join("panel.db")).unwrap();
+        db.with(|c| {
+            c.execute_batch(
+                "CREATE TABLE tasks (id TEXT PRIMARY KEY, kind TEXT NOT NULL, status TEXT NOT NULL,
+                 started_at TEXT NOT NULL, finished_at TEXT, log_blob TEXT NOT NULL DEFAULT '');",
+            )
+        })
+        .unwrap();
+        (dir, TaskTracker::new(db))
+    }
+
+    fn stored_log(tasks: &TaskTracker, id: &str) -> String {
+        tasks
+            .db
+            .with(|c| c.query_row("SELECT log_blob FROM tasks WHERE id = ?1", params![id], |r| r.get(0)))
+            .unwrap()
+    }
+
+    /// Make the next `log` call write the log to panel.db.
+    fn flush_due(task: &TaskHandle) {
+        task.inner.lock().unwrap().last_flush = std::time::Instant::now() - LOG_FLUSH_INTERVAL * 2;
+    }
+
+    #[test]
+    fn a_long_log_keeps_its_beginning_and_its_end() {
+        let (_dir, tasks) = tracker();
+        let task = tasks.create("apps.update:web");
+        let total = LOG_HEAD_LINES + LOG_TAIL_LINES + 4_321;
+        for i in 0..total {
+            task.log(format!("line {i}"));
+        }
+        let live = tasks.get(&task.id).unwrap().log;
+        assert_eq!(live.len(), LOG_HEAD_LINES + LOG_TAIL_LINES + 1);
+        assert_eq!(live[0], "line 0");
+        assert_eq!(live[LOG_HEAD_LINES - 1], format!("line {}", LOG_HEAD_LINES - 1));
+        assert!(live[LOG_HEAD_LINES].contains("4321 lines left out"), "{}", live[LOG_HEAD_LINES]);
+        assert_eq!(live[LOG_HEAD_LINES + 1], format!("line {}", total - LOG_TAIL_LINES));
+        assert_eq!(live.last().unwrap(), &format!("line {}", total - 1));
+
+        // A stream that connects now replays the same lines, and so does the
+        // stored row once the task has ended.
+        let (snapshot, _rx) = tasks.subscribe(&task.id).unwrap();
+        assert_eq!(snapshot.log, live);
+        let id = task.id.clone();
+        task.finish(true);
+        assert_eq!(tasks.get(&id).unwrap().log, live);
+    }
+
+    #[test]
+    fn a_short_log_is_kept_whole() {
+        let (_dir, tasks) = tracker();
+        let task = tasks.create("ssl.issue:example.com");
+        for i in 0..50 {
+            task.log(format!("line {i}"));
+        }
+        let live = tasks.get(&task.id).unwrap().log;
+        assert_eq!(live.len(), 50);
+        assert!(!live.iter().any(|l| l.contains("left out")));
+    }
+
+    #[test]
+    fn the_bytes_a_log_holds_are_bounded_too() {
+        let mut log = BoundedLog::default();
+        let line = "x".repeat(LOG_MAX_LINE_BYTES);
+        for _ in 0..20_000 {
+            log.push(cap_line(&line));
+        }
+        let held: usize = log.lines().iter().map(String::len).sum();
+        assert!(held <= LOG_HEAD_BYTES + LOG_TAIL_BYTES + 200, "{held}");
+        assert!(log.head.len() < LOG_HEAD_LINES && log.tail.len() < LOG_TAIL_LINES);
+        assert_eq!(log.head.len() as u64 + log.tail.len() as u64 + log.omitted, 20_000);
+    }
+
+    #[test]
+    fn one_line_is_cut_the_same_in_the_stream_and_in_the_stored_log() {
+        let (_dir, tasks) = tracker();
+        let task = tasks.create("apps.create:web");
+        let (_, mut rx) = tasks.subscribe(&task.id).unwrap();
+        // 'é' is two bytes: the cut must not land inside one.
+        let long = "é".repeat(LOG_MAX_LINE_BYTES);
+        task.log(format!("first\n{long}\nlast"));
+        let mut streamed = Vec::new();
+        while let Ok(TaskEvent::Line { text }) = rx.try_recv() {
+            streamed.push(text);
+        }
+        assert_eq!(streamed.len(), 3);
+        assert_eq!((streamed[0].as_str(), streamed[2].as_str()), ("first", "last"));
+        assert!(streamed[1].len() < LOG_MAX_LINE_BYTES + 40);
+        assert!(streamed[1].ends_with(&format!("[... {LOG_MAX_LINE_BYTES} more bytes]")), "{}", streamed[1]);
+        assert_eq!(tasks.get(&task.id).unwrap().log, streamed);
+        let id = task.id.clone();
+        task.finish(true);
+        assert_eq!(tasks.get(&id).unwrap().log, streamed);
+    }
+
+    #[test]
+    fn a_log_with_nothing_new_is_not_written_again() {
+        let (_dir, tasks) = tracker();
+        let task = tasks.create("apps.update:web");
+        task.log("one");
+        assert_eq!(stored_log(&tasks, &task.id), "");
+        flush_due(&task);
+        task.log("two");
+        assert_eq!(stored_log(&tasks, &task.id), "one\ntwo");
+        // Nothing was logged since: the row's log is left as it is.
+        let id = task.id.clone();
+        tasks
+            .db
+            .with(|c| c.execute("UPDATE tasks SET log_blob = 'untouched' WHERE id = ?1", params![id]))
+            .unwrap();
+        task.finish(true);
+        assert_eq!(stored_log(&tasks, &id), "untouched");
+        assert_eq!(tasks.get(&id).unwrap().status, TaskStatus::Succeeded);
+
+        // A line after the last write is stored when the task ends.
+        let task = tasks.create("apps.update:web");
+        flush_due(&task);
+        task.log("one");
+        task.log("two");
+        let id = task.id.clone();
+        task.finish(true);
+        assert_eq!(stored_log(&tasks, &id), "one\ntwo");
+    }
 }
