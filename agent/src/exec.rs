@@ -220,7 +220,16 @@ where
         .stderr(Stdio::piped())
         .spawn()
         .map_err(AgentError::Io)?;
+    let status = stream_child(&mut child, &mut on_line).await?;
+    Ok(status.code().unwrap_or(-1))
+}
 
+/// Hand the child's stdout and stderr to `on_line` a line at a time, until
+/// both end or DRAIN_AFTER_EXIT after it exits.
+async fn stream_child<F>(child: &mut Child, on_line: &mut F) -> AgentResult<ExitStatus>
+where
+    F: FnMut(&str) + Send,
+{
     let stdout = child.stdout.take().expect("stdout piped");
     let stderr = child.stderr.take().expect("stderr piped");
 
@@ -269,11 +278,155 @@ where
         }
     }
 
-    let status = match exit {
-        Some(s) => s,
-        None => child.wait().await.map_err(AgentError::Io)?,
-    };
-    Ok(status.code().unwrap_or(-1))
+    match exit {
+        Some(s) => Ok(s),
+        None => child.wait().await.map_err(AgentError::Io),
+    }
+}
+
+/// How a `run_streaming_limited` command ended.
+#[derive(Debug, PartialEq, Eq)]
+pub enum Ended {
+    /// On its own, with this exit code (-1: a signal ended it).
+    Exited(i32),
+    /// It was still running at the limit and was stopped.
+    TimedOut,
+}
+
+/// How long a process group gets between SIGTERM and SIGKILL.
+const GROUP_KILL_GRACE: Duration = Duration::from_secs(5);
+
+/// The process group of a command started by `run_streaming_limited`. Dropped
+/// while the command may still be running (its caller gave up, or reading its
+/// output failed), the whole group gets SIGTERM, and SIGKILL after `grace`.
+///
+/// kill_on_drop reaches the one process the agent started. For a build that
+/// is `sudo`, and SIGKILL is the one signal sudo cannot pass on: npm and
+/// everything it had started ran on with nobody watching. The terminal's
+/// ProcessGroup (terminal.rs) is the same idea; this one sends SIGTERM first
+/// so npm can stop its own children.
+struct ProcessGroup {
+    pgid: Option<u32>,
+    grace: Duration,
+}
+
+impl ProcessGroup {
+    fn signal(&self, kill: bool) {
+        if let Some(pgid) = self.pgid {
+            signal_group(pgid, kill);
+        }
+    }
+
+    /// The command was reaped: there is nothing left to stop.
+    fn disarm(&mut self) {
+        self.pgid = None;
+    }
+}
+
+impl Drop for ProcessGroup {
+    fn drop(&mut self) {
+        let Some(pgid) = self.pgid.take() else {
+            return;
+        };
+        signal_group(pgid, false);
+        // A plain thread: this also runs while the runtime is shutting down.
+        let grace = self.grace;
+        let later = std::thread::Builder::new().spawn(move || {
+            std::thread::sleep(grace);
+            signal_group(pgid, true);
+        });
+        if later.is_err() {
+            signal_group(pgid, true);
+        }
+    }
+}
+
+#[cfg(unix)]
+fn signal_group(pgid: u32, kill: bool) {
+    use nix::sys::signal::{killpg, Signal};
+    use nix::unistd::Pid;
+    let signal = if kill { Signal::SIGKILL } else { Signal::SIGTERM };
+    // ESRCH: every process of the group has already exited.
+    let _ = killpg(Pid::from_raw(pgid as i32), signal);
+}
+
+#[cfg(not(unix))]
+fn signal_group(_pgid: u32, _kill: bool) {}
+
+/// `run_streaming_envs` for a command that must not run forever and whose
+/// children must not outlive it. It runs in a process group of its own; one
+/// still running after `limit` is stopped, the whole group, with SIGTERM and
+/// then SIGKILL, and so is one whose returned future is dropped. A command
+/// that ends on its own is left as `run_streaming_envs` leaves it.
+pub async fn run_streaming_limited<S, I, E, K, V, F>(
+    cmd: &str,
+    args: I,
+    envs: E,
+    limit: Duration,
+    on_line: F,
+) -> AgentResult<Ended>
+where
+    S: AsRef<OsStr>,
+    I: IntoIterator<Item = S>,
+    E: IntoIterator<Item = (K, V)>,
+    K: AsRef<OsStr>,
+    V: AsRef<OsStr>,
+    F: FnMut(&str) + Send,
+{
+    run_streaming_group(cmd, args, envs, limit, GROUP_KILL_GRACE, on_line).await
+}
+
+async fn run_streaming_group<S, I, E, K, V, F>(
+    cmd: &str,
+    args: I,
+    envs: E,
+    limit: Duration,
+    grace: Duration,
+    mut on_line: F,
+) -> AgentResult<Ended>
+where
+    S: AsRef<OsStr>,
+    I: IntoIterator<Item = S>,
+    E: IntoIterator<Item = (K, V)>,
+    K: AsRef<OsStr>,
+    V: AsRef<OsStr>,
+    F: FnMut(&str) + Send,
+{
+    let mut command = command(cmd, args);
+    for (k, v) in envs {
+        command.env(k, v);
+    }
+    // Group id = the child's pid, so one signal reaches everything it starts.
+    #[cfg(unix)]
+    command.process_group(0);
+    let mut child = command
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(AgentError::Io)?;
+    let mut group = ProcessGroup { pgid: child.id(), grace };
+
+    {
+        let streamed = stream_child(&mut child, &mut on_line);
+        tokio::pin!(streamed);
+        if let Ok(status) = tokio::time::timeout(limit, &mut streamed).await {
+            // An error leaves `group` armed, and its drop stops the command.
+            let status = status?;
+            group.disarm();
+            return Ok(Ended::Exited(status.code().unwrap_or(-1)));
+        }
+        group.signal(false);
+        // What it prints while it shuts down still reaches the log.
+        let _ = tokio::time::timeout(grace, &mut streamed).await;
+    }
+    // Whatever ignored SIGTERM. The child is not reaped before this, or was
+    // reaped just now, so its pid (the group id) has not been handed out again.
+    group.signal(true);
+    // By pid as well, should it have left the group.
+    let _ = child.kill().await;
+    group.disarm();
+    Ok(Ended::TimedOut)
 }
 
 /// The line in `buf` without its `\n` or `\r\n`, with bytes that are not
@@ -292,7 +445,7 @@ fn take_line(buf: &mut Vec<u8>) -> String {
 
 #[cfg(all(test, unix))]
 mod tests {
-    use super::{run, run_envs, run_streaming, run_with_input};
+    use super::{run, run_envs, run_streaming, run_streaming_group, run_streaming_limited, run_with_input, Ended};
     use std::time::{Duration, Instant};
 
     #[tokio::test]
@@ -342,6 +495,101 @@ mod tests {
         // One the caller passes explicitly still arrives.
         let out = run_envs("sh", show, [("RESTIC_PASSWORD", "explicit")]).await.unwrap();
         assert_eq!(out.stdout.trim(), "none explicit");
+    }
+
+    /// Whether `pid` is still running (a zombie nobody reaped is not).
+    fn running(pid: &str) -> bool {
+        match std::fs::read_to_string(format!("/proc/{pid}/stat")) {
+            // "<pid> (<comm>) <state> ...": the state follows the last ')'.
+            Ok(stat) => !stat.rsplit(')').next().unwrap_or("").trim_start().starts_with('Z'),
+            Err(_) => false,
+        }
+    }
+
+    async fn gone(pid: &str) -> bool {
+        for _ in 0..50 {
+            if !running(pid) {
+                return true;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        false
+    }
+
+    const NO_ENV: [(&str, &str); 0] = [];
+
+    #[tokio::test]
+    async fn a_command_past_its_limit_is_stopped_with_its_children() {
+        // sh starts a child and waits for it, as sudo does with npm, and npm
+        // with a build that watches for changes.
+        let mut lines = Vec::new();
+        let started = Instant::now();
+        let ended = run_streaming_limited(
+            "sh",
+            ["-c", "sleep 300 & echo $!; wait"],
+            NO_ENV,
+            Duration::from_millis(400),
+            |l| lines.push(l.to_string()),
+        )
+        .await
+        .unwrap();
+        assert_eq!(ended, Ended::TimedOut);
+        assert!(started.elapsed() < Duration::from_secs(20));
+        assert!(gone(&lines[0]).await, "the child {} outlived the command", lines[0]);
+    }
+
+    #[tokio::test]
+    async fn children_that_ignore_sigterm_are_killed() {
+        let mut lines = Vec::new();
+        let ended = run_streaming_group(
+            "sh",
+            ["-c", "trap '' TERM; sleep 300 & echo $!; wait; sleep 300"],
+            NO_ENV,
+            Duration::from_millis(400),
+            Duration::from_millis(300),
+            |l| lines.push(l.to_string()),
+        )
+        .await
+        .unwrap();
+        assert_eq!(ended, Ended::TimedOut);
+        assert!(gone(&lines[0]).await, "the child {} outlived the command", lines[0]);
+    }
+
+    #[tokio::test]
+    async fn dropping_a_limited_command_stops_its_children() {
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<String>();
+        let run = tokio::spawn(async move {
+            run_streaming_limited(
+                "sh",
+                ["-c", "sleep 300 & echo $!; wait"],
+                NO_ENV,
+                Duration::from_secs(300),
+                move |l| {
+                    let _ = tx.send(l.to_string());
+                },
+            )
+            .await
+        });
+        let pid = rx.recv().await.unwrap();
+        assert!(running(&pid));
+        run.abort();
+        assert!(gone(&pid).await, "the child {pid} outlived the dropped command");
+    }
+
+    #[tokio::test]
+    async fn a_limited_command_that_ends_in_time_reports_its_exit_code() {
+        let mut lines = Vec::new();
+        let ended = run_streaming_limited(
+            "sh",
+            ["-c", "echo $WHO; echo err >&2; exit 7"],
+            [("WHO", "builder")],
+            Duration::from_secs(30),
+            |l| lines.push(l.to_string()),
+        )
+        .await
+        .unwrap();
+        assert_eq!(ended, Ended::Exited(7));
+        assert!(lines.contains(&"builder".to_string()) && lines.contains(&"err".to_string()));
     }
 
     #[tokio::test]

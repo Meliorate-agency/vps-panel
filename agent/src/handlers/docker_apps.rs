@@ -52,8 +52,8 @@ const START_WAIT_SECS: u64 = 90;
 const REGISTRY_TIMEOUT_SECS: u64 = 10;
 const APPS_BASE_DIR: &str = "/srv/apps";
 /// A build that runs longer is stopped (the CLI is killed; the old image
-/// keeps running).
-const BUILD_TIMEOUT_SECS: u64 = 30 * 60;
+/// keeps running). A Node app's npm steps have the same limit (apps.rs).
+pub(crate) const BUILD_TIMEOUT_SECS: u64 = 30 * 60;
 const MAX_BUILD_ARGS: usize = 50;
 const COMMIT_LABEL: &str = "vps-panel.commit";
 

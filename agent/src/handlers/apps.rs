@@ -1264,30 +1264,50 @@ fn is_safe_git_url(url: &str) -> bool {
         || (url.contains('@') && url.contains(':') && !url.starts_with('/'))
 }
 
+/// How long one npm step (install, build) of a deploy or update may run, the
+/// same as a Docker build. A `build` script that watches for changes (`next
+/// dev`, `tsc --watch`) never ends: its task ran until the agent restarted,
+/// and until then every later deploy or update of the app was refused.
+const NPM_STEP_LIMIT: Duration = Duration::from_secs(docker_apps::BUILD_TIMEOUT_SECS);
+
 /// Run a subprocess and stream every line of stdout/stderr to the task
 /// log. Returns Err if the exit code is non-zero — caller's `?` aborts
 /// the deploy flow and `TaskHandle::drop` marks the task as failed.
+/// `what` names the step in the log when it is stopped after `limit`, with
+/// everything it started (exec::run_streaming_limited).
 async fn stream_subprocess<S, I>(
     cmd: &str,
     args: I,
+    what: &str,
+    limit: Duration,
     task: &crate::ipc::tasks::TaskHandle,
 ) -> AgentResult<()>
 where
     S: AsRef<std::ffi::OsStr>,
     I: IntoIterator<Item = S>,
 {
-    let code = exec::run_streaming(cmd, args, |line| {
+    let ended = exec::run_streaming_limited(cmd, args, Vec::<(&str, &str)>::new(), limit, |line| {
         task.log(line.to_string());
     })
     .await?;
-    if code != 0 {
-        return Err(AgentError::Subprocess {
+    match ended {
+        exec::Ended::Exited(0) => Ok(()),
+        exec::Ended::Exited(code) => Err(AgentError::Subprocess {
             cmd: cmd.to_string(),
             code,
             stderr: format!("{cmd} exited with code {code} (see task log above)"),
-        });
+        }),
+        exec::Ended::TimedOut => {
+            let minutes = limit.as_secs() / 60;
+            task.log(format!(
+                "=== {what} was still running after {minutes} minutes and was stopped ==="
+            ));
+            Err(AgentError::Other(anyhow::anyhow!(
+                "{what} ran longer than {minutes} minutes and was stopped. A script that keeps \
+                 running (a dev server, a build in watch mode) never finishes: it has to exit when it is done"
+            )))
+        }
     }
-    Ok(())
 }
 
 /// POSIX single-quote shell escape. Safe for paths the agent constructs
@@ -1338,15 +1358,33 @@ async fn run_npm(
         script.push(' ');
         script.push_str(&shell_quote(arg));
     }
+    // "npm ci", "npm run build": the arguments after `--prefix <dir>`.
+    let what = format!("npm {}", npm_step_name(args));
     if cfg.apps_uid == 0 {
-        return stream_subprocess("sh", ["-c", script.as_str()], task).await;
+        return stream_subprocess("sh", ["-c", script.as_str()], &what, NPM_STEP_LIMIT, task).await;
     }
     stream_subprocess(
         "sudo",
         ["-u", "apps", "-H", "sh", "-c", script.as_str()],
+        &what,
+        NPM_STEP_LIMIT,
         task,
     )
     .await
+}
+
+/// `["--prefix", dir, "run", "build"]` -> `run build`; options are left out.
+fn npm_step_name(args: &[&str]) -> String {
+    let mut words = Vec::new();
+    let mut args = args.iter();
+    while let Some(arg) = args.next() {
+        if *arg == "--prefix" {
+            args.next();
+        } else if !arg.starts_with('-') {
+            words.push(*arg);
+        }
+    }
+    words.join(" ")
 }
 
 pub(crate) async fn rollback_unit(unit_path: &std::path::Path) {
@@ -3267,6 +3305,13 @@ mod tests {
         assert_eq!(std::fs::read_to_string(&module).unwrap(), "good");
         again.discard().await;
         task.finish(true);
+    }
+
+    #[test]
+    fn npm_steps_are_named_without_their_options() {
+        assert_eq!(npm_step_name(&["--prefix", "/srv/apps/web", "ci", "--no-audit", "--no-fund"]), "ci");
+        assert_eq!(npm_step_name(&["--prefix", "/srv/apps/web", "run", "build"]), "run build");
+        assert_eq!(npm_step_name(&["--prefix", "/srv/apps/web", "install", "--no-audit"]), "install");
     }
 
     #[test]
