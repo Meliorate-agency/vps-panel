@@ -755,40 +755,81 @@ pub async fn delete_mailbox(
     State(state): State<AppState>,
     Path(email): Path<String>,
 ) -> AgentResult<Json<DeleteMailboxResp>> {
+    const DELETE_ROW: &str = "DELETE FROM virtual_users WHERE email = ?";
     let mut conn = mail_conn(&state).await?;
     let parts = mailbox_parts(&email);
     let row_email = parts.as_ref().map(|(e, _, _)| e.clone()).unwrap_or_else(|_| email.clone());
-    conn.exec_drop("DELETE FROM virtual_users WHERE email = ?", (&row_email,))
-        .await?;
 
     // The row is only the login. The mail itself stays on disk, and a mailbox
     // created later under the same address would inherit it: move it to the
     // trash. An address that fails validation never gets a path built from it.
     let Ok((_, local, domain)) = parts else {
+        conn.exec_drop(DELETE_ROW, (&row_email,)).await?;
         tracing::warn!(email = %email, "mailbox deleted; address not path-safe, maildir left alone");
         return Ok(Json(DeleteMailboxResp { ok: true, maildir_trash_id: None }));
     };
     let maildir = PathBuf::from(format!("/var/vmail/{domain}/{local}"));
-    let is_real_dir = tokio::fs::symlink_metadata(&maildir)
-        .await
-        .map(|m| m.file_type().is_dir())
-        .unwrap_or(false);
-    if !is_real_dir {
+    if !is_real_dir(&maildir).await {
+        conn.exec_drop(DELETE_ROW, (&row_email,)).await?;
         return Ok(Json(DeleteMailboxResp { ok: true, maildir_trash_id: None }));
     }
+
+    // The mail first, the login after. The trash can refuse the maildir (on
+    // a mail volume of its own it has to be copied, and may not fit next to
+    // the trash), and with the row deleted first the mailbox was then gone
+    // while its mail stayed where the next mailbox under this address finds it.
     let trash_id = crate::handlers::files::trash_system_path(&maildir)
         .await
-        .map_err(|e| {
-            AgentError::Other(anyhow::anyhow!(
-                "mailbox {row_email} deleted, but its mail at {} could not be moved to the trash: {e}",
-                maildir.display()
-            ))
-        })?;
+        .map_err(|e| mail_not_trashed(&row_email, &maildir, e))?;
+    let mut deleted = conn.exec_drop(DELETE_ROW, (&row_email,)).await;
+    if deleted.is_err() {
+        // The connection may have gone stale while a large maildir was copied.
+        if let Ok(mut fresh) = mail_conn(&state).await {
+            deleted = fresh.exec_drop(DELETE_ROW, (&row_email,)).await;
+        }
+    }
+    if let Err(e) = deleted {
+        return Err(AgentError::Other(anyhow::anyhow!(
+            "The mail of {row_email} is in the trash now (Files > Trash, entry {trash_id}), but the mailbox itself could not be deleted: {e}. \
+             It still exists and can still log in, without its mail. Delete it again to finish, or restore its mail from Files > Trash."
+        )));
+    }
+    // Mail that arrived between the two steps made Dovecot create the folder
+    // again. Nothing more can arrive now.
+    if is_real_dir(&maildir).await {
+        match crate::handlers::files::trash_system_path(&maildir).await {
+            Ok(id) => tracing::info!(email = %row_email, trash_id = %id, "mail delivered while the mailbox was being deleted moved to trash"),
+            Err(e) => tracing::warn!(email = %row_email, error = %e, "mail delivered while the mailbox was being deleted is still at {}", maildir.display()),
+        }
+    }
     tracing::info!(email = %row_email, trash_id = %trash_id, "mailbox deleted; maildir moved to trash");
     Ok(Json(DeleteMailboxResp {
         ok: true,
         maildir_trash_id: Some(trash_id),
     }))
+}
+
+async fn is_real_dir(path: &std::path::Path) -> bool {
+    tokio::fs::symlink_metadata(path)
+        .await
+        .map(|m| m.file_type().is_dir())
+        .unwrap_or(false)
+}
+
+/// The maildir did not go to the trash, so nothing was deleted: say so. The
+/// trash's own refusal is a sentence for the operator and keeps its status.
+fn mail_not_trashed(email: &str, maildir: &std::path::Path, e: AgentError) -> AgentError {
+    match e {
+        AgentError::Conflict(why) => {
+            let why = why.trim();
+            let stop = if why.ends_with(['.', '!', '?']) { "" } else { "." };
+            AgentError::Conflict(format!("{why}{stop} The mailbox {email} was not deleted."))
+        }
+        e => AgentError::Other(anyhow::anyhow!(
+            "The mail of {email} at {} could not be moved to the trash, so the mailbox was not deleted: {e}",
+            maildir.display()
+        )),
+    }
 }
 
 async fn doveadm_hash(password: &str) -> AgentResult<String> {
@@ -817,7 +858,36 @@ fn random_password() -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{is_mail_helper_vhost, mail_helper_vhost_body, mailbox_parts};
+    use super::{is_mail_helper_vhost, mail_helper_vhost_body, mail_not_trashed, mailbox_parts};
+    use crate::error::AgentError;
+
+    #[test]
+    fn a_maildir_the_trash_did_not_take_leaves_the_mailbox_and_says_so() {
+        let maildir = std::path::Path::new("/var/vmail/example.com/jane");
+        // The trash's own refusal keeps its words and its status (409).
+        let refused = AgentError::Conflict(
+            "jane is 12 GB and the disk the trash is on has 3 GB free".into(),
+        );
+        match mail_not_trashed("jane@example.com", maildir, refused) {
+            AgentError::Conflict(msg) => assert_eq!(
+                msg,
+                "jane is 12 GB and the disk the trash is on has 3 GB free. The mailbox jane@example.com was not deleted."
+            ),
+            other => panic!("expected a conflict, got {other}"),
+        }
+        match mail_not_trashed("jane@example.com", maildir, AgentError::Conflict("No room. ".into())) {
+            AgentError::Conflict(msg) => {
+                assert_eq!(msg, "No room. The mailbox jane@example.com was not deleted.")
+            }
+            other => panic!("expected a conflict, got {other}"),
+        }
+        // Anything else that went wrong with the move.
+        let failed = AgentError::Io(std::io::Error::other("No space left on device"));
+        let msg = mail_not_trashed("jane@example.com", maildir, failed).to_string();
+        assert!(msg.contains("/var/vmail/example.com/jane could not be moved to the trash"), "{msg}");
+        assert!(msg.contains("so the mailbox was not deleted"), "{msg}");
+        assert!(msg.contains("No space left on device"), "{msg}");
+    }
 
     #[test]
     fn only_the_acme_helper_is_recognised_as_the_helper() {
