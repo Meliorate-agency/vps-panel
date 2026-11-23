@@ -8,14 +8,19 @@ const B = (x: number) => BigInt(x);
 export function parseIp(raw: string): Ip | null {
   const s = raw.trim();
   if (/^\d{1,3}(\.\d{1,3}){3}$/.test(s)) {
+    // No leading zeros: `010.1.1.1` is 10.1.1.1 to this parser, 8.1.1.1 to
+    // one that reads it as octal, and no address at all to the agent, which
+    // left it out of fail2ban's ignoreip after the panel had said "Saved".
+    if (!/^(0|[1-9]\d*)(\.(0|[1-9]\d*)){3}$/.test(s)) return null;
     const parts = s.split(".").map(Number);
     if (parts.some((p) => p > 255)) return null;
     return { v: 4, n: parts.reduce((acc, p) => (acc << B(8)) | B(p), B(0)) };
   }
   if (!s.includes(":")) return null;
   let str = s;
-  // Embedded IPv4 tail (::ffff:1.2.3.4) becomes two hex groups.
-  const tail4 = str.match(/(\d{1,3}(?:\.\d{1,3}){3})$/);
+  // Embedded IPv4 tail (::ffff:1.2.3.4) becomes two hex groups. It is a
+  // group of its own: `::f9.1.2.3` is not an address.
+  const tail4 = str.match(/:(\d{1,3}(?:\.\d{1,3}){3})$/);
   if (tail4) {
     const v4 = parseIp(tail4[1]);
     if (!v4) return null;
