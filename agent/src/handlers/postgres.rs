@@ -492,40 +492,41 @@ pub async fn grant(Json(req): Json<Grant>) -> AgentResult<Json<crate::ipc::OkRes
             "GRANT ALL PRIVILEGES ON ALL SEQUENCES IN SCHEMA public TO \"{}\";\n",
             req.user
         ));
-        sql.push_str(&format!(
-            "ALTER DEFAULT PRIVILEGES IN SCHEMA public \
-             GRANT ALL ON TABLES TO \"{}\";\n",
-            req.user
-        ));
-        sql.push_str(&format!(
-            "ALTER DEFAULT PRIVILEGES IN SCHEMA public \
-             GRANT ALL ON SEQUENCES TO \"{}\";\n",
-            req.user
-        ));
+        sql.push_str(&default_privileges("ALL", "TABLES", &req.user));
+        sql.push_str(&default_privileges("ALL", "SEQUENCES", &req.user));
     } else if !table_privs.is_empty() {
         let t = table_privs.join(", ");
         sql.push_str(&format!(
             "GRANT {t} ON ALL TABLES IN SCHEMA public TO \"{}\";\n",
             req.user
         ));
-        sql.push_str(&format!(
-            "ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT {t} ON TABLES TO \"{}\";\n",
-            req.user
-        ));
+        sql.push_str(&default_privileges(&t, "TABLES", &req.user));
         if table_privs.contains(&"INSERT") {
             // serial / identity columns draw from sequences.
             sql.push_str(&format!(
                 "GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public TO \"{}\";\n",
                 req.user
             ));
-            sql.push_str(&format!(
-                "ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT USAGE, SELECT ON SEQUENCES TO \"{}\";\n",
-                req.user
-            ));
+            sql.push_str(&default_privileges("USAGE, SELECT", "SEQUENCES", &req.user));
         }
     }
     psql_exec(&sql).await?;
     Ok(Json(crate::ipc::OkResponse::default()))
+}
+
+/// `ALTER DEFAULT PRIVILEGES` for what is made in schema public later, run
+/// inside the target database. Without FOR ROLE it covers only objects the
+/// role running it (postgres) creates. An app's tables are made by the
+/// database's owner, so a table added after the grant stayed out of reach of
+/// the granted role ("permission denied for table"); the second statement
+/// covers the owner.
+fn default_privileges(privs: &str, objects: &str, user: &str) -> String {
+    format!(
+        "ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT {privs} ON {objects} TO \"{user}\";\n\
+         SELECT format('ALTER DEFAULT PRIVILEGES FOR ROLE %I IN SCHEMA public GRANT {privs} ON {objects} TO \"{user}\"', r.rolname) \
+         FROM pg_database d JOIN pg_roles r ON r.oid = d.datdba \
+         WHERE d.datname = current_database() AND r.rolname NOT IN (current_user, '{user}') \\gexec\n"
+    )
 }
 
 pub async fn delete_role(Path(user): Path<String>) -> AgentResult<Json<crate::ipc::OkResponse>> {
@@ -718,4 +719,35 @@ fn random_password() -> String {
     let mut bytes = [0u8; 24];
     rand::thread_rng().fill_bytes(&mut bytes);
     base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn default_privileges_cover_postgres_and_the_database_owner() {
+        let sql = default_privileges("USAGE, SELECT", "SEQUENCES", "reporter");
+        let mut lines = sql.lines();
+        assert_eq!(
+            lines.next(),
+            Some("ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT USAGE, SELECT ON SEQUENCES TO \"reporter\";")
+        );
+        // psql runs each row of this query as a statement (\gexec): one for
+        // the owner, none when postgres or the granted role owns the database.
+        let owner = lines.next().unwrap();
+        assert!(owner.starts_with(
+            "SELECT format('ALTER DEFAULT PRIVILEGES FOR ROLE %I IN SCHEMA public GRANT USAGE, SELECT ON SEQUENCES TO \"reporter\"', r.rolname) FROM pg_database d"
+        ));
+        assert!(owner.ends_with("r.rolname NOT IN (current_user, 'reporter') \\gexec"));
+        assert_eq!(lines.next(), None);
+        assert!(sql.ends_with('\n'));
+    }
+
+    #[test]
+    fn an_empty_password_is_replaced_by_a_generated_one() {
+        assert_eq!(password_or_random(Some("s3cret".into())), "s3cret");
+        assert!(password_or_random(Some(String::new())).len() >= 24);
+        assert!(password_or_random(None).len() >= 24);
+    }
 }
