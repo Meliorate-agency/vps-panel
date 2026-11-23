@@ -126,8 +126,8 @@ fi
 # Default admin login email to admin@<mail-host> when not supplied. The
 # operator can change the ACME contact email separately through the wizard's
 # SSL email step (panel.acme_email setting overrides ACME_EMAIL from .env on
-# every issuance). The admin login email itself is rotatable later by editing
-# /etc/vps-panel/.env + restarting vps-panel.service.
+# every issuance). ADMIN_EMAIL and ADMIN_INITIAL_PASSWORD only seed the first
+# admin: once it exists the panel never reads them again.
 if [[ -z "$ADMIN_EMAIL" ]]; then
   ADMIN_EMAIL="admin@$MAIL_HOST"
 fi
@@ -1002,7 +1002,7 @@ fi
 cat <<EOF
 
   Panel URL    : $PANEL_URL
-  Admin email  : $ADMIN_EMAIL
+  Admin email  : $(grep ^ADMIN_EMAIL= "$ENV_FILE" | cut -d= -f2-)
   Admin pass   : $(grep ^ADMIN_INITIAL_PASSWORD= "$ENV_FILE" | cut -d= -f2-)
 
   $HOSTNAME_NOTE
@@ -1012,8 +1012,9 @@ cat <<EOF
   policy, optional apps, and finally a password change. The dashboard is
   gated until setup is finished.
 
-  Admin email and password live in $ENV_FILE; edit them there and restart
-  vps-panel.service to rotate.
+  The email and password above are the initial ones, from $ENV_FILE. The
+  panel reads them only while it has no admin; after that, change them in
+  the panel. A lost password: vps-panel-agent admin-reset --email <login email>
 
   Logs:
     journalctl -u vps-panel-agent.service -f
