@@ -9,7 +9,11 @@ import { config } from "@/lib/config";
 import { db } from "@/lib/db";
 import { pollSslTaskAndReconcile } from "@/lib/sslReconciler";
 import type { SslTaskResult } from "@/lib/sslTaskResult";
-import { ensureDnsZone } from "./_dns_ensure";
+import {
+  ensureDnsZone,
+  restoreSubdomainRecords,
+  subdomainAddressRecords,
+} from "./_dns_ensure";
 
 export type ActionResult<T = undefined> =
   | { ok: true; data?: T; taskId?: string; warnings?: string[] }
@@ -319,6 +323,12 @@ export async function replaceSiteAction(
   const collision = checkAppSubdomainCollision(domain);
   if (collision) return collision;
 
+  // The agent's site delete also removes the name's A/AAAA records from a
+  // panel-managed parent zone, and its create only writes them again while
+  // ordering a certificate. Remembered here so a replace with SSL off, or
+  // with a certificate that is kept, does not leave the site without DNS.
+  const dnsBefore = await subdomainAddressRecords(domain);
+
   try {
     await agent.sites.delete(domain);
   } catch (e: unknown) {
@@ -336,7 +346,7 @@ export async function replaceSiteAction(
   // If a stale panel row exists, clear it so the INSERT in doCreate doesn't collide.
   db().prepare(`DELETE FROM sites WHERE domain = ?`).run(domain);
 
-  return doCreate(
+  const created = await doCreate(
     s.userId,
     domain,
     { mode: route.mode, upstreamPort: route.upstreamPort, folderPath: route.folderPath },
@@ -344,6 +354,12 @@ export async function replaceSiteAction(
     issueSsl,
     "sites.replace",
   );
+  // With an SSL order running, its DNS check writes the records itself.
+  if (created.ok && !created.taskId && dnsBefore) {
+    const w = await restoreSubdomainRecords(s.userId, domain, dnsBefore);
+    if (w) return { ...created, warnings: [w] };
+  }
+  return created;
 }
 
 export async function adoptSiteAction(

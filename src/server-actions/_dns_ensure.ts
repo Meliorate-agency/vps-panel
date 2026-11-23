@@ -6,7 +6,7 @@
 // any client bundle without exposing them as actions.
 import "server-only";
 
-import { agent } from "@/lib/agent";
+import { agent, type RecordRow } from "@/lib/agent";
 import { writeAudit } from "@/lib/audit";
 import { db } from "@/lib/db";
 import { getServerAddress } from "@/lib/serverAddress";
@@ -32,6 +32,76 @@ export async function findParentManagedZone(
     if (zoneNames.has(candidate)) return candidate;
   }
   return null;
+}
+
+/** A name's A/AAAA records in its panel-managed parent zone. */
+export type SubdomainRecords = { zone: string; records: RecordRow[] };
+
+/**
+ * The A/AAAA records `domain` has in its parent PowerDNS zone: the ones the
+ * agent's site delete removes together with the vhost
+ * (cleanup_subdomain_records in agent/src/handlers/dns.rs). Null when the
+ * name is a zone's apex, has no parent zone here, or has no such record.
+ */
+export async function subdomainAddressRecords(domain: string): Promise<SubdomainRecords | null> {
+  const zones = await agent.dns.listZones().catch(() => []);
+  const zoneNames = new Set(zones.map((z) => z.name));
+  if (zoneNames.has(domain)) return null;
+  const zone = await findParentManagedZone(domain, zoneNames);
+  if (!zone) return null;
+  const all = await agent.dns.listRecords(zone).catch(() => [] as RecordRow[]);
+  const records = all.filter(
+    (r) => r.name === domain && (r.type === "A" || r.type === "AAAA"),
+  );
+  return records.length > 0 ? { zone, records } : null;
+}
+
+/**
+ * Put back the records `subdomainAddressRecords` saw before a site delete
+ * that are gone now. Never throws; returns a sentence for the operator when
+ * a record could not be restored.
+ */
+export async function restoreSubdomainRecords(
+  actorId: number,
+  domain: string,
+  saved: SubdomainRecords,
+): Promise<string | null> {
+  try {
+    const now = await agent.dns.listRecords(saved.zone);
+    const missing = saved.records.filter(
+      (r) => !now.some((n) => n.name === r.name && n.type === r.type && n.content === r.content),
+    );
+    for (const r of missing) {
+      const row = await agent.dns.createRecord(saved.zone, {
+        name: r.name,
+        type: r.type,
+        content: r.content,
+        ttl: r.ttl,
+      });
+      if (r.disabled) await agent.dns.updateRecord(row.id, { disabled: true });
+    }
+    if (missing.length > 0) {
+      writeAudit({
+        actorId,
+        action: "dns.records.create",
+        target: `${saved.zone}/${domain}`,
+        result: "ok",
+        message: `put back after the site was replaced: ${missing.map((r) => `${r.type} ${r.content}`).join(", ")}`,
+      });
+    }
+    return null;
+  } catch (e: unknown) {
+    const msg = e instanceof Error ? e.message : String(e);
+    writeAudit({
+      actorId,
+      action: "dns.records.create",
+      target: `${saved.zone}/${domain}`,
+      result: "error",
+      message: msg,
+    });
+    const wanted = saved.records.map((r) => `${r.type} ${r.content}`).join(", ");
+    return `The DNS records of ${domain} (${wanted}) were removed with the old site and could not be put back: ${msg}. Add them on the ${saved.zone} zone page.`;
+  }
 }
 
 /**
