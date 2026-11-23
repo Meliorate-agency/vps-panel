@@ -470,6 +470,103 @@ const MARIADB_DOCKER_DROPIN_PATH: &str = "/etc/mysql/mariadb.conf.d/99-vps-panel
 
 const MARIADB_DOCKER_DROPIN: &str = "# Managed by vps-panel — do not edit by hand.\n# Extends MariaDB bind so the Dockerised phpMyAdmin (PMA_HOST=host.docker.internal)\n# can reach MariaDB over the docker0 bridge. 172.17.0.1 is the bridge gateway and\n# is NOT reachable from outside the host. Keep UFW closed on 3306/tcp.\n\n[mysqld]\nbind-address = 127.0.0.1,172.17.0.1\n";
 
+// The bridge address in bind-address only exists once dockerd has created
+// docker0, and nothing made MariaDB wait for that: on a boot where mariadbd
+// reached its bind first it exited, and its own unit left it down (the
+// 10.11 package has Restart=on-abnormal: after a crash, not after an exit
+// code), PowerDNS and the mail lookups with it. While the panel's bind lists
+// the bridge, this drop-in starts MariaDB after Docker and starts it again
+// when it exits with an error.
+const MARIADB_UNIT_DROPIN_PATH: &str = "/etc/systemd/system/mariadb.service.d/10-vps-panel-docker.conf";
+
+const MARIADB_UNIT_DROPIN: &str = "\
+# Written by vps-panel-agent (quick_install.rs), and removed by it when
+# /etc/mysql/mariadb.conf.d/99-vps-panel-docker.cnf no longer lists the docker
+# bridge address (172.17.0.1) in bind-address. Do not edit by hand.
+#
+# That address exists only once Docker has created docker0, and mariadbd exits
+# when it cannot bind an address.
+[Unit]
+# Ordering only, no Wants= or Requires=: MariaDB starts as before when Docker
+# is stopped, disabled or removed.
+After=docker.service
+# The restarts below end: after 10 starts in 5 minutes the unit stays failed
+# (MariaDB's own unit does not restart on an exit code so that a mistake in
+# my.cnf cannot loop forever).
+StartLimitIntervalSec=300
+StartLimitBurst=10
+
+[Service]
+Restart=on-failure
+RestartSec=5s
+";
+
+/// Whether a MariaDB config drop-in makes mariadbd bind the docker bridge
+/// address itself (0.0.0.0 needs no docker0 to exist).
+fn mariadb_bind_lists_bridge(cnf: &str) -> bool {
+    cnf.lines().any(|line| {
+        let line = line.trim();
+        let Some((key, value)) = line.split_once('=') else {
+            return false;
+        };
+        matches!(key.trim(), "bind-address" | "bind_address")
+            && value.split(',').any(|addr| addr.trim() == "172.17.0.1")
+    })
+}
+
+/// Keep MARIADB_UNIT_DROPIN_PATH in step with the bind the panel wrote:
+/// there while it lists the bridge address, gone otherwise. daemon-reload
+/// when it changed; MariaDB itself is not restarted for it. Some(what was
+/// done) when something was.
+async fn sync_mariadb_docker_ordering() -> Option<&'static str> {
+    let cnf = tokio::fs::read_to_string(MARIADB_DOCKER_DROPIN_PATH)
+        .await
+        .unwrap_or_default();
+    let path = std::path::Path::new(MARIADB_UNIT_DROPIN_PATH);
+    let current = tokio::fs::read_to_string(path).await.ok();
+    let done = if mariadb_bind_lists_bridge(&cnf) {
+        if current.as_deref() == Some(MARIADB_UNIT_DROPIN) {
+            return None;
+        }
+        if let Err(e) = crate::fs_atomic::ensure_dir(path.parent().unwrap(), 0o755).await {
+            tracing::warn!(error = %e, "could not create the mariadb.service.d directory");
+            return None;
+        }
+        if let Err(e) = crate::fs_atomic::write(path, MARIADB_UNIT_DROPIN.as_bytes(), 0o644).await {
+            tracing::warn!(error = %e, "could not write {MARIADB_UNIT_DROPIN_PATH}");
+            return None;
+        }
+        "MariaDB now starts after Docker and is started again if it exits with an error"
+    } else {
+        current.as_ref()?;
+        if let Err(e) = crate::fs_atomic::remove_if_exists(path).await {
+            tracing::warn!(error = %e, "could not remove {MARIADB_UNIT_DROPIN_PATH}");
+            return None;
+        }
+        // Only if nothing else is in it.
+        let _ = tokio::fs::remove_dir(path.parent().unwrap()).await;
+        "MariaDB no longer waits for Docker: it does not listen on the docker bridge address"
+    };
+    let _ = exec::run("systemctl", ["daemon-reload"]).await;
+    Some(done)
+}
+
+/// Agent start: a server whose MariaDB already listens on the bridge address
+/// (phpMyAdmin installed before the drop-in existed) gets it on its next
+/// update, without MariaDB being restarted.
+async fn ensure_mariadb_docker_ordering() {
+    if let Some(done) = sync_mariadb_docker_ordering().await {
+        tracing::info!("{MARIADB_UNIT_DROPIN_PATH}: {done}");
+    }
+}
+
+/// `sync_mariadb_docker_ordering` from a task, said in its log.
+async fn sync_mariadb_docker_ordering_logged(task: &crate::ipc::tasks::TaskHandle) {
+    if let Some(done) = sync_mariadb_docker_ordering().await {
+        task.log(format!("{MARIADB_UNIT_DROPIN_PATH}: {done}"));
+    }
+}
+
 /// Ensure MariaDB listens on both 127.0.0.1 and the docker bridge gateway so a
 /// Dockerised phpMyAdmin can reach it. Idempotent — writes the drop-in only if
 /// it would change on disk, and restarts mariadb only when the file changed.
@@ -483,6 +580,7 @@ async fn ensure_mariadb_docker_bridge_bind(task: &crate::ipc::tasks::TaskHandle)
         task.log(format!(
             "{MARIADB_DOCKER_DROPIN_PATH} already up to date — MariaDB bridge bind unchanged"
         ));
+        sync_mariadb_docker_ordering_logged(task).await;
     } else if current.as_deref() == Some(MARIADB_PUBLIC_DROPIN) {
         // Set to Public on the MariaDB card: 0.0.0.0 covers the bridge.
         // Rewriting it here took MariaDB back to Local behind the operator's
@@ -490,6 +588,7 @@ async fn ensure_mariadb_docker_bridge_bind(task: &crate::ipc::tasks::TaskHandle)
         task.log(format!(
             "{MARIADB_DOCKER_DROPIN_PATH}: MariaDB listens on every interface, the docker bridge included"
         ));
+        sync_mariadb_docker_ordering_logged(task).await;
     } else {
         task.log(format!(
             "writing {MARIADB_DOCKER_DROPIN_PATH} so MariaDB accepts connections from the docker bridge"
@@ -502,6 +601,8 @@ async fn ensure_mariadb_docker_bridge_bind(task: &crate::ipc::tasks::TaskHandle)
             // Fall through anyway: the UFW step below is independent and
             // might still close a gap from a prior partial run.
         } else {
+            // Before the restart, so it already runs under the new ordering.
+            sync_mariadb_docker_ordering_logged(task).await;
             task.log("$ systemctl restart mariadb".to_string());
             let res = exec::run_streaming("systemctl", ["restart", "mariadb"], |l| {
                 task.log(l.to_string())
@@ -1292,6 +1393,9 @@ async fn write_roundcube_sieve_conf() -> bool {
 /// Agent start: a Roundcube installed before the filters gets them on the next
 /// update. The container restarts once so its entrypoint includes the file.
 pub async fn ensure_roundcube_managesieve() {
+    // Also at agent start, and from here because this is the start-up call
+    // this file has: see ensure_mariadb_docker_ordering.
+    ensure_mariadb_docker_ordering().await;
     if write_roundcube_sieve_conf().await {
         let _ = exec::run("docker", ["restart", "roundcube"]).await;
         tracing::info!("roundcube: filters and out of office on");
@@ -2261,6 +2365,7 @@ async fn set_mariadb_bind(
             task.log(format!(
                 "{MARIADB_DOCKER_DROPIN_PATH} already up to date for bind={bind} — no mariadb restart needed"
             ));
+            sync_mariadb_docker_ordering_logged(&task).await;
         } else {
             task.log(format!(
                 "rewriting {MARIADB_DOCKER_DROPIN_PATH} for bind={bind}"
@@ -2272,6 +2377,8 @@ async fn set_mariadb_bind(
                 task.finish(false);
                 return;
             }
+            // MariaDB waits for Docker exactly while its bind needs docker0.
+            sync_mariadb_docker_ordering_logged(&task).await;
             task.log("$ systemctl restart mariadb".to_string());
             let res = exec::run_streaming("systemctl", ["restart", "mariadb"], |l| {
                 task.log(l.to_string())
@@ -2970,6 +3077,30 @@ mod tests {
         let input = "port = 5432\n";
         let out = upsert_listen_addresses(input, "*");
         assert_eq!(out, "port = 5432\nlisten_addresses = '*'\n");
+    }
+
+    #[test]
+    fn mariadb_waits_for_docker_only_while_it_binds_the_bridge_address() {
+        assert!(mariadb_bind_lists_bridge(MARIADB_DOCKER_DROPIN));
+        assert!(!mariadb_bind_lists_bridge(MARIADB_PUBLIC_DROPIN));
+        assert!(!mariadb_bind_lists_bridge(MARIADB_LOCAL_DROPIN));
+        assert!(!mariadb_bind_lists_bridge(""));
+        assert!(mariadb_bind_lists_bridge("[mysqld]\nbind_address=172.17.0.1 , 127.0.0.1\n"));
+        // The comment in the public drop-in mentions no address; one that did
+        // would not count.
+        assert!(!mariadb_bind_lists_bridge("# bind-address = 127.0.0.1,172.17.0.1\n[mysqld]\nbind-address = 0.0.0.0\n"));
+        assert!(!mariadb_bind_lists_bridge("[mysqld]\nbind-address = 172.17.0.10\n"));
+
+        // Ordering without a dependency, and a restart that ends.
+        assert!(MARIADB_UNIT_DROPIN.contains("\nAfter=docker.service\n"));
+        assert!(!MARIADB_UNIT_DROPIN.contains("\nRequires=") && !MARIADB_UNIT_DROPIN.contains("\nWants="));
+        assert!(MARIADB_UNIT_DROPIN.contains("\nRestart=on-failure\n"));
+        assert!(MARIADB_UNIT_DROPIN.contains("\nStartLimitBurst="));
+        let unit_at = MARIADB_UNIT_DROPIN.find("[Unit]").unwrap();
+        let service_at = MARIADB_UNIT_DROPIN.find("[Service]").unwrap();
+        let after_at = MARIADB_UNIT_DROPIN.find("\nAfter=").unwrap();
+        let restart_at = MARIADB_UNIT_DROPIN.find("\nRestart=").unwrap();
+        assert!(unit_at < after_at && after_at < service_at && service_at < restart_at);
     }
 
     #[test]
