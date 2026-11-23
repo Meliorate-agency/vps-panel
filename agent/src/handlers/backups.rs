@@ -206,12 +206,25 @@ pub async fn run(
         for p in &paths { args.push(p.clone()); }
         let env = repo_env_owned(&cfg);
         let env_refs: Vec<(&str, &str)> = env.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect();
+        let mut status = StatusThrottle::default();
         let code = exec::run_streaming_envs("restic", args.iter().map(|s| s.as_str()), env_refs, |line| {
-            task.log(line.to_string());
+            if status.keep(line, std::time::Instant::now()) {
+                task.log(line.to_string());
+            }
         })
         .await
         .unwrap_or(-1);
-        if code != 0 {
+        if code == 3 {
+            // Exit 3: the snapshot was made, but some files could not be read
+            // (/srv/apps and Docker volumes are copied live, and files there
+            // change or vanish meanwhile). It still counts as a problem, but
+            // ending here skipped forget/prune: on a server where this
+            // happens every run, no snapshot was ever removed.
+            problems.push(
+                "restic could not read some files, so this snapshot is incomplete (see its error lines above)"
+                    .to_string(),
+            );
+        } else if code != 0 {
             task.log(format!("restic backup failed (exit {code})"));
             task.finish(false);
             return;
@@ -239,6 +252,32 @@ pub async fn run(
         }
     });
     Ok(Json(TaskAccepted { task_id }))
+}
+
+/// How often one of restic's progress lines goes into the task log.
+const STATUS_EVERY: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// `restic backup --json` prints a `status` line many times a second for as
+/// long as it runs. Each one went into the task log, and the whole log is
+/// rewritten to panel.db every two seconds: an hour-long first backup left
+/// hundreds of thousands of lines there and in the browser. One status line
+/// per STATUS_EVERY is kept; every other line (errors, the summary) always.
+#[derive(Default)]
+struct StatusThrottle {
+    last: Option<std::time::Instant>,
+}
+
+impl StatusThrottle {
+    fn keep(&mut self, line: &str, now: std::time::Instant) -> bool {
+        if !line.starts_with(r#"{"message_type":"status""#) {
+            return true;
+        }
+        if self.last.is_some_and(|t| now.duration_since(t) < STATUS_EVERY) {
+            return false;
+        }
+        self.last = Some(now);
+        true
+    }
 }
 
 /// Snapshots kept after each backup (restic forget).
@@ -413,7 +452,7 @@ fn repo_env_from_cfg(cfg: &crate::config::Config) -> Vec<(&'static str, String)>
 
 #[cfg(test)]
 mod tests {
-    use super::{validate_backup_path, validate_restore, RESTORE_ROOT};
+    use super::{validate_backup_path, validate_restore, StatusThrottle, RESTORE_ROOT, STATUS_EVERY};
 
     #[test]
     fn restores_only_into_a_new_folder_under_the_restore_root() {
@@ -430,6 +469,22 @@ mod tests {
             .unwrap()
             .starts_with("/srv/drive/restores/abc123-"));
         assert!(validate_restore("not-hex!", "").is_err());
+    }
+
+    #[test]
+    fn restic_progress_lines_are_thinned_out_and_nothing_else() {
+        let status = r#"{"message_type":"status","percent_done":0.5,"total_files":10,"files_done":5}"#;
+        let error = r#"{"message_type":"error","error":{},"during":"archival","item":"/srv/apps/x"}"#;
+        let summary = r#"{"message_type":"summary","files_new":3,"snapshot_id":"abc123"}"#;
+        let start = std::time::Instant::now();
+        let mut t = StatusThrottle::default();
+        assert!(t.keep(status, start));
+        assert!(!t.keep(status, start + STATUS_EVERY / 2));
+        assert!(t.keep(error, start + STATUS_EVERY / 2));
+        assert!(t.keep(summary, start + STATUS_EVERY / 2));
+        assert!(t.keep("plain text from restic", start + STATUS_EVERY / 2));
+        assert!(t.keep(status, start + STATUS_EVERY));
+        assert!(!t.keep(status, start + STATUS_EVERY + STATUS_EVERY / 2));
     }
 
     #[test]
