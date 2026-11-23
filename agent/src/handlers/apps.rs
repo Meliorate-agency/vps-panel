@@ -453,6 +453,8 @@ pub async fn git_status(
         None => Some(
             "no Repository URL: set it on the app page so the panel can check for updates".to_string(),
         ),
+        // Root fetches it, so it gets the same check as a deploy or update.
+        Some(url) if check_repo_url(&url).is_err() => check_repo_url(&url).err().map(|e| e.to_string()),
         Some(url) => {
             let gid = owner.as_ref().map(|o| o.gid);
             match tokio::time::timeout(
@@ -599,6 +601,9 @@ pub async fn create(
     if !(1024..65535).contains(&req.port) {
         return Err(AgentError::Invalid("port must be in 1024..65535".into()));
     }
+    // Rendered verbatim into WorkingDirectory= and ReadWritePaths= (the same
+    // injection as exec_start below), and handed to `chown -R` as root.
+    validate_source_dir(&req.source_dir)?;
     // SECURITY: exec_start is rendered verbatim into the unit's `ExecStart=` line
     // (AppServiceTemplate uses askama escape="none"). A newline/CR in the value
     // would let a caller append extra [Service] directives — e.g. inject
@@ -666,6 +671,20 @@ pub async fn create(
     });
 
     Ok(Json(TaskAccepted { task_id }))
+}
+
+/// Empty (a Docker app from a registry has no folder) or an absolute path
+/// with no control characters and no `..` segment.
+fn validate_source_dir(dir: &str) -> AgentResult<()> {
+    if dir.is_empty() {
+        return Ok(());
+    }
+    if !dir.starts_with('/') || dir.chars().any(|c| c.is_control()) || dir.split('/').any(|seg| seg == "..") {
+        return Err(AgentError::Invalid(
+            "source_dir must be an absolute path with no control characters or .. segments".into(),
+        ));
+    }
+    Ok(())
 }
 
 /// "node" or "docker" for a deploy request. An app keeps the runtime it was
@@ -1106,20 +1125,7 @@ pub(crate) async fn pull_source(
 ) -> AgentResult<()> {
     if let Some(repo_url) = repo_url {
         let repo_url = repo_url.trim();
-        if !is_safe_git_url(repo_url) {
-            return Err(AgentError::Invalid(format!(
-                "refusing repo URL {repo_url:?} - must be https://… or git@…:…"
-            )));
-        }
-        // Friendly check for the common mistake: writing the SSH config
-        // Host alias as the *user* (`<alias>@github.com:…`) instead of
-        // as the *host* (`git@<alias>:…`). github/gitlab/bitbucket all
-        // require the SSH user to be "git" — anything else fails with
-        // a confusing "Permission denied (publickey)" because the
-        // username never gets to the public-key auth phase.
-        if let Some(misuse_hint) = misused_alias_hint(repo_url) {
-            return Err(AgentError::Invalid(misuse_hint));
-        }
+        check_repo_url(repo_url)?;
         let src = PathBuf::from(source_dir);
         let is_existing_clone = src.join(".git").is_dir();
         // Root fetches into the app's mirror; the checkout is only ever
@@ -1188,11 +1194,37 @@ pub(crate) async fn pull_source(
     Ok(())
 }
 
+/// A Repository URL root's git may be given: is_safe_git_url, and not the
+/// alias-as-user mistake.
+fn check_repo_url(repo_url: &str) -> AgentResult<()> {
+    if !is_safe_git_url(repo_url) {
+        return Err(AgentError::Invalid(format!(
+            "refusing repo URL {repo_url:?} - must be https://… or git@…:…"
+        )));
+    }
+    // Friendly check for the common mistake: writing the SSH config
+    // Host alias as the *user* (`<alias>@github.com:…`) instead of
+    // as the *host* (`git@<alias>:…`). github/gitlab/bitbucket all
+    // require the SSH user to be "git" — anything else fails with
+    // a confusing "Permission denied (publickey)" because the
+    // username never gets to the public-key auth phase.
+    if let Some(misuse_hint) = misused_alias_hint(repo_url) {
+        return Err(AgentError::Invalid(misuse_hint));
+    }
+    Ok(())
+}
+
 /// Detect a repo URL of the form `<word>@<host>:<path>` where `<host>` is
 /// a well-known git provider (github / gitlab / bitbucket) and `<word>` is
 /// anything other than `git`. Returns a clear actionable error string.
 /// Returns None for any URL the agent should just hand to git as-is.
 fn misused_alias_hint(repo_url: &str) -> Option<String> {
+    // Only the scp-like form has the SSH user before the first `@`. In
+    // `ssh://git@gitlab.com:2222/owner/repo` and `https://user@github.com:443/…`
+    // the colon starts a port, and both were refused as a misplaced alias.
+    if repo_url.contains("://") {
+        return None;
+    }
     let providers = ["github.com", "gitlab.com", "bitbucket.org"];
     let at_pos = repo_url.find('@')?;
     let after_at = &repo_url[at_pos + 1..];
@@ -1787,14 +1819,7 @@ pub async fn update(
 
     let repo_url = stored_repo_url(&state, &name);
     if let Some(url) = repo_url.as_deref() {
-        if !is_safe_git_url(url) {
-            return Err(AgentError::Invalid(format!(
-                "refusing repo URL {url:?} - must be https://… or git@…:…"
-            )));
-        }
-        if let Some(misuse_hint) = misused_alias_hint(url) {
-            return Err(AgentError::Invalid(misuse_hint));
-        }
+        check_repo_url(url)?;
     }
 
     refuse_if_app_task_running(&state, &name)?;
@@ -1935,7 +1960,12 @@ pub(crate) async fn pull_checkout(
     normalize_checkout_owner(cfg, source_dir).await;
     let owner = app_git::owner_of(std::path::Path::new(source_dir))?;
     let url = match repo_url {
-        Some(u) => Some(u.to_string()),
+        // The URL saved on the app page is not checked when it is saved, and
+        // a Docker app's update came here with it unchecked: root fetches it.
+        Some(u) => {
+            check_repo_url(u)?;
+            Some(u.to_string())
+        }
         None => legacy_fetch_url(name, owner.as_ref(), source_dir).await,
     };
     task.log(format!("pulling latest in {source_dir}"));
@@ -3158,6 +3188,31 @@ mod tests {
         assert!(is_wipeable_app_dir("/srv/apps/shop/"));
         for bad in ["/srv/apps", "/srv/apps/", "/srv/apps/../etc", "/srv/apps/shop/../..", "/srv/appsx/shop", "/etc", "", "/srv/apps//"] {
             assert!(!is_wipeable_app_dir(bad), "{bad:?} must not be wiped");
+        }
+    }
+
+    #[test]
+    fn source_dirs_that_would_reach_the_unit_file() {
+        assert!(validate_source_dir("").is_ok());
+        assert!(validate_source_dir("/srv/apps/shop").is_ok());
+        for bad in ["srv/apps/shop", "/srv/apps/shop\nUser=root", "/srv/apps/../../etc", "/srv/apps/x\r"] {
+            assert!(validate_source_dir(bad).is_err(), "{bad:?} should be refused");
+        }
+    }
+
+    #[test]
+    fn repository_urls_root_may_fetch() {
+        for ok in [
+            "https://github.com/owner/repo.git",
+            "git@github.com:owner/repo.git",
+            "git@my-alias:owner/repo.git",
+            "ssh://git@gitlab.com:2222/owner/repo.git",
+            "https://user@github.com:443/owner/repo.git",
+        ] {
+            assert!(check_repo_url(ok).is_ok(), "{ok} should be accepted");
+        }
+        for bad in ["", "/root/repo", "file:///root/repo", "ext::sh -c id", "git://host/repo", "my-alias@github.com:owner/repo.git"] {
+            assert!(check_repo_url(bad).is_err(), "{bad:?} should be refused");
         }
     }
 }
