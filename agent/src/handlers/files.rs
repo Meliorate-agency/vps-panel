@@ -435,20 +435,104 @@ pub(crate) async fn resolve_read_file(
 async fn move_path(src: &Path, dst: &Path) -> AgentResult<()> {
     match fs::rename(src, dst).await {
         Ok(()) => Ok(()),
-        Err(e) if e.raw_os_error() == Some(18) => {
-            exec::run(
-                "mv",
-                [
-                    std::ffi::OsStr::new("-T"),
-                    src.as_os_str(),
-                    dst.as_os_str(),
-                ],
-            )
-            .await?;
-            Ok(())
+        Err(e) if e.raw_os_error() == Some(EXDEV) => move_across(src, dst).await,
+        Err(e) => Err(AgentError::Io(e)),
+    }
+}
+
+/// What `rename(2)` fails with between two filesystems.
+const EXDEV: i32 = 18;
+
+async fn move_across(src: &Path, dst: &Path) -> AgentResult<()> {
+    exec::run(
+        "mv",
+        [
+            std::ffi::OsStr::new("-T"),
+            src.as_os_str(),
+            dst.as_os_str(),
+        ],
+    )
+    .await?;
+    Ok(())
+}
+
+/// [`move_path`] into the trash. From another filesystem (`/home` or
+/// `/srv/drive` on its own volume) the move is a copy onto the one the trash
+/// is on, which is the system disk: trashing a large folder filled it. Such
+/// a move is refused when it does not fit; one within a filesystem is a
+/// rename and is not looked at.
+async fn move_to_trash(src: &Path, payload: &Path) -> AgentResult<()> {
+    match fs::rename(src, payload).await {
+        Ok(()) => Ok(()),
+        Err(e) if e.raw_os_error() == Some(EXDEV) => {
+            if let Some(free) = available_bytes(Path::new(TRASH_DIR)) {
+                check_fits_in_trash(src, free).await?;
+            }
+            move_across(src, payload).await
         }
         Err(e) => Err(AgentError::Io(e)),
     }
+}
+
+/// Refuse to copy `src` into the trash when that would leave its filesystem,
+/// which has `free` bytes left, with less than [`MIN_FREE_BYTES`].
+async fn check_fits_in_trash(src: &Path, free: u64) -> AgentResult<()> {
+    let room = free.saturating_sub(MIN_FREE_BYTES);
+    let tree = src.to_path_buf();
+    let size = tokio::task::spawn_blocking(move || tree_bytes(&tree, room))
+        .await
+        .map_err(|e| AgentError::Other(anyhow::anyhow!("measure {}: {e}", src.display())))?;
+    if size > room {
+        return Err(AgentError::Conflict(format!(
+            "{} is on another disk than the trash and does not fit there: the trash is on the \
+             system disk, which has {} MB free, and {} MB must stay free. Empty the trash or \
+             free space on the system disk first, or delete it from the terminal.",
+            src.display(),
+            free / (1024 * 1024),
+            MIN_FREE_BYTES / (1024 * 1024)
+        )));
+    }
+    Ok(())
+}
+
+/// Disk space `path` and everything in it takes, symlinks not followed. Stops
+/// once the total is over `stop_above`: the caller only has to know that it
+/// is too much, and the tree can hold millions of files.
+#[cfg(unix)]
+fn tree_bytes(path: &Path, stop_above: u64) -> u64 {
+    use std::os::unix::fs::MetadataExt;
+    let Ok(meta) = std::fs::symlink_metadata(path) else {
+        return 0;
+    };
+    let mut total = meta.blocks().saturating_mul(512);
+    let mut dirs = Vec::new();
+    if meta.is_dir() {
+        dirs.push(path.to_path_buf());
+    }
+    while let Some(dir) = dirs.pop() {
+        let Ok(rd) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        for entry in rd.flatten() {
+            // DirEntry::metadata does not follow a symlink.
+            let Ok(meta) = entry.metadata() else {
+                continue;
+            };
+            total = total.saturating_add(meta.blocks().saturating_mul(512));
+            if total > stop_above {
+                return total;
+            }
+            if meta.is_dir() {
+                dirs.push(entry.path());
+            }
+        }
+    }
+    total
+}
+
+#[cfg(not(unix))]
+fn tree_bytes(_path: &Path, _stop_above: u64) -> u64 {
+    0
 }
 
 // ---------------------------------------------------------------------------
@@ -1288,7 +1372,7 @@ async fn trash_path(root: &RootDef, src: &Path) -> AgentResult<String> {
     // shown, restored or purged.
     let moved = async {
         fs_atomic::write(&entry_dir.join("meta.json"), &body, 0o600).await?;
-        move_path(&src, &payload).await
+        move_to_trash(&src, &payload).await
     }
     .await;
     if let Err(e) = moved {
@@ -1659,6 +1743,71 @@ mod tests {
         assert!(guard_restore(fs_root, p("/srv")).is_err());
         let logs = ROOTS.iter().find(|r| r.id == "logs").unwrap();
         assert!(guard_restore(logs, p("/var/log/syslog")).is_err());
+    }
+
+    // A folder with `files` files of 64 KiB each, flushed so their blocks
+    // are counted. The content does not compress.
+    #[cfg(unix)]
+    fn scratch_tree(files: usize) -> PathBuf {
+        use std::io::Write;
+        let dir = std::env::temp_dir().join(format!("files-tree-{}", Uuid::new_v4().simple()));
+        std::fs::create_dir_all(dir.join("sub/deeper")).unwrap();
+        let mut x: u32 = 0x9e37_79b9;
+        for i in 0..files {
+            let body: Vec<u8> = (0..64 * 1024)
+                .map(|_| {
+                    x = x.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+                    (x >> 24) as u8
+                })
+                .collect();
+            let path = if i % 2 == 0 { dir.join(format!("f{i}")) } else { dir.join(format!("sub/deeper/f{i}")) };
+            let mut f = std::fs::File::create(path).unwrap();
+            f.write_all(&body).unwrap();
+            f.sync_all().unwrap();
+        }
+        dir
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn tree_size_counts_everything_in_it_and_follows_no_symlink() {
+        const FILE: u64 = 64 * 1024;
+        let dir = scratch_tree(4);
+        let total = tree_bytes(&dir, u64::MAX);
+        assert!(total >= 4 * FILE, "{total}");
+        assert!(total < 8 * FILE, "{total}");
+        // A single file, and a path that is not there.
+        assert!(tree_bytes(&dir.join("f0"), u64::MAX) >= FILE);
+        assert_eq!(tree_bytes(&dir.join("missing"), u64::MAX), 0);
+
+        // A link to a big folder elsewhere weighs nothing: mv moves the link.
+        let other = scratch_tree(4);
+        std::os::unix::fs::symlink(&other, dir.join("link")).unwrap();
+        assert!(tree_bytes(&dir, u64::MAX) < total + FILE);
+
+        // Counting stops once it is known to be too much.
+        let stopped = tree_bytes(&dir, FILE);
+        assert!(stopped > FILE && stopped < total, "{stopped}");
+        std::fs::remove_dir_all(&dir).unwrap();
+        std::fs::remove_dir_all(&other).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_cross_device_trash_that_would_fill_the_disk_is_refused() {
+        const MB: u64 = 1024 * 1024;
+        // 2 MB to move.
+        let dir = scratch_tree(32);
+        // 64 MB above the reserve: it fits.
+        assert!(check_fits_in_trash(&dir, MIN_FREE_BYTES + 64 * MB).await.is_ok());
+        // 1 MB above the reserve, or already under it: it does not.
+        for free in [MIN_FREE_BYTES + MB, MIN_FREE_BYTES / 2] {
+            let err = check_fits_in_trash(&dir, free).await.unwrap_err();
+            assert!(matches!(err, AgentError::Conflict(_)), "{err}");
+            let msg = err.to_string();
+            assert!(msg.contains("does not fit") && msg.contains("terminal"), "{msg}");
+        }
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[cfg(unix)]
