@@ -1023,16 +1023,34 @@ pub(crate) async fn publish_vhost(
         }
         .render()
         .map_err(|e| AgentError::Other(anyhow::anyhow!("askama: {e}")))?;
+        // On a re-deploy this replaces the vhost nginx is serving the app
+        // from: kept, to put back if the new configuration is refused.
+        let previous_vhost = tokio::fs::read(&vhost_path).await.ok();
+        let link_existed = vhost_link.exists();
         fs_atomic::write(&vhost_path, vhost_body.as_bytes(), 0o644).await?;
 
-        if !vhost_link.exists() {
+        if !link_existed {
             symlink(&vhost_path, &vhost_link).map_err(AgentError::Io)?;
         }
 
         task.log("nginx -t");
         if let Err(e) = nginx_handler::test_config().await {
-            let _ = std::fs::remove_file(&vhost_link);
-            let _ = std::fs::remove_file(&vhost_path);
+            // A re-deploy of a live app: nginx still runs its old
+            // configuration, so the old vhost goes back and the app keeps
+            // serving. Removing it and stopping the unit took a working app
+            // down whenever `nginx -t` failed, also over another site's file.
+            let restored = match (&previous_vhost, link_existed) {
+                (Some(body), true) => fs_atomic::write(&vhost_path, body, 0o644).await.is_ok(),
+                _ => false,
+            };
+            if restored && unit_existed {
+                task.log("nginx refused the configuration: the previous vhost is back and the app keeps running");
+                return Err(e);
+            }
+            if !restored {
+                let _ = std::fs::remove_file(&vhost_link);
+                let _ = std::fs::remove_file(&vhost_path);
+            }
             let _ = exec::run("systemctl", ["stop", unit_name]).await;
             let _ = exec::run("systemctl", ["disable", unit_name]).await;
             if !unit_existed {
