@@ -2232,6 +2232,7 @@ pub async fn delete_env_file(
 /// ExecStart line is touched; every other directive (WorkingDirectory, User,
 /// EnvironmentFile, sandboxing) is preserved verbatim.
 pub async fn set_entrypoint(
+    State(state): State<AppState>,
     Path(name): Path<String>,
     Json(req): Json<SetEntrypoint>,
 ) -> AgentResult<Json<SetEntrypointResp>> {
@@ -2279,11 +2280,13 @@ pub async fn set_entrypoint(
     fs_atomic::write(&unit_path, new_body.as_bytes(), 0o644).await?;
 
     exec::run("systemctl", ["daemon-reload"]).await?;
-    app_systemctl(&["restart"], &unit).await?;
-    Ok(Json(SetEntrypointResp {
-        ok: true,
-        restarted: true,
-    }))
+    // An app with no slot must not be started on its stale port (see
+    // ensure_has_slot): the new command is saved for its next start.
+    let restarted = ensure_has_slot(&state, &name).await.is_ok();
+    if restarted {
+        app_systemctl(&["restart"], &unit).await?;
+    }
+    Ok(Json(SetEntrypointResp { ok: true, restarted }))
 }
 
 #[derive(Deserialize)]
