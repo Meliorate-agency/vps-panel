@@ -28,6 +28,14 @@ type Relayed = { code: number; body: string };
  * bytes as they pass. An upload stopped midway reaches the agent as a broken
  * stream, which it discards instead of saving what arrived. Free-space checks
  * and the temp-file-then-rename dance are the agent's job (`files::upload`).
+ *
+ * The agent refuses an upload it will not take (the name exists, the disk is
+ * nearly full, a protected folder) before it reads any of the body. The body
+ * is therefore announced with `Expect: 100-continue` and sent only once the
+ * agent asks for it. Sent straight away, the bytes written after such an
+ * answer failed with EPIPE, and that error could win the race against the
+ * answer: the operator read "upload stream failed: write EPIPE" in place of
+ * the reason.
  */
 export async function POST(req: NextRequest) {
   const refused = originRefusal(req.headers);
@@ -73,6 +81,10 @@ export async function POST(req: NextRequest) {
           // not the error the broken stream then causes on the agent side.
           let stopped: Relayed | null = null;
           const finish = (r: Relayed) => resolve(stopped ?? r);
+          // The agent has started to answer: its answer is the result, not
+          // the error of the body still being written to it.
+          let answering = false;
+          let sending = false;
 
           let received = 0;
           const counter = new Transform({
@@ -108,33 +120,62 @@ export async function POST(req: NextRequest) {
               headers: {
                 Authorization: `Bearer ${config.agentToken}`,
                 "Content-Type": "application/octet-stream",
+                Expect: "100-continue",
               },
             },
             (res) => {
+              answering = true;
+              clearTimeout(unasked);
               const chunks: Buffer[] = [];
               res.on("data", (c: Buffer) => chunks.push(c));
-              res.on("end", () =>
+              res.on("end", () => {
                 finish({
                   code: res.statusCode ?? 500,
                   body: Buffer.concat(chunks).toString("utf8"),
-                }),
-              );
+                });
+                // Refused before the body was asked for: nothing was sent, so
+                // let go of the agent connection and of the browser's upload.
+                if (!sending) {
+                  upstream.destroy();
+                  req.body?.cancel().catch(() => {});
+                }
+              });
+              // An answer that breaks off still carries the agent's status.
+              res.on("error", () => {
+                const code = res.statusCode ?? 502;
+                finish({
+                  code: code >= 400 ? code : 502,
+                  body: Buffer.concat(chunks).toString("utf8") || "the agent's answer was cut off",
+                });
+              });
             },
           );
-          upstream.on("error", (e) => finish({ code: 502, body: `agent unreachable: ${e.message}` }));
+          upstream.on("error", (e) => {
+            clearTimeout(unasked);
+            if (answering && !stopped) return;
+            finish({ code: 502, body: `agent unreachable: ${e.message}` });
+          });
           // Readable.fromWeb bridges the web ReadableStream to a node stream so
           // it can be piped without ever being fully realised. On any error
           // pipeline destroys the agent request mid-body.
-          pipeline(
-            Readable.fromWeb(req.body as Parameters<typeof Readable.fromWeb>[0]),
-            counter,
-            upstream,
-            (err) => {
-              if (err) {
+          const send = () => {
+            if (sending || answering) return;
+            sending = true;
+            clearTimeout(unasked);
+            pipeline(
+              Readable.fromWeb(req.body as Parameters<typeof Readable.fromWeb>[0]),
+              counter,
+              upstream,
+              (err) => {
+                if (!err || (answering && !stopped)) return;
                 finish({ code: 400, body: JSON.stringify({ error: `upload stream failed: ${err.message}` }) });
-              }
-            },
-          );
+              },
+            );
+          };
+          upstream.once("continue", send);
+          // The agent asks within milliseconds. Should the Expect go
+          // unanswered, the body is sent anyway, as it always was.
+          const unasked = setTimeout(send, 3000);
         });
 
   // Audit the path, never the contents — an uploaded file may be anything.
