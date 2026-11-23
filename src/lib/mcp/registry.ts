@@ -20,7 +20,9 @@ import { TOOLS as TASKS } from "./tools/tasks";
  * Anything not listed needs a full-access token, so a new tool is
  * write-level until someone decides otherwise. Left out on purpose:
  * apps.list_env_files (returns .env contents), tasks.get (task logs can
- * hold build output and env values) and mail.track_delivery (who mails whom).
+ * hold build output and env values), mail.track_delivery (who mails whom)
+ * and cron.list (every job's command line, which can hold a token or a
+ * password; the /cron page is for admins for the same reason).
  */
 const READ_ONLY_TOOLS = new Set([
   "sysinfo",
@@ -49,7 +51,6 @@ const READ_ONLY_TOOLS = new Set([
   "firewall.status",
   "firewall.jails",
   "firewall.failed_by_ip",
-  "cron.list",
   "backups.list",
   "ssh.list_keys",
   "ssh.get_server_config",
