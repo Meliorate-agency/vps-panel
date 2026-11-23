@@ -127,8 +127,10 @@ export default function MailIpDefaultForm({
         />
       ) : (
         <div className={local.row}>
-          <button type="submit" className={styles.btn} disabled={pending || choice === saved}>
-            {pending ? "Saving..." : "Save"}
+          {/* Enabled with an unchanged choice too: saving again is how IPv6
+              is switched on once its check passes, as the notes below say. */}
+          <button type="submit" className={styles.btn} disabled={pending}>
+            {pending ? "Saving..." : choice === saved ? "Save again" : "Save"}
           </button>
         </div>
       )}
@@ -141,8 +143,8 @@ export default function MailIpDefaultForm({
         )}
         {outcome?.kind === "saved" && (
           <div className={styles.notice} style={{ marginTop: 10 }}>
-            Saved. Outgoing mail now goes out over {PROTOCOL_NAME[outcome.protocol]} first, except
-            from domains with a choice of their own below.
+            Saved. {PROTOCOL_NAME[outcome.protocol]} is the protocol tried first, except for
+            domains with a choice of their own below.
           </div>
         )}
       </div>

@@ -71,6 +71,9 @@ function OutgoingProtocol({ settings }: { settings: MailIpSettings }) {
     <p className={localStyles.muted} style={{ margin: "10px 0 0" }}>
       {noV6 ? (
         <>Outgoing mail goes out over IPv4; this server has no public IPv6 address. </>
+      ) : settings.ipv6_active === false ? (
+        // IPv6 has not passed its check yet: IPv4 only, whatever is chosen.
+        <>Outgoing mail goes out over IPv4 only; IPv6 is not switched on yet. </>
       ) : (
         <>
           Outgoing mail goes out over {PROTOCOL_NAME[first]} first, {PROTOCOL_NAME[other]} as the

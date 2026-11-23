@@ -1463,6 +1463,10 @@ export type MailIpSettings = {
   domains: MailIpDomain[];
   /** Plain sentences, shown as they are under the setting. */
   notes: string[];
+  /** Postfix sends over IPv6 right now. False while the IPv6 side has not
+   *  passed its check: mail then goes out over IPv4 only, whatever is chosen.
+   *  Missing from an agent that does not report it. */
+  ipv6_active?: boolean;
 };
 export type MailCheckStatus = "ok" | "warn" | "fail";
 export type MailCheckItem = {
