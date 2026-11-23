@@ -611,8 +611,10 @@ async fn scan_and_renew(state: &AppState) -> AgentResult<()> {
                     continue;
                 }
                 // The loop also runs at agent start, so a restart in the
-                // middle of a renewal must not stack a second order.
-                if state.tasks.any_live_with_prefix(&format!("ssl.renew:{domain}")) {
+                // middle of a renewal must not stack a second order. The
+                // whole kind, not a prefix: example.com.au's task is not
+                // example.com's.
+                if state.tasks.any_live_kind(&format!("ssl.renew:{domain}")) {
                     continue;
                 }
                 let names = desired_san_set(state, &domain).await;
@@ -845,16 +847,18 @@ pub(crate) async fn spawn_mail_cert_task(state: &AppState, tenant: &str) -> Opti
         }
         return None;
     }
-    for prefix in [
+    // Whole kinds, not prefixes: a task for example.com running must not
+    // keep example.co (or example.com.au) from getting its mail cert.
+    for kind in [
         format!("sites.ssl:{tenant}"),
         format!("ssl.renew:{tenant}"),
         format!("ssl.issue:{tenant}"),
         format!("mail.ssl:{tenant}"),
     ] {
-        if state.tasks.any_live_with_prefix(&prefix) {
+        if state.tasks.any_live_kind(&kind) {
             tracing::info!(
                 tenant,
-                %prefix,
+                %kind,
                 "mail cert: an SSL task for this domain is already running; not starting another"
             );
             return None;
