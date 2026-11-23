@@ -308,13 +308,18 @@ function buildGroupedRows({
   const zoneOnAgent = new Set(
     rows.filter((r) => r.mode === null && agentOnlySet.has(r.domain)).map((r) => r.domain),
   );
+  // The same for a PowerDNS zone the panel does not track yet: one row, the
+  // agent's, with the untracked badge and Adopt.
+  const untrackedOnAgent = new Set(untrackedZones.filter((d) => agentOnlySet.has(d)));
 
   const items: Item[] = [
     ...rows
       .filter((r) => !zoneOnAgent.has(r.domain))
       .map<Item>((r) => ({ kind: "tracked", domain: r.domain, data: r })),
     ...agentOnly.map<Item>((d) => ({ kind: "agentOnly", domain: d })),
-    ...untrackedZones.map<Item>((d) => ({ kind: "untracked", domain: d })),
+    ...untrackedZones
+      .filter((d) => !untrackedOnAgent.has(d))
+      .map<Item>((d) => ({ kind: "untracked", domain: d })),
     ...dnsSubdomains.map<Item>((d) => ({
       kind: "dnsSubdomain",
       domain: d.domain,
@@ -452,6 +457,7 @@ function buildGroupedRows({
           domain.startsWith("mail.") && mailTenants.has(domain.slice("mail.".length));
         const canRemove = (vhostKind === "external" || vhostKind === "site") && !isMailHelper;
         const hasZone = zoneOnAgent.has(domain);
+        const zoneUntracked = untrackedOnAgent.has(domain);
         const agentAction = canRemove ? (
           <SiteDeleteButton
             domain={domain}
@@ -492,6 +498,8 @@ function buildGroupedRows({
           ),
           dns: hasZone ? (
             renderManagedDns()
+          ) : zoneUntracked ? (
+            renderUntrackedDns()
           ) : (
             <span style={{ display: "inline-flex", alignItems: "center" }}>
               <StatusBadge text="external" tone="muted" />
@@ -511,6 +519,11 @@ function buildGroupedRows({
                 action={deleteDomainAction}
                 subSiteCount={subSiteCountByZone.get(domain) ?? 0}
               />
+            </div>
+          ) : zoneUntracked ? (
+            <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
+              {agentAction}
+              {renderAdoptButton(domain)}
             </div>
           ) : (
             agentAction
@@ -540,25 +553,8 @@ function buildGroupedRows({
           ),
           target: <span className={styles.muted}>—</span>,
           ssl: <span className={styles.muted}>—</span>,
-          dns: (
-            <span style={{ display: "inline-flex", alignItems: "center" }}>
-              <StatusBadge text="untracked" tone="warn" />
-              <InfoTooltip
-                label="What does Untracked DNS mean?"
-                text="A PowerDNS zone exists for this domain on the VPS, but the panel's database has no record of it. Click Adopt to start tracking it via the panel. Until you do, you can't edit records here."
-              />
-            </span>
-          ),
-          actions: (
-            <ActionForm action={adoptZoneAction.bind(null, domain)}>
-              <PendingButton
-                className={styles.btnGhost}
-                pendingLabel="Adopting..."
-              >
-                Adopt
-              </PendingButton>
-            </ActionForm>
-          ),
+          dns: renderUntrackedDns(),
+          actions: renderAdoptButton(domain),
         };
         break;
       }
@@ -662,6 +658,28 @@ function renderManagedDns() {
         text="The PowerDNS zone for this domain lives on this VPS and is tracked by the panel. The DNS records you see on the domain detail page are what's actually served — provided the registrar's nameservers point here."
       />
     </span>
+  );
+}
+
+function renderUntrackedDns() {
+  return (
+    <span style={{ display: "inline-flex", alignItems: "center" }}>
+      <StatusBadge text="untracked" tone="warn" />
+      <InfoTooltip
+        label="What does Untracked DNS mean?"
+        text="A PowerDNS zone exists for this domain on the VPS, but the panel's database has no record of it. Click Adopt to start tracking it via the panel. Until you do, you can't edit records here."
+      />
+    </span>
+  );
+}
+
+function renderAdoptButton(domain: string) {
+  return (
+    <ActionForm action={adoptZoneAction.bind(null, domain)}>
+      <PendingButton className={styles.btnGhost} pendingLabel="Adopting...">
+        Adopt
+      </PendingButton>
+    </ActionForm>
   );
 }
 
