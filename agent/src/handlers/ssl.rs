@@ -240,10 +240,6 @@ pub async fn issue_for_names(
     names: &[String],
     task: &TaskHandle,
 ) -> AgentResult<()> {
-    use instant_acme::{
-        Account, AuthorizationStatus, ChallengeType, Identifier, NewAccount, NewOrder, OrderStatus,
-    };
-
     if names.is_empty() {
         return Err(AgentError::Invalid("no domain names supplied".into()));
     }
@@ -257,6 +253,67 @@ pub async fn issue_for_names(
     // cert/key pair and could leave a key that does not match its cert.
     let lock = cert_order_lock(primary);
     let _order_guard = lock.lock().await;
+
+    let (cert_pem, key_pem) =
+        match tokio::time::timeout(ORDER_TIMEOUT, order_certificate(cfg, acme_email, names, task)).await {
+            Ok(ordered) => ordered?,
+            Err(_) => {
+                return Err(AgentError::Other(anyhow::anyhow!(
+                    "the ACME server did not complete the order within {} minutes",
+                    ORDER_TIMEOUT.as_secs() / 60
+                )))
+            }
+        };
+
+    let cert_dir = PathBuf::from(format!("/etc/vps-panel/certs/{primary}"));
+    let cert_file = cert_dir.join("fullchain.pem");
+    let key_file = cert_dir.join("privkey.pem");
+    fs_atomic::ensure_dir(&cert_dir, 0o750).await?;
+    // The pair goes in together or not at all: a new cert next to the old
+    // key fails nginx -t, and with it every later site change.
+    let previous_cert = tokio::fs::read(&cert_file).await.ok();
+    fs_atomic::write(&cert_file, cert_pem.as_bytes(), 0o640).await?;
+    if let Err(e) = fs_atomic::write(&key_file, key_pem.as_bytes(), 0o640).await {
+        let _ = match previous_cert {
+            Some(old) => fs_atomic::write(&cert_file, &old, 0o640).await,
+            None => fs_atomic::remove_if_exists(&cert_file).await,
+        };
+        return Err(e);
+    }
+    if cfg.vps_panel_gid != 0 {
+        let _ = fs_atomic::chown_blocking(&cert_file, 0, cfg.vps_panel_gid);
+        let _ = fs_atomic::chown_blocking(&key_file, 0, cfg.vps_panel_gid);
+    }
+
+    task.log(format!("certificate written to {}", cert_dir.display()));
+
+    if primary == cfg.panel_host {
+        task.log("rewiring postfix and dovecot to use the new certificate");
+        if let Err(e) = apply_mail_cert(primary, &cert_dir).await {
+            task.log(format!("mail tls update failed: {e}"));
+        }
+    }
+
+    Ok(())
+}
+
+/// Longest one order may take. instant-acme sets no timeout on its requests
+/// and the certificate poll had no limit, so a stalled connection kept the
+/// task running for good: it held the lock for its name (no later order or
+/// renewal could run) and a running task blocks panel updates.
+const ORDER_TIMEOUT: Duration = Duration::from_secs(300);
+
+/// The ACME part of an order: account, HTTP-01 challenges, finalize. Returns
+/// the certificate chain and its private key as PEM; nothing is installed.
+async fn order_certificate(
+    cfg: &Config,
+    acme_email: &str,
+    names: &[String],
+    task: &TaskHandle,
+) -> AgentResult<(String, String)> {
+    use instant_acme::{
+        Account, AuthorizationStatus, ChallengeType, Identifier, NewAccount, NewOrder, OrderStatus,
+    };
 
     let account = match load_acme_account(&cfg.acme_directory, acme_email).await {
         Some(account) => {
@@ -296,6 +353,7 @@ pub async fn issue_for_names(
         .await
         .map_err(|e| AgentError::Other(anyhow::anyhow!("acme authorizations: {e}")))?;
 
+    let mut token_files = Vec::new();
     for auth in &authorizations {
         match auth.status {
             AuthorizationStatus::Pending => {}
@@ -321,6 +379,7 @@ pub async fn issue_for_names(
         task.log(format!("placing challenge token at {}", token_path.display()));
         fs_atomic::ensure_dir(token_path.parent().unwrap(), 0o755).await?;
         fs_atomic::write(&token_path, key_auth.as_str().as_bytes(), 0o644).await?;
+        token_files.push(token_path);
 
         order
             .set_challenge_ready(&challenge.url)
@@ -356,6 +415,11 @@ pub async fn issue_for_names(
             _ => continue,
         }
     }
+    // Every name is validated; the challenge files have done their job.
+    // They used to stay in the webroot for good.
+    for token_file in &token_files {
+        let _ = tokio::fs::remove_file(token_file).await;
+    }
 
     let mut params = rcgen::CertificateParams::new(names.to_vec())
         .map_err(|e| AgentError::Other(anyhow::anyhow!("rcgen params: {e}")))?;
@@ -384,30 +448,7 @@ pub async fn issue_for_names(
         }
     };
 
-    let cert_dir = PathBuf::from(format!("/etc/vps-panel/certs/{primary}"));
-    fs_atomic::ensure_dir(&cert_dir, 0o750).await?;
-    fs_atomic::write(&cert_dir.join("fullchain.pem"), cert_pem.as_bytes(), 0o640).await?;
-    fs_atomic::write(
-        &cert_dir.join("privkey.pem"),
-        key_pair.serialize_pem().as_bytes(),
-        0o640,
-    )
-    .await?;
-    if cfg.vps_panel_gid != 0 {
-        let _ = fs_atomic::chown_blocking(&cert_dir.join("fullchain.pem"), 0, cfg.vps_panel_gid);
-        let _ = fs_atomic::chown_blocking(&cert_dir.join("privkey.pem"), 0, cfg.vps_panel_gid);
-    }
-
-    task.log(format!("certificate written to {}", cert_dir.display()));
-
-    if primary == cfg.panel_host {
-        task.log("rewiring postfix and dovecot to use the new certificate");
-        if let Err(e) = apply_mail_cert(primary, &cert_dir).await {
-            task.log(format!("mail tls update failed: {e}"));
-        }
-    }
-
-    Ok(())
+    Ok((cert_pem, key_pair.serialize_pem()))
 }
 
 /// Saved ACME account credentials (root-only file). Every order used to
