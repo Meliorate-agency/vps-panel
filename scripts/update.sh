@@ -566,6 +566,29 @@ hsts_drop_subdomains() {
 }
 hsts_drop_subdomains || true
 
+# Back to root what a re-run of an older install.sh gave to the panel's user:
+# its recursive chown of /var/lib/vps-panel handed over the agent's root-only
+# folders (database dumps, the Files trash, build snapshots). install.sh
+# repairs this on a re-run; a server that only ever updates got it nowhere.
+# The folders themselves only, as in install.sh. The backup directory, where
+# the agent keeps its database dumps from now on, is there for it, root-only.
+# The old dump folder stays: the agent empties it itself after a backup that
+# worked. Idempotent, and never fails the update.
+repair_root_dirs() {
+  local d mode
+  for d in /var/lib/vps-panel/db-dumps /var/lib/vps-panel/trash /var/lib/vps-panel/build-snapshots; do
+    [[ -d "$d" && ! -L "$d" ]] || continue
+    # The last three digits: the folder also carries its parent's setgid bit.
+    mode="$(stat -c '%a' "$d" 2>/dev/null || true)"
+    if [[ "$(stat -c '%U' "$d" 2>/dev/null || true)" != "root" || "${mode: -3}" != "700" ]]; then
+      chown root "$d" && chmod 0700 "$d" && echo "$d is root-only again"
+    fi
+  done
+  install -d -m 0750 -o root -g root /var/backups/vps-panel
+  return 0
+}
+repair_root_dirs || true
+
 # Backfill the Dovecot fixes install.sh now applies on a fresh box.
 #
 # 1. Drop the PAM passdb (see the comment in install.sh): with it every mailbox
