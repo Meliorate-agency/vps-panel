@@ -21,6 +21,13 @@ export default async function TotpPage() {
     .prepare(`SELECT totp_enabled, totp_secret FROM users WHERE id = ?`)
     .get(s.userId) as Row | undefined;
 
+  // A session that still owes its code, on an account whose two-factor has
+  // been switched off since (the agent's password reset clears it): there is
+  // no code to verify, and enrolling takes a full session, so this page could
+  // not be completed. Sign in again; /login does not look at the old cookie,
+  // and signing in replaces it.
+  if (s.needsTotp && !row?.totp_enabled) redirect("/login");
+
   const mode = row?.totp_enabled ? "verify" : "enroll";
 
   return (
