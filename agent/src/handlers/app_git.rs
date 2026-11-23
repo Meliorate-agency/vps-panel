@@ -68,6 +68,9 @@ pub fn owner_for_uid(uid: u32) -> AgentResult<Option<Owner>> {
     }
 }
 
+/// The PATH an owner's git gets (see owner_git_argv).
+const OWNER_PATH: &str = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin";
+
 /// `git <args>` (in `dir`) as `owner`. `mirror` goes into safe.directory:
 /// it is root's repository, which git otherwise refuses to read for another
 /// user.
@@ -90,12 +93,17 @@ pub fn owner_git_argv(
     match owner {
         None => ("git".into(), git),
         Some(o) => {
+            // `env -i`: runuser keeps the caller's environment, and git runs
+            // what the checkout says (hooks, core.fsmonitor) as its owner.
+            // Whatever /etc/vps-panel/.env gave the agent was theirs to read.
             let mut argv: Vec<String> = vec![
                 "-u".into(),
                 o.name.clone(),
                 "--".into(),
                 "env".into(),
+                "-i".into(),
                 format!("HOME={}", o.home),
+                format!("PATH={OWNER_PATH}"),
                 "GIT_TERMINAL_PROMPT=0".into(),
                 "git".into(),
             ];
@@ -443,11 +451,15 @@ mod tests {
         assert_eq!(
             argv,
             [
-                "-u", "apps", "--", "env", "HOME=/srv/apps", "GIT_TERMINAL_PROMPT=0", "git",
+                "-u", "apps", "--", "env", "-i", "HOME=/srv/apps",
+                "PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+                "GIT_TERMINAL_PROMPT=0", "git",
                 "-c", "safe.directory=/var/lib/vps-panel-git/web.git",
                 "-C", "/srv/apps/web", "pull", "--ff-only",
             ]
         );
+        // The agent's own environment (its .env) does not reach the owner.
+        assert_eq!(argv.iter().position(|a| a == "-i"), Some(4));
         let (cmd, argv) = owner_git_argv(None, Some("/root/x"), None, &["status"]);
         assert_eq!(cmd, "git");
         assert_eq!(argv, ["-C", "/root/x", "status"]);
