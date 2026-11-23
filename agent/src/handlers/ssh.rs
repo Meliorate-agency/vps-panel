@@ -695,6 +695,10 @@ pub async fn update_public_key(
             "public key must be at least: <type> <base64>".into(),
         ));
     }
+    // It replaces one line, so it has to be one.
+    if new_line.contains(['\n', '\r']) {
+        return Err(AgentError::Invalid("public key must be a single line".into()));
+    }
     let new_fp = fingerprint(&new_line)
         .await
         .map_err(|_| AgentError::Invalid("not a valid SSH public key".into()))?;
@@ -858,27 +862,39 @@ pub async fn update_private_key(
     }))
 }
 
-pub async fn add(Json(req): Json<AddKey>) -> AgentResult<Json<OkResponse>> {
-    let path = authorized_keys_path(&req.user)?;
-    let key = req.key.trim();
+/// The one `authorized_keys` line for a pasted key and its optional label.
+/// A line break inside either is refused: it added a second line, so a
+/// label could carry in another key that no one had asked to add.
+fn authorized_line(key: &str, label: &str) -> AgentResult<String> {
+    let key = key.trim();
     if key.split_whitespace().count() < 2 {
         return Err(AgentError::Invalid(
             "key must be at least: <type> <base64>".into(),
         ));
     }
-    fingerprint(key)
+    if key.contains(['\n', '\r']) || label.contains(['\n', '\r']) {
+        return Err(AgentError::Invalid(
+            "the key and its label must each be a single line".into(),
+        ));
+    }
+    Ok(if label.is_empty() {
+        key.to_string()
+    } else {
+        format!("{key} {label}")
+    })
+}
+
+pub async fn add(Json(req): Json<AddKey>) -> AgentResult<Json<OkResponse>> {
+    let path = authorized_keys_path(&req.user)?;
+    let line = authorized_line(&req.key, req.label.as_deref().unwrap_or(""))?;
+    fingerprint(&line)
         .await
         .map_err(|_| AgentError::Invalid("not a valid SSH public key".into()))?;
     let mut content = read_user_file(&path).await?;
     if !content.is_empty() && !content.ends_with('\n') {
         content.push('\n');
     }
-    let label = req.label.unwrap_or_default();
-    if label.is_empty() {
-        content.push_str(key);
-    } else {
-        content.push_str(&format!("{key} {label}"));
-    }
+    content.push_str(&line);
     content.push('\n');
     fs_atomic::ensure_dir(path.parent().unwrap(), 0o700).await?;
     fs_atomic::write(&path, content.as_bytes(), 0o600).await?;
@@ -1456,6 +1472,21 @@ mod tests {
             .unwrap()
             .trim()
             .to_string()
+    }
+
+    #[test]
+    fn an_added_key_is_exactly_one_line() {
+        let key = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIGh laptop";
+        assert_eq!(super::authorized_line(&format!("  {key}\n"), "").unwrap(), key);
+        assert_eq!(
+            super::authorized_line(key, "work").unwrap(),
+            format!("{key} work")
+        );
+        let second = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIEv intruder";
+        assert!(super::authorized_line(&format!("{key}\n{second}"), "").is_err());
+        assert!(super::authorized_line(&format!("{key}\r{second}"), "").is_err());
+        assert!(super::authorized_line(key, &format!("work\n{second}")).is_err());
+        assert!(super::authorized_line("ssh-ed25519", "").is_err());
     }
 
     #[test]
