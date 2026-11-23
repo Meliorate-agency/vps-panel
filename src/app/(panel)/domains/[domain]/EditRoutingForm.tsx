@@ -1,6 +1,6 @@
 "use client";
 
-import { useActionState, useState } from "react";
+import { useActionState, useState, useTransition } from "react";
 import styles from "@/components/page.module.css";
 
 type Result = { ok: true } | { ok: false; error: string };
@@ -29,8 +29,19 @@ export default function EditRoutingForm({
   const isSubdomain =
     domain.split(".").filter((l) => l.length > 0).length >= 3;
 
+  // Submitted by hand rather than through <form action>: React resets a form
+  // after its action ran, and the Mode select (no default option) snapped to
+  // "Static folder" while the Upstream port field stayed on screen. The next
+  // Save then turned a reverse-proxy site into a static folder.
+  const [, startTransition] = useTransition();
+  function onSubmit(e: React.FormEvent<HTMLFormElement>) {
+    e.preventDefault();
+    const fd = new FormData(e.currentTarget);
+    startTransition(() => formAction(fd));
+  }
+
   return (
-    <form action={formAction}>
+    <form onSubmit={onSubmit}>
       <div className={styles.formRow}>
         <label className={styles.field}>
           Mode
