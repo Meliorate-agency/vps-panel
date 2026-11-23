@@ -480,9 +480,21 @@ postconf -e "smtpd_tls_session_cache_database = btree:\${data_directory}/smtpd_s
 postconf -e "smtp_tls_session_cache_database = btree:\${data_directory}/smtp_scache"
 postconf -e "alias_maps = hash:/etc/aliases"
 postconf -e "alias_database = hash:/etc/aliases"
+# Always: the postfix package lists the hostname here, and a name that is
+# also a mail domain of the panel must not be a local destination.
 postconf -e "mydestination = localhost"
-postconf -e "relayhost ="
-postconf -e "mynetworks = 127.0.0.0/8 [::ffff:127.0.0.0]/104 [::1]/128"
+# A re-run keeps a smarthost (relayhost) and the mynetworks list main.cf
+# already has. Both used to be reset on every run: outgoing mail went
+# straight out again instead of through the operator's relay, and networks
+# the operator had allowed to relay were dropped. The postfix package writes
+# an empty relayhost and the same mynetworks as below, so a first install
+# ends up as before.
+if [[ -z "$(postconf -nh relayhost 2>/dev/null || true)" ]]; then
+  postconf -e "relayhost ="
+fi
+if [[ -z "$(postconf -nh mynetworks 2>/dev/null || true)" ]]; then
+  postconf -e "mynetworks = 127.0.0.0/8 [::ffff:127.0.0.0]/104 [::1]/128"
+fi
 postconf -e "mailbox_size_limit = 0"
 postconf -e "recipient_delimiter = +"
 postconf -e "inet_interfaces = all"
