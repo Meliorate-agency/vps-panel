@@ -17,10 +17,12 @@
 //! directory only exists for as long as rules do.
 //!
 //! Rendering rules:
-//!   - exact  -> `location = /old { return 301 "https://target"; }`
-//!   - prefix -> `location ~ ^/old(?:/(.*))?$ { return 301 "https://target/$1"; }`
+//!   - exact  -> `location = /old { return 301 "https://target$is_args$args"; }`
+//!   - prefix -> `location ~ ^/old(?:/(.*))?$ { return 301 "https://target/$1$is_args$args"; }`
 //!               (keeps the remainder of the path; longest source first so a
 //!               more specific prefix wins over a shorter one)
+//!   - `$is_args$args` carries the request's query string over. A target with
+//!     a query string of its own is sent as written.
 //!   - a prefix rule on `/` (whole domain) excludes `/.well-known/acme-challenge/`
 //!     so Let's Encrypt renewals keep working on vhosts whose ACME location
 //!     predates the `^~` modifier.
@@ -214,12 +216,14 @@ pub fn render(domain: &str, rules: &[RedirectRule]) -> AgentResult<String> {
         ));
         out.push_str(&format!(
             "location = {} {{ return {} \"{}\"; }}\n",
-            r.source_path, r.code, r.target_url
+            r.source_path,
+            r.code,
+            with_request_query(&r.target_url)
         ));
     }
     for r in prefix {
         let src = prefix_source(&r.source_path);
-        let dest = format!("{}/$1", r.target_url.trim_end_matches('/'));
+        let dest = with_request_query(&format!("{}/$1", r.target_url.trim_end_matches('/')));
         out.push_str(&format!(
             "\n# id={} prefix {} {} -> {}\n",
             r.id, r.code, r.source_path, r.target_url
@@ -238,6 +242,25 @@ pub fn render(domain: &str, rules: &[RedirectRule]) -> AgentResult<String> {
         }
     }
     Ok(out)
+}
+
+/// Where a rule sends the visitor, with the request's query string carried
+/// over: `$is_args$args` is `?a=b`, or nothing for a request without one.
+/// `/old?utm_source=x` used to arrive at the target without `utm_source=x`.
+/// It goes before a `#fragment`. A destination that has a query string of
+/// its own stays as written: nginx cannot merge the two.
+fn with_request_query(dest: &str) -> String {
+    let (base, fragment) = match dest.split_once('#') {
+        Some((base, fragment)) => (base, Some(fragment)),
+        None => (dest, None),
+    };
+    if base.contains('?') {
+        return dest.to_string();
+    }
+    match fragment {
+        Some(fragment) => format!("{base}$is_args$args#{fragment}"),
+        None => format!("{base}$is_args$args"),
+    }
 }
 
 /// `/blog/` and `/blog` are the same prefix; `/` becomes the empty string
@@ -465,14 +488,14 @@ mod tests {
         .unwrap();
         assert!(out.starts_with("# vps-redirects:example.com\n"));
         assert!(out.contains(
-            "location = /old { return 301 \"https://new.example.com/page\"; }"
+            "location = /old { return 301 \"https://new.example.com/page$is_args$args\"; }"
         ));
         // Longer prefix first, remainder of the path appended via $1.
         let archive = out
-            .find("location ~ ^/blog/archive(?:/(.*))?$ { return 301 \"/archive/$1\"; }")
+            .find("location ~ ^/blog/archive(?:/(.*))?$ { return 301 \"/archive/$1$is_args$args\"; }")
             .unwrap();
         let blog = out
-            .find("location ~ ^/blog(?:/(.*))?$ { return 302 \"https://blog.example.com/$1\"; }")
+            .find("location ~ ^/blog(?:/(.*))?$ { return 302 \"https://blog.example.com/$1$is_args$args\"; }")
             .unwrap();
         assert!(archive < blog);
     }
@@ -485,7 +508,37 @@ mod tests {
         )
         .unwrap();
         assert!(out.contains(
-            "location ~ ^/(?!\\.well-known/acme-challenge/)(.*)$ { return 301 \"https://new.example.com/$1\"; }"
+            "location ~ ^/(?!\\.well-known/acme-challenge/)(.*)$ { return 301 \"https://new.example.com/$1$is_args$args\"; }"
+        ));
+    }
+
+    #[test]
+    fn the_request_query_string_is_carried_over_unless_the_target_has_one() {
+        assert_eq!(with_request_query("/new"), "/new$is_args$args");
+        assert_eq!(with_request_query("https://a.example/x/$1"), "https://a.example/x/$1$is_args$args");
+        // Before the fragment, where a query string belongs.
+        assert_eq!(with_request_query("/new#top"), "/new$is_args$args#top");
+        assert_eq!(with_request_query("/new#a?b"), "/new$is_args$args#a?b");
+        // The target's own query string wins.
+        assert_eq!(with_request_query("/new?lang=en"), "/new?lang=en");
+        assert_eq!(with_request_query("/new?lang=en#top"), "/new?lang=en#top");
+        assert_eq!(with_request_query("/search?q=/$1"), "/search?q=/$1");
+
+        let out = render(
+            "example.com",
+            &[
+                rule(1, "/old", "/new?lang=en", 301, "exact"),
+                rule(2, "/doc", "https://docs.example.com/v2#intro", 302, "exact"),
+                rule(3, "/shop", "https://shop.example.com/?ref=old", 301, "prefix"),
+            ],
+        )
+        .unwrap();
+        assert!(out.contains("location = /old { return 301 \"/new?lang=en\"; }"));
+        assert!(out.contains(
+            "location = /doc { return 302 \"https://docs.example.com/v2$is_args$args#intro\"; }"
+        ));
+        assert!(out.contains(
+            "location ~ ^/shop(?:/(.*))?$ { return 301 \"https://shop.example.com/?ref=old/$1\"; }"
         ));
     }
 
@@ -529,8 +582,8 @@ mod tests {
             ],
         )
         .unwrap();
-        assert!(out.contains("location = /a { return 301 \"/b\"; }"));
-        assert!(out.contains("location = /a/ { return 301 \"/b\"; }"));
+        assert!(out.contains("location = /a { return 301 \"/b$is_args$args\"; }"));
+        assert!(out.contains("location = /a/ { return 301 \"/b$is_args$args\"; }"));
         // For a prefix they are the same rule.
         assert!(render(
             "example.com",
