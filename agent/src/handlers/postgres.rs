@@ -366,7 +366,9 @@ pub async fn update_database(
     // Build the statement list. Rename FIRST, then set the owner on the
     // resulting name: a rename blocked by active connections aborts (under
     // ON_ERROR_STOP) before any owner change lands, so the operation never
-    // leaves a half-applied owner on the old name.
+    // leaves a half-applied owner on the old name. Both run in one
+    // transaction: an owner that no longer exists used to leave the database
+    // renamed under an error, and the next save failed on the old name.
     let mut sql = String::new();
     let mut target = name.clone();
 
@@ -405,7 +407,7 @@ pub async fn update_database(
     // SQL to run. Treat as a successful no-op so the UI can save without a
     // diff without surfacing a spurious error.
     if !sql.is_empty() {
-        psql_exec(&sql).await?;
+        psql_exec(&format!("BEGIN;\n{sql}COMMIT;\n")).await?;
     }
     Ok(Json(crate::ipc::OkResponse::default()))
 }
