@@ -760,7 +760,7 @@ async fn upsert_txt_by_prefix(
             (domain_id, name),
         )
         .await?;
-    let matched = candidates.iter().find(|(_, c)| c.starts_with(prefix));
+    let matched = candidates.iter().find(|(_, c)| txt_has_prefix(c, prefix));
     let label = format!("TXT {name} ({})", prefix.trim_start_matches('"'));
     match matched {
         Some((id, content)) => {
@@ -782,6 +782,16 @@ async fn upsert_txt_by_prefix(
         }
     }
     Ok(())
+}
+
+/// Does this TXT content start with `prefix` (`"v=spf1`, `"v=DMARC1`, ...),
+/// with or without its opening quote? mail.rs matches the same way: a record
+/// stored without quotes got a second SPF record next to it on reconcile, and
+/// was replaced in place when the mail domain was created.
+fn txt_has_prefix(content: &str, prefix: &str) -> bool {
+    content
+        .trim_start_matches('"')
+        .starts_with(prefix.trim_start_matches('"'))
 }
 
 fn is_standard_record(
@@ -1418,4 +1428,27 @@ pub(crate) async fn preflight_acme_dns(
         )),
     }
     verify_public_dns(state, domain).await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{format_spf, txt_has_prefix};
+
+    #[test]
+    fn spf_names_each_address_the_server_has() {
+        assert_eq!(format_spf(Some("198.51.100.127"), None), "\"v=spf1 mx ip4:198.51.100.127 -all\"");
+        assert_eq!(
+            format_spf(Some("198.51.100.127"), Some("2001:db8::1")),
+            "\"v=spf1 mx ip4:198.51.100.127 ip6:2001:db8::1 -all\""
+        );
+        assert_eq!(format_spf(None, None), "\"v=spf1 mx -all\"");
+    }
+
+    #[test]
+    fn a_txt_record_is_recognised_with_or_without_its_quote() {
+        assert!(txt_has_prefix("\"v=spf1 mx -all\"", "\"v=spf1"));
+        assert!(txt_has_prefix("v=spf1 include:_spf.example.net ~all", "\"v=spf1"));
+        assert!(!txt_has_prefix("\"google-site-verification=abc\"", "\"v=spf1"));
+        assert!(!txt_has_prefix("\"v=DMARC1; p=none\"", "\"v=DKIM1"));
+    }
 }
