@@ -656,6 +656,9 @@ pub(crate) async fn remote_image_config_digests(image: &str) -> Vec<String> {
         // the flag anyway so older docker.io builds still answer instead of
         // erroring with "only supported on a Docker cli with experimental".
         .env("DOCKER_CLI_EXPERIMENTAL", "enabled")
+        // Every caller gives up after a few seconds: without this a registry
+        // that never answers left one docker process behind per page load.
+        .kill_on_drop(true)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
