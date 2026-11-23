@@ -173,7 +173,11 @@ export async function verifyTotpAction(_prev: ActionResult | null, fd: FormData)
     };
   }
   recordLoginAttempt(ip, totpKey, true);
-  db().prepare(`UPDATE sessions SET revoked = 1 WHERE user_id = ? AND revoked = 0`).run(s.userId);
+  // Only the pair this sign-in used while it waited for the code. Revoking
+  // every session of the user here signed out their other devices each time
+  // they signed in on one more.
+  revokeSession(s.jti);
+  if (s.refreshJti) revokeSession(s.refreshJti);
   // Carry the Remember-me flag from the pre-TOTP session through to the
   // post-TOTP one — otherwise the operator who ticked the box would get
   // dropped back to the default session TTL after passing the second
