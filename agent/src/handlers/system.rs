@@ -101,11 +101,15 @@ async fn dpkg_installed(pkg: &str) -> bool {
         .stderr(Stdio::null())
         .output()
         .await
-        .map(|o| {
-            o.status.success()
-                && String::from_utf8_lossy(&o.stdout).contains("install ok installed")
-        })
+        .map(|o| o.status.success() && dpkg_status_installed(&String::from_utf8_lossy(&o.stdout)))
         .unwrap_or(false)
+}
+
+/// dpkg's `${Status}` is "<want> <error> <state>". Only the state says
+/// whether the package is there: one on hold (`apt-mark hold`) reads
+/// "hold ok installed" and was shown as not installed.
+fn dpkg_status_installed(status: &str) -> bool {
+    status.split_whitespace().nth(2) == Some("installed")
 }
 
 async fn systemd_is(verb: &str, unit: &str) -> bool {
@@ -1977,8 +1981,17 @@ pub async fn delete_system_user(
 
 #[cfg(test)]
 mod tests {
-    use super::{publickey_hint, render_panel_vhost, validate_fqdn};
+    use super::{dpkg_status_installed, publickey_hint, render_panel_vhost, validate_fqdn};
     use crate::nginx_template::PEER_API_LOCATION;
+
+    #[test]
+    fn a_held_package_is_installed() {
+        assert!(dpkg_status_installed("install ok installed"));
+        assert!(dpkg_status_installed("hold ok installed"));
+        for gone in ["deinstall ok config-files", "install ok half-configured", "unknown ok not-installed", ""] {
+            assert!(!dpkg_status_installed(gone), "{gone:?}");
+        }
+    }
 
     #[test]
     fn the_panel_hostname_has_whole_labels() {
