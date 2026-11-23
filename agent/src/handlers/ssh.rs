@@ -528,11 +528,10 @@ async fn list_rows(
 
     // Only names the private-key and purge endpoints accept, so every
     // action on the row works.
-    let name_ok = regex::Regex::new(KEYPAIR_NAME_RE).unwrap();
     let mut not_login: Vec<(&String, &String)> = pub_index
         .iter()
         .filter(|(fp, name)| {
-            name_ok.is_match(name) && !rows.iter().any(|r| &r.fingerprint == *fp)
+            is_keypair_name(name) && !rows.iter().any(|r| &r.fingerprint == *fp)
         })
         .collect();
     not_login.sort_by(|a, b| a.1.cmp(b.1));
@@ -646,10 +645,7 @@ pub struct PrivateKeyQuery {
 pub async fn get_private_key(
     Query(q): Query<PrivateKeyQuery>,
 ) -> AgentResult<Json<KeyContent>> {
-    if !regex::Regex::new(KEYPAIR_NAME_RE)
-        .unwrap()
-        .is_match(&q.name)
-    {
+    if !is_keypair_name(&q.name) {
         return Err(AgentError::Invalid("invalid keypair name".into()));
     }
     let ssh_dir = ssh_home_dir_lookup(&q.user)?;
@@ -704,7 +700,7 @@ pub async fn update_public_key(
         .map_err(|_| AgentError::Invalid("not a valid SSH public key".into()))?;
     let ssh_dir = ssh_home_dir_lookup(&q.user)?;
     let path = authorized_keys_path(&q.user)?;
-    let existing = fs::read_to_string(&path).await.unwrap_or_default();
+    let existing = read_user_file(&path).await?;
     let mut out_lines: Vec<String> = Vec::with_capacity(existing.lines().count() + 1);
     let mut replaced = false;
     for line in existing.lines() {
@@ -788,7 +784,7 @@ pub async fn get_authorized_keys_file(
     Query(q): Query<SshFileQuery>,
 ) -> AgentResult<Json<KeyContent>> {
     let path = authorized_keys_path(&q.user)?;
-    let content = fs::read_to_string(&path).await.unwrap_or_default();
+    let content = read_user_file(&path).await?;
     Ok(Json(KeyContent { content }))
 }
 
@@ -811,7 +807,7 @@ pub async fn get_ssh_config_file(
     Query(q): Query<SshFileQuery>,
 ) -> AgentResult<Json<KeyContent>> {
     let path = ssh_config_path(&q.user)?;
-    let content = fs::read_to_string(&path).await.unwrap_or_default();
+    let content = read_user_file(&path).await?;
     Ok(Json(KeyContent { content }))
 }
 
@@ -838,10 +834,7 @@ pub async fn update_private_key(
     Query(q): Query<PrivateKeyQuery>,
     Json(body): Json<UpdateKeyBody>,
 ) -> AgentResult<Json<UpdateKeyResp>> {
-    if !regex::Regex::new(KEYPAIR_NAME_RE)
-        .unwrap()
-        .is_match(&q.name)
-    {
+    if !is_keypair_name(&q.name) {
         return Err(AgentError::Invalid("invalid keypair name".into()));
     }
     let trimmed = body.content.trim();
@@ -876,7 +869,7 @@ pub async fn add(Json(req): Json<AddKey>) -> AgentResult<Json<OkResponse>> {
     fingerprint(key)
         .await
         .map_err(|_| AgentError::Invalid("not a valid SSH public key".into()))?;
-    let mut content = fs::read_to_string(&path).await.unwrap_or_default();
+    let mut content = read_user_file(&path).await?;
     if !content.is_empty() && !content.ends_with('\n') {
         content.push('\n');
     }
@@ -928,13 +921,22 @@ pub async fn generate_keypair(
             "keypair name must be lowercase alphanumeric (with `_` or `-`), 2-32 chars".into(),
         ));
     }
+    if !is_keypair_name(&req.name) {
+        return Err(AgentError::Invalid(format!(
+            "{} is a file ~/.ssh already uses; pick another keypair name",
+            req.name
+        )));
+    }
     let ssh_dir = ssh_home_dir_lookup(&req.user)?;
     let priv_path = ssh_dir.join(&req.name);
     let pub_path = ssh_dir.join(format!("{}.pub", req.name));
     let authorized_keys = ssh_dir.join("authorized_keys");
     let config_path = ssh_dir.join("config");
 
-    if priv_path.exists() || pub_path.exists() {
+    // symlink_metadata, not exists(): a dangling symlink the user left at
+    // either name reads as "not there", and ssh-keygen (as root) then wrote
+    // the key through it to wherever it pointed.
+    if fs::symlink_metadata(&priv_path).await.is_ok() || fs::symlink_metadata(&pub_path).await.is_ok() {
         return Err(AgentError::Conflict(format!(
             "keypair {} already exists at {}",
             req.name,
@@ -1022,7 +1024,7 @@ fn chown_for_user_dir(_user: &str, _path: &std::path::Path) -> AgentResult<()> {
 }
 
 async fn append_unique_line(path: &std::path::Path, line: &str) -> AgentResult<()> {
-    let mut existing = fs::read_to_string(path).await.unwrap_or_default();
+    let mut existing = read_user_file(path).await?;
     if existing.lines().any(|l| l.trim() == line.trim()) {
         return Ok(());
     }
@@ -1039,7 +1041,7 @@ async fn append_unique_host_block(
     alias: &str,
     block: &str,
 ) -> AgentResult<()> {
-    let existing = fs::read_to_string(path).await.unwrap_or_default();
+    let existing = read_user_file(path).await?;
     // Cheap dup check: any line that's `Host <alias>` (with possible extra
     // hosts on the same line) — refuse to write a second block.
     let needle = format!("Host {alias}");
@@ -1122,7 +1124,7 @@ pub async fn remove(
     let purge = match &q.purge_keypair {
         None => None,
         Some(name) => {
-            if !regex::Regex::new(KEYPAIR_NAME_RE).unwrap().is_match(name) {
+            if !is_keypair_name(name) {
                 return Err(AgentError::Invalid("invalid keypair name".into()));
             }
             let ssh_dir = ssh_home_dir_lookup(&q.user)?;
@@ -1158,7 +1160,7 @@ pub async fn remove(
         fs_atomic::remove_if_exists(&ssh_dir.join(&name)).await?;
         fs_atomic::remove_if_exists(&ssh_dir.join(format!("{name}.pub"))).await?;
         let config_path = ssh_dir.join("config");
-        let existing = fs::read_to_string(&config_path).await.unwrap_or_default();
+        let existing = read_user_file(&config_path).await?;
         let (stripped, changed) = strip_host_block(&existing, &name);
         if changed {
             fs_atomic::write(&config_path, stripped.as_bytes(), 0o600).await?;
@@ -1174,18 +1176,25 @@ pub async fn remove(
 /// key has no line (purging its files is the whole delete), and writing
 /// anyway would create the file for an account that never had one.
 async fn drop_authorized_line(path: &std::path::Path, fp: &str) -> AgentResult<bool> {
-    let body = fs::read_to_string(path).await.unwrap_or_default();
+    let body = read_user_file(path).await?;
     let mut keep = Vec::new();
     let mut removed = false;
-    for line in body.lines() {
+    for (i, line) in body.lines().enumerate() {
         let trimmed = line.trim();
         if trimmed.is_empty() || trimmed.starts_with('#') {
             keep.push(line.to_string());
             continue;
         }
-        match fingerprint(trimmed).await {
-            Ok(this_fp) if this_fp == fp => removed = true,
-            _ => keep.push(line.to_string()),
+        let this_line = match fingerprint(trimmed).await {
+            Ok(this_fp) => this_fp == fp,
+            // The list shows a line ssh-keygen cannot read as `line-N`.
+            // Deleting such a row answered ok and removed nothing.
+            Err(_) => fp == format!("line-{}", i + 1),
+        };
+        if this_line {
+            removed = true;
+        } else {
+            keep.push(line.to_string());
         }
     }
     if removed {
@@ -1228,6 +1237,38 @@ fn ssh_home_dir_lookup(user: &str) -> AgentResult<PathBuf> {
             Ok(PathBuf::from(format!("/home/{user}/.ssh")))
         }
     }
+}
+
+/// A file under a user's `~/.ssh`, read in order to rewrite it or show it in
+/// the editor; a missing one is empty.
+///
+/// A symlink the user planted is refused: the file is written back as the
+/// user's own, so `authorized_keys -> /etc/shadow` followed by "add a key"
+/// handed that user a copy of /etc/shadow. Any other read error fails too.
+/// It used to count as an empty file, so adding a key to an authorized_keys
+/// that held one byte outside UTF-8 (a Latin-1 comment) wrote the file back
+/// with only the new key in it.
+async fn read_user_file(path: &std::path::Path) -> AgentResult<String> {
+    fs_atomic::reject_untrusted_symlinks(path).await?;
+    match fs::read_to_string(path).await {
+        Ok(body) => Ok(body),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(String::new()),
+        Err(e) => Err(AgentError::Invalid(format!(
+            "could not read {}: {e}",
+            path.display()
+        ))),
+    }
+}
+
+/// A name a keypair may have. The files `~/.ssh` already uses are not one:
+/// a keypair called `config` put its private key in the user's ssh config,
+/// and deleting it removed that file.
+fn is_keypair_name(name: &str) -> bool {
+    regex::Regex::new(KEYPAIR_NAME_RE).unwrap().is_match(name)
+        && !matches!(
+            name,
+            "authorized_keys" | "authorized_keys2" | "config" | "known_hosts" | "environment" | "rc"
+        )
 }
 
 fn is_safe_user(user: &str) -> bool {
@@ -1415,6 +1456,46 @@ mod tests {
             .unwrap()
             .trim()
             .to_string()
+    }
+
+    #[test]
+    fn keypair_names_leave_the_files_ssh_uses_alone() {
+        assert!(super::is_keypair_name("github_vps_panel"));
+        assert!(super::is_keypair_name("id_ed25519"));
+        for bad in ["config", "authorized_keys", "known_hosts", "a", "Bad.Name", "../x"] {
+            assert!(!super::is_keypair_name(bad), "{bad}");
+        }
+    }
+
+    #[tokio::test]
+    async fn a_file_that_cannot_be_read_is_not_taken_for_an_empty_one() {
+        let dir = scratch_ssh_dir();
+        assert_eq!(super::read_user_file(&dir.join("missing")).await.unwrap(), "");
+
+        // One Latin-1 byte in a comment: rewriting from "" would drop the key.
+        let ak = dir.join("authorized_keys");
+        std::fs::write(&ak, b"ssh-ed25519 AAAA jos\xe9@laptop\n").unwrap();
+        assert!(super::read_user_file(&ak).await.is_err());
+
+        // Root's own symlinks are trusted, so this part needs a normal user.
+        if !nix::unistd::getuid().is_root() {
+            std::fs::write(dir.join("secret"), "root only\n").unwrap();
+            std::os::unix::fs::symlink(dir.join("secret"), dir.join("config")).unwrap();
+            assert!(super::read_user_file(&dir.join("config")).await.is_err());
+        }
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn drops_a_line_ssh_keygen_cannot_read_by_its_list_id() {
+        let dir = scratch_ssh_dir();
+        let ak = dir.join("authorized_keys");
+        std::fs::write(&ak, "# keys\nnot a key at all\n").unwrap();
+        // Line 1 is a comment, which the list never shows.
+        assert!(!super::drop_authorized_line(&ak, "line-1").await.unwrap());
+        assert!(super::drop_authorized_line(&ak, "line-2").await.unwrap());
+        assert_eq!(std::fs::read_to_string(&ak).unwrap(), "# keys\n");
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[tokio::test]
