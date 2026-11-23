@@ -13,22 +13,35 @@ export default function LogTailer({
 }) {
   const [unit, setUnit] = useState<string>(initial || units[0] || "");
   const [lines, setLines] = useState<string[]>([]);
+  // The stream closed (agent restarted, unit refused): said so instead of
+  // the box sitting on its last line as if it were still live.
+  const [ended, setEnded] = useState(false);
+  // Bumped by Reconnect to open the stream again.
+  const [attempt, setAttempt] = useState(0);
   const boxRef = useRef<HTMLPreElement>(null);
+  // Follow new lines only while the box is scrolled to its end, so reading
+  // back through a busy unit is not yanked down by every new line.
+  const atBottom = useRef(true);
 
   useEffect(() => {
     if (!unit) return;
     setLines([]);
+    setEnded(false);
+    atBottom.current = true;
     const es = new EventSource(`/api/logs/${encodeURIComponent(unit)}/stream`);
     es.addEventListener("line", (e) => {
       setLines((prev) => [...prev.slice(-2000), (e as MessageEvent).data]);
     });
-    es.onerror = () => es.close();
+    es.onerror = () => {
+      es.close();
+      setEnded(true);
+    };
     return () => es.close();
-  }, [unit]);
+  }, [unit, attempt]);
 
   useEffect(() => {
-    boxRef.current?.scrollTo(0, boxRef.current.scrollHeight);
-  }, [lines]);
+    if (atBottom.current) boxRef.current?.scrollTo(0, boxRef.current.scrollHeight);
+  }, [lines, ended]);
 
   return (
     <div>
@@ -44,9 +57,22 @@ export default function LogTailer({
           ))}
         </select>
         <button className={styles.btnGhost} onClick={() => setLines([])}>Clear</button>
+        {ended && unit && (
+          <button className={styles.btnGhost} onClick={() => setAttempt((n) => n + 1)}>
+            Reconnect
+          </button>
+        )}
       </div>
-      <pre ref={boxRef} className={local.box}>
-        {lines.join("\n") || "(waiting for log lines...)"}
+      <pre
+        ref={boxRef}
+        className={local.box}
+        onScroll={(e) => {
+          const el = e.currentTarget;
+          atBottom.current = el.scrollHeight - el.scrollTop - el.clientHeight < 24;
+        }}
+      >
+        {lines.join("\n") || (ended ? "" : "(waiting for log lines...)")}
+        {ended && `${lines.length > 0 ? "\n" : ""}(the log stream ended)`}
       </pre>
     </div>
   );
