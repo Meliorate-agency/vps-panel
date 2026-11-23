@@ -57,6 +57,7 @@ export default function EditRecordRow({
     null,
   );
   const [deletePending, startDelete] = useTransition();
+  const [, startSave] = useTransition();
   const isSoa = record.type.toUpperCase() === "SOA";
   const typeOptions = isSoa
     ? ["SOA"]
@@ -187,6 +188,15 @@ export default function EditRecordRow({
     }
   }, [state]);
 
+  // Submitted by hand: through <form action> React reset the fields to the
+  // record's current values after a refused save, so the edit was lost and
+  // the error sat under values that were not the ones refused.
+  function onSubmit(e: React.FormEvent<HTMLFormElement>) {
+    e.preventDefault();
+    const fd = new FormData(e.currentTarget);
+    startSave(() => formAction(fd));
+  }
+
   function handleDeleteClick() {
     const ok = window.confirm(
       `Delete DNS record?\n\n${record.name}  ${record.type}  ${record.content}\n\nThis cannot be undone.`,
@@ -294,7 +304,7 @@ export default function EditRecordRow({
                   {record.name} {record.type}
                 </span>
               </div>
-              <form action={formAction}>
+              <form onSubmit={onSubmit}>
                 <input type="hidden" name="original_type" value={record.type} />
                 <label className={styles.field} style={{ marginBottom: 8 }}>
                   Name

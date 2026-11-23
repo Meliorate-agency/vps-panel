@@ -1,6 +1,6 @@
 "use client";
 
-import { useActionState } from "react";
+import { useActionState, useEffect, useRef, useTransition } from "react";
 import styles from "@/components/page.module.css";
 
 type Result = { ok: true } | { ok: false; error: string };
@@ -13,8 +13,21 @@ export default function RecordForm({
   zone: string;
 }) {
   const [state, formAction, pending] = useActionState<Result | null, FormData>(action, null);
+  const formRef = useRef<HTMLFormElement>(null);
+  // Submitted by hand: through <form action> React reset the form after a
+  // refused record too, wiping a long TXT/DKIM value along with the error.
+  // Cleared only once the record is added.
+  const [, startTransition] = useTransition();
+  function onSubmit(e: React.FormEvent<HTMLFormElement>) {
+    e.preventDefault();
+    const fd = new FormData(e.currentTarget);
+    startTransition(() => formAction(fd));
+  }
+  useEffect(() => {
+    if (state?.ok) formRef.current?.reset();
+  }, [state]);
   return (
-    <form action={formAction}>
+    <form onSubmit={onSubmit} ref={formRef}>
       <div className={styles.formRow}>
         <label className={styles.field}>
           Name
