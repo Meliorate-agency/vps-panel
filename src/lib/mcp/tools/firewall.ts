@@ -1,6 +1,6 @@
 import "server-only";
 import { agent } from "@/lib/agent";
-import { optionalString, requireNumber, requireString, type Tool } from "../types";
+import { optionalBoolean, optionalString, requireNumber, requireString, type Tool } from "../types";
 
 export const TOOLS: Tool[] = [
   {
@@ -50,18 +50,28 @@ export const TOOLS: Tool[] = [
   {
     page: "Firewall & bans",
     name: "firewall.deny",
-    description: "Close a previously-allowed port in UFW.",
+    description:
+      "Close a previously-allowed port in UFW. Denying the SSH port, 80 or 443 is refused with a conflict that says what the port is for; pass force=true only when the operator has decided to block it anyway.",
     inputSchema: {
       type: "object",
       properties: {
         port: { type: "integer", description: "Port to deny.", minimum: 1, maximum: 65535 },
         proto: { type: "string", description: "Protocol. Default 'tcp'.", enum: ["tcp", "udp"], default: "tcp" },
+        force: {
+          type: "boolean",
+          description: "Block a port the server needs (SSH, 80, 443) although the agent warned.",
+          default: false,
+        },
       },
       required: ["port"],
       additionalProperties: false,
     },
     call: async (args) =>
-      agent.firewall.deny(requireNumber(args, "port"), optionalString(args, "proto") ?? "tcp"),
+      agent.firewall.deny(
+        requireNumber(args, "port"),
+        optionalString(args, "proto") ?? "tcp",
+        optionalBoolean(args, "force") === true,
+      ),
   },
   {
     page: "Firewall & bans",

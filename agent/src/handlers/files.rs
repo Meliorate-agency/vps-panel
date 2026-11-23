@@ -156,6 +156,12 @@ const KEPT_DIRS: &[&str] = &[
     "/var/lib/postgresql",
     "/var/lib/docker",
     "/var/vmail",
+    // The mail and DNS servers' configuration, DKIM keys and mail queue.
+    "/etc/postfix",
+    "/etc/dovecot",
+    "/etc/powerdns",
+    "/var/lib/rspamd",
+    "/var/spool/postfix",
 ];
 
 /// General-purpose storage for the operator's own files.
@@ -1712,6 +1718,11 @@ mod tests {
             "/var/lib/postgresql",
             "/var/lib/docker",
             "/var/vmail",
+            "/etc/postfix",
+            "/etc/dovecot",
+            "/etc/powerdns",
+            "/var/lib/rspamd",
+            "/var/spool/postfix",
             "/opt/vps-panel",
         ] {
             // Trash, rename and move all go through guard_write.
