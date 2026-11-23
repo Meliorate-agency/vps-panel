@@ -18,12 +18,27 @@ export default function TaskProgress({ taskId, onComplete }: Props) {
   // a task is pending when we simply lost sight of it.
   const [streamNote, setStreamNote] = useState<string | null>(null);
   const boxRef = useRef<HTMLPreElement>(null);
+  // Whether the log is scrolled to its end. New lines follow only then, so
+  // scrolling up to read an error is not yanked back down by the next line.
+  const atBottom = useRef(true);
   const onCompleteRef = useRef(onComplete);
   onCompleteRef.current = onComplete;
+
+  // A new task in the same place (a second Install or Apply, most callers
+  // pass no key): start from an empty log, not the last task's lines with
+  // the new ones appended.
+  const [shownTask, setShownTask] = useState(taskId);
+  if (shownTask !== taskId) {
+    setShownTask(taskId);
+    setLines([]);
+    setStatus("pending");
+    setStreamNote(null);
+  }
 
   useEffect(() => {
     let cancelled = false;
     let fellBack = false;
+    atBottom.current = true;
     let pollTimer: number | undefined;
     const es = new EventSource(`/api/tasks/${encodeURIComponent(taskId)}/stream`);
 
@@ -95,8 +110,8 @@ export default function TaskProgress({ taskId, onComplete }: Props) {
   }, [taskId]);
 
   useEffect(() => {
-    boxRef.current?.scrollTo(0, boxRef.current.scrollHeight);
-  }, [lines]);
+    if (atBottom.current) boxRef.current?.scrollTo(0, boxRef.current.scrollHeight);
+  }, [lines, streamNote]);
 
   return (
     <div className={styles.wrap}>
@@ -105,7 +120,14 @@ export default function TaskProgress({ taskId, onComplete }: Props) {
         <span className={styles.label}>Task {taskId.slice(0, 8)}</span>
         <span className={styles.statusText}>{status}</span>
       </div>
-      <pre ref={boxRef} className={styles.log}>
+      <pre
+        ref={boxRef}
+        className={styles.log}
+        onScroll={(e) => {
+          const el = e.currentTarget;
+          atBottom.current = el.scrollHeight - el.scrollTop - el.clientHeight < 24;
+        }}
+      >
         {[...lines, ...(streamNote ? [streamNote] : [])].join("\n") ||
           "(waiting for output...)"}
       </pre>
