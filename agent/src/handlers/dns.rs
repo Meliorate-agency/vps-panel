@@ -1315,7 +1315,8 @@ pub(crate) async fn verify_public_dns(
 /// reaches this server but something about its records can still make the
 /// certificate order fail.
 async fn check_public_dns(state: &AppState, domain: &str) -> Result<Option<String>, String> {
-    let expected_v4 = crate::server_ip::resolve_ipv4(None, &state.config.panel_host).await;
+    let facts_v4 = crate::server_ip::ipv4_facts(&state.config.panel_host).await;
+    let expected_v4 = facts_v4.address();
     let expected_v6 = crate::server_ip::resolve_ipv6(None, &state.config.panel_host).await;
     let own_v6 = own_ipv6s(expected_v6.as_deref()).await;
     let v4_resolved = dig_public(domain, "A").await;
@@ -1326,6 +1327,7 @@ async fn check_public_dns(state: &AppState, domain: &str) -> Result<Option<Strin
         &v6_resolved,
         expected_v4.as_deref(),
         expected_v6.as_deref(),
+        &facts_v4.reaching(),
         &own_v6,
         &state.config.panel_host,
     )
@@ -1352,12 +1354,20 @@ async fn own_ipv6s(expected_v6: Option<&str>) -> Vec<String> {
 /// fails although the A record is right. Only a warning, not a refusal: with
 /// a dead address behind the AAAA the order does succeed over IPv4, and
 /// certificates that renew that way today must keep renewing.
+///
+/// `own_v4` is every IPv4 address that reaches this server
+/// (`Ipv4Facts::reaching`), `expected_v4` the one the panel writes into
+/// records. Only that one used to pass, and it was the panel hostname's
+/// address even with a proxy in front of the panel: a name pointing straight
+/// at this server was refused.
+#[allow(clippy::too_many_arguments)]
 fn judge_public_dns(
     domain: &str,
     v4_resolved: &[String],
     v6_resolved: &[String],
     expected_v4: Option<&str>,
     expected_v6: Option<&str>,
+    own_v4: &[String],
     own_v6: &[String],
     panel_host: &str,
 ) -> Result<Option<String>, String> {
@@ -1370,7 +1380,7 @@ fn judge_public_dns(
         ));
     }
 
-    let v4_match = expected_v4.is_some_and(|w| v4_resolved.iter().any(|got| got == w));
+    let v4_match = v4_resolved.iter().any(|got| own_v4.contains(got));
     let v6_match = v6_resolved.iter().any(|got| own_v6.contains(got));
 
     if !v4_match && !v6_match {
@@ -1454,10 +1464,12 @@ pub(crate) async fn cleanup_subdomain_records(
         );
         return Ok(0);
     }
-    let expected_v4 = crate::server_ip::resolve_ipv4(None, &state.config.panel_host).await;
+    // Also the address the panel hostname resolves to when that is not this
+    // server's own: records written before the two were told apart carry it.
+    let own_v4 = crate::server_ip::ipv4_facts(&state.config.panel_host)
+        .await
+        .reaching();
     let expected_v6 = crate::server_ip::resolve_ipv6(None, &state.config.panel_host).await;
-    let mut own_v4 = crate::server_ip::ipv4s_on_interfaces().await;
-    own_v4.extend(expected_v4);
     let own_v6 = own_ipv6s(expected_v6.as_deref()).await;
     let rows: Vec<(u64, Option<String>)> = conn
         .exec(
@@ -1525,6 +1537,7 @@ mod tests {
     fn the_cert_preflight_wants_the_name_here_and_warns_about_a_stray_aaaa() {
         let v4 = "198.51.100.127";
         let own6 = list(&["2001:db8:1::1", "2001:db8:1::2"]);
+        let own4 = list(&[v4]);
         let judge = |a: &[&str], aaaa: &[&str]| {
             judge_public_dns(
                 "shop.example.com",
@@ -1532,6 +1545,7 @@ mod tests {
                 &list(aaaa),
                 Some(v4),
                 Some("2001:db8:1::1"),
+                &own4,
                 &own6,
                 "panel.example.com",
             )
@@ -1547,6 +1561,34 @@ mod tests {
         let warning = judge(&[v4], &["2001:db8:ffff::1"]).unwrap().unwrap();
         assert!(warning.contains("AAAA record (2001:db8:ffff::1)"), "{warning}");
         assert!(warning.contains("or point it at 2001:db8:1::1"), "{warning}");
+    }
+
+    #[test]
+    fn the_cert_preflight_takes_every_address_that_reaches_this_server() {
+        // The panel hostname is behind a proxy (104.16.1.1); the server's own
+        // address is 198.51.100.127, with a second one next to it.
+        let own4 = list(&["198.51.100.127", "203.0.113.9", "104.16.1.1"]);
+        let judge = |a: &[&str]| {
+            judge_public_dns(
+                "shop.example.com",
+                &list(a),
+                &[],
+                Some("198.51.100.127"),
+                None,
+                &own4,
+                &[],
+                "panel.example.com",
+            )
+        };
+        // A name pointing straight at this server: refused while only the
+        // panel hostname's address counted.
+        assert_eq!(judge(&["198.51.100.127"]), Ok(None));
+        assert_eq!(judge(&["203.0.113.9"]), Ok(None));
+        // A name behind the same proxy as the panel passed before, and still does.
+        assert_eq!(judge(&["104.16.1.1"]), Ok(None));
+        let refused = judge(&["192.0.2.50"]).unwrap_err();
+        assert!(refused.contains("but this server is A=Some(\"198.51.100.127\")"), "{refused}");
+        assert!(judge(&[]).unwrap_err().contains("pointing to 198.51.100.127"));
     }
 
     #[test]
