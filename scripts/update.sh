@@ -412,6 +412,9 @@ harden_mail() {
     cp -a /etc/postfix/main.cf "$backup_dir/main.cf.bak-$stamp"
     cp -a /etc/postfix/master.cf "$backup_dir/master.cf.bak-$stamp"
     if [[ ! -f "$map" ]]; then
+      # It holds the mail database password: unreadable to others from the
+      # start, not only after the chmod.
+      install -m 0640 -o root -g postfix /dev/null "$map"
       { grep -E '^(user|password|hosts|dbname)[[:space:]]*=' "$src"
         echo "query = SELECT email FROM virtual_users WHERE email='%s' UNION SELECT destination FROM virtual_aliases WHERE source='%s'"
       } > "$map"

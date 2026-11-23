@@ -420,6 +420,9 @@ if ! command -v dig >/dev/null 2>&1; then
     || warn "could not install bind9-dnsutils (dig); certificate and mail DNS checks need it"
 fi
 
+# Holds the database password: never readable by others, not even between
+# creating it and the chmod below.
+install -m 0640 -o root -g pdns /dev/null /etc/powerdns/pdns.conf
 cat > /etc/powerdns/pdns.conf <<EOF
 launch=gmysql
 gmysql-host=127.0.0.1
@@ -527,6 +530,13 @@ if [[ -z "$(postconf -nh smtp_bind_address6 2>/dev/null || true)" ]]; then
   done
 fi
 
+# These hold the mail database password: created unreadable to others before
+# anything is written into them (they were world-readable until the chmod
+# below).
+for f in mysql-virtual-mailbox-domains.cf mysql-virtual-mailbox-maps.cf \
+         mysql-virtual-alias-maps.cf mysql-sender-login-maps.cf; do
+  install -m 0640 -o root -g postfix /dev/null "/etc/postfix/$f"
+done
 cat > /etc/postfix/mysql-virtual-mailbox-domains.cf <<EOF
 user = mail
 password = $MAIL_PASS
@@ -580,6 +590,8 @@ log "configuring Dovecot"
 # home is a plain `home` dir inside the maildir, not the maildir itself: there,
 # Sieve's files and Out of Office's reply log (.dovecot.sieve,
 # .dovecot.lda-dupes.locks) showed up as folders and broke filing into folders.
+# Created unreadable to others first: it holds the mail database password.
+install -m 0640 -o root -g dovecot /dev/null /etc/dovecot/dovecot-sql.conf.ext
 cat > /etc/dovecot/dovecot-sql.conf.ext <<EOF
 driver = mysql
 connect = host=127.0.0.1 dbname=mail user=mail password=$MAIL_PASS
