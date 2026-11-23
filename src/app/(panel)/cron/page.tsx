@@ -1,4 +1,5 @@
 import { agent } from "@/lib/agent";
+import { requireSession } from "@/lib/auth";
 import Table from "@/components/Table/Table";
 import ConfirmDeleteButton from "@/components/ConfirmDeleteButton/ConfirmDeleteButton";
 import styles from "@/components/page.module.css";
@@ -8,6 +9,19 @@ import CronForm from "./CronForm";
 export const dynamic = "force-dynamic";
 
 export default async function CronPage() {
+  // A job's command line often carries a token or a password (a curl with
+  // an API key, a database dump): admins only, like the audit log.
+  const s = await requireSession();
+  if (s.role !== "admin") {
+    return (
+      <div className={styles.head}>
+        <div>
+          <h1 className={styles.title}>Cron jobs</h1>
+          <div className={styles.subtitle}>Only admins can see the cron jobs.</div>
+        </div>
+      </div>
+    );
+  }
   // /system/users is cheap and stable so fetching it on every page load is
   // fine. Empty array fallback keeps the dropdown from going blank if the
   // agent socket is down — CronForm handles that case by prepending root.
