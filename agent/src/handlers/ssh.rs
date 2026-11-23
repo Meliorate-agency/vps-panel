@@ -1133,10 +1133,18 @@ fn authorized_line(key: &str, label: &str) -> AgentResult<String> {
 pub async fn add(Json(req): Json<AddKey>) -> AgentResult<Json<OkResponse>> {
     let path = authorized_keys_path(&req.user)?;
     let line = authorized_line(&req.key, req.label.as_deref().unwrap_or(""))?;
-    fingerprint(&line)
+    let fp = fingerprint(&line)
         .await
         .map_err(|_| AgentError::Invalid("not a valid SSH public key".into()))?;
     let mut content = read_user_file(&path).await?;
+    // A second line with the same key made a second row with the same
+    // fingerprint, and deleting either row removed both.
+    if has_key_with_fingerprint(&content, &fp).await {
+        return Err(AgentError::Conflict(format!(
+            "this key is already authorised for {}",
+            req.user
+        )));
+    }
     if !content.is_empty() && !content.ends_with('\n') {
         content.push('\n');
     }
@@ -1146,6 +1154,21 @@ pub async fn add(Json(req): Json<AddKey>) -> AgentResult<Json<OkResponse>> {
     fs_atomic::write(&path, content.as_bytes(), 0o600).await?;
     chown_for_user(&req.user, &path)?;
     Ok(Json(OkResponse::default()))
+}
+
+/// Whether a line of an authorized_keys `body` holds the key with
+/// fingerprint `fp`, whatever its comment or options.
+async fn has_key_with_fingerprint(body: &str, fp: &str) -> bool {
+    for line in body.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() || trimmed.starts_with('#') {
+            continue;
+        }
+        if fingerprint(trimmed).await.is_ok_and(|line_fp| line_fp == fp) {
+            return true;
+        }
+    }
+    false
 }
 
 #[derive(Deserialize)]
@@ -1953,6 +1976,22 @@ mod tests {
         assert_eq!(line(rows[1].fingerprint.clone()).await, Some(pasted));
         assert_eq!(line(rows[2].fingerprint.clone()).await, Some(deploy));
         assert_eq!(line("SHA256:unknown".into()).await, None);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_key_already_in_the_file_is_found_whatever_its_comment() {
+        let dir = scratch_ssh_dir();
+        let a = keygen(&dir, "a", "laptop");
+        let b = keygen(&dir, "b", "phone");
+        let body = format!("# keys\nfrom=\"10.0.0.0/8\" {a}\nnot a key\n");
+        // The same key pasted again under another label.
+        let again = a.replace("laptop", "work laptop");
+        let fp = super::fingerprint(&again).await.unwrap();
+        assert!(super::has_key_with_fingerprint(&body, &fp).await);
+        let other = super::fingerprint(&b).await.unwrap();
+        assert!(!super::has_key_with_fingerprint(&body, &other).await);
+        assert!(!super::has_key_with_fingerprint("", &fp).await);
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
