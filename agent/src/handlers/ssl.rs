@@ -287,7 +287,9 @@ pub async fn issue_for_names(
 
     task.log(format!("certificate written to {}", cert_dir.display()));
 
-    if primary == cfg.panel_host {
+    // The panel host as it is now: after a hostname change cfg still has the
+    // old one until the agent restarts.
+    if primary == live_panel_host(cfg).await {
         task.log("rewiring postfix and dovecot to use the new certificate");
         if let Err(e) = apply_mail_cert(primary, &cert_dir).await {
             task.log(format!("mail tls update failed: {e}"));
@@ -449,6 +451,16 @@ async fn order_certificate(
     };
 
     Ok((cert_pem, key_pair.serialize_pem()))
+}
+
+/// PANEL_HOST as it is in .env now, else the value the agent started with.
+async fn live_panel_host(cfg: &Config) -> String {
+    let live = crate::handlers::system::current_panel_host().await;
+    if live.is_empty() {
+        cfg.panel_host.to_lowercase()
+    } else {
+        live
+    }
 }
 
 /// Saved ACME account credentials (root-only file). Every order used to
@@ -819,8 +831,11 @@ pub(crate) async fn has_serving_vhost(state: &AppState, name: &str) -> bool {
             return true;
         }
     }
-    !state.config.panel_host.is_empty()
-        && name == state.config.panel_host
+    // The live panel host: with the one the agent started with, the cert of
+    // a hostname set since then counted as unused and was never renewed.
+    let panel_host = live_panel_host(&state.config).await;
+    !panel_host.is_empty()
+        && name == panel_host
         && tokio::fs::try_exists("/etc/nginx/sites-enabled/vps-panel.conf")
             .await
             .unwrap_or(false)
