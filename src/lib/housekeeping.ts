@@ -1,5 +1,6 @@
 import "server-only";
 import { db } from "./db";
+import { KNOWN_ADDRESS_DAYS } from "./rateLimit";
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 
@@ -9,7 +10,10 @@ const DAY_MS = 24 * 60 * 60 * 1000;
  * - `sessions`: a sign-in and every keep-alive refresh add two rows. Once
  *   `expires_at` has passed, the token itself is refused before its row is
  *   looked up. A day's margin on top.
- * - `login_attempts`: the limiter counts the last 15 minutes; a week is kept.
+ * - `login_attempts`: the limiter counts the failures of the last 15
+ *   minutes; a week of them is kept. Successful sign-ins are kept for
+ *   KNOWN_ADDRESS_DAYS: they tell the limiter which addresses are the
+ *   account's own (lib/rateLimit.ts).
  *
  * The audit log and the task history are not touched: how long those are
  * kept is the operator's decision.
@@ -17,7 +21,10 @@ const DAY_MS = 24 * 60 * 60 * 1000;
 export function pruneAuthTables(): void {
   const conn = db();
   conn.prepare(`DELETE FROM sessions WHERE expires_at < datetime('now', '-1 day')`).run();
-  conn.prepare(`DELETE FROM login_attempts WHERE ts < datetime('now', '-7 days')`).run();
+  conn.prepare(`DELETE FROM login_attempts WHERE success = 0 AND ts < datetime('now', '-7 days')`).run();
+  conn
+    .prepare(`DELETE FROM login_attempts WHERE ts < datetime('now', '-' || ? || ' days')`)
+    .run(KNOWN_ADDRESS_DAYS);
 }
 
 /**
