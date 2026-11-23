@@ -73,6 +73,8 @@ async fn serve() -> Result<()> {
     // Backfills /srv/drive on boxes installed before the Drive root existed.
     handlers::files::ensure_drive_dir().await;
     handlers::apps::ensure_app_unit_defaults().await;
+    // An install or build the last agent was stopped in the middle of.
+    tokio::spawn(handlers::apps::recover_interrupted_builds(state.clone()));
     // Server names longer than 46 characters fail nginx -t without it.
     handlers::nginx::ensure_http_defaults().await;
     // Webmail filters and Out of Office; spawned so a slow docker can't hold

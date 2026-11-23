@@ -1644,7 +1644,9 @@ impl ArtifactSnapshot {
             }
         }
         // Only a snapshot that got this far is put back by recover_interrupted.
-        let _ = tokio::fs::write(dir.join(SNAPSHOT_COMPLETE), b"").await;
+        // It names the tree it was taken from, for the agent start that finds
+        // it (recover_interrupted_builds).
+        let _ = tokio::fs::write(dir.join(SNAPSHOT_COMPLETE), source_dir.as_bytes()).await;
         if !snap.names.is_empty() {
             task.log(format!(
                 "saved the current {} so a failed install or build can be undone",
@@ -1707,6 +1709,141 @@ impl ArtifactSnapshot {
 
     async fn discard(&self) {
         let _ = tokio::fs::remove_dir_all(&self.dir).await;
+    }
+
+    /// The complete snapshot an interrupted run left in `dir`, when the build
+    /// it saved is no longer whole in `source_dir` (artifact_is_broken). None
+    /// when there is no such snapshot, or everything it saved looks finished
+    /// in the live tree: the agent was stopped after the build was done, or
+    /// the operator has built by hand since, and the newer build stays.
+    async fn left_by_interrupted_run(dir: PathBuf, source_dir: &str) -> Option<Self> {
+        if !dir.join(SNAPSHOT_COMPLETE).is_file() || !PathBuf::from(source_dir).is_dir() {
+            return None;
+        }
+        let mut snap = ArtifactSnapshot {
+            source_dir: PathBuf::from(source_dir),
+            dir,
+            names: Vec::new(),
+        };
+        let mut broken = false;
+        for name in RUNTIME_ARTIFACT_DIRS {
+            let saved = snap.dir.join(name);
+            if !is_real_dir(&saved).await {
+                continue;
+            }
+            snap.names.push(name);
+            broken |= artifact_is_broken(name, &saved, &snap.source_dir.join(name)).await;
+        }
+        broken.then_some(snap)
+    }
+}
+
+async fn is_real_dir(path: &std::path::Path) -> bool {
+    tokio::fs::symlink_metadata(path)
+        .await
+        .map(|m| m.is_dir())
+        .unwrap_or(false)
+}
+
+/// The file a finished install or build writes last into an artifact
+/// directory: npm its hidden lockfile, `next build` the two files `next
+/// start` refuses to run without, Nitro (Nuxt) its build description.
+const ARTIFACT_DONE_FILES: &[(&str, &str)] = &[
+    ("node_modules", ".package-lock.json"),
+    (".next", "BUILD_ID"),
+    (".next", "prerender-manifest.json"),
+    (".output", "nitro.json"),
+];
+
+/// Whether the live copy of a saved artifact directory is what an install or
+/// build stopped half-way leaves behind: gone (`npm ci` and the build tools
+/// delete it first), empty, or without a file from ARTIFACT_DONE_FILES that
+/// the saved copy has.
+async fn artifact_is_broken(name: &str, saved: &std::path::Path, live: &std::path::Path) -> bool {
+    if !is_real_dir(live).await || classify_dir(&live.display().to_string()).await != "populated" {
+        return true;
+    }
+    for (dir, file) in ARTIFACT_DONE_FILES {
+        if *dir == name && saved.join(file).exists() && !live.join(file).exists() {
+            return true;
+        }
+    }
+    false
+}
+
+const RECOVER_TASK_PREFIX: &str = "apps.recover:";
+
+/// Agent start: put back the build of every app whose install or build the
+/// previous agent was stopped in the middle of (a restart by hand, a crash,
+/// the server going down). The half-written node_modules or build output
+/// stayed in place, and the last build that worked stayed in its snapshot,
+/// until the next Install, Build or Update put it back (recover_interrupted);
+/// until then the app could not start. Spawned, so a slow disk does not hold
+/// up the socket. Each app it restores gets a task with what was done.
+pub async fn recover_interrupted_builds(state: AppState) {
+    let Ok(mut entries) = tokio::fs::read_dir(BUILD_SNAPSHOT_BASE).await else {
+        return;
+    };
+    while let Ok(Some(entry)) = entries.next_entry().await {
+        let Some(name) = entry.file_name().to_str().map(str::to_string) else {
+            continue;
+        };
+        if validate_name(&name).is_err() || docker_apps::is_docker_app(&name) {
+            continue;
+        }
+        let Some(source_dir) = snapshot_source_dir(&entry.path()).await else {
+            continue;
+        };
+        let Some(snapshot) = ArtifactSnapshot::left_by_interrupted_run(entry.path(), &source_dir).await else {
+            continue;
+        };
+        // A deploy or update started since the agent came up has put the
+        // snapshot back itself and is using the directory.
+        if running_app_task(&state, &name).is_some() {
+            continue;
+        }
+        let task = state.tasks.create(&format!("{RECOVER_TASK_PREFIX}{name}"));
+        task.start();
+        task.log(format!(
+            "an install or build of {name} was interrupted when the agent stopped: \
+             putting back the build saved before it ({}) in {source_dir}",
+            snapshot.names.join(", ")
+        ));
+        let restored = snapshot.restore(&task).await;
+        tracing::info!(app = %name, complete = restored, "put back the build saved before an interrupted install or build");
+        if restored {
+            restart_on_restored_build(&state, &name, &task).await;
+            task.log("done");
+        }
+        task.finish(restored);
+    }
+}
+
+/// The tree the snapshot in `dir` was taken from, as its marker names it.
+/// None for a snapshot from before the marker said so: nothing ties it to
+/// the app that has its name today (delete did not remove it then), so it
+/// waits for that app's next Install, Build or Update as it always did.
+async fn snapshot_source_dir(dir: &std::path::Path) -> Option<String> {
+    let recorded = tokio::fs::read_to_string(dir.join(SNAPSHOT_COMPLETE)).await.ok()?;
+    let recorded = recorded.trim();
+    (!recorded.is_empty() && validate_source_dir(recorded).is_ok()).then(|| recorded.to_string())
+}
+
+/// The app's process ran while files were deleted and replaced under it, or
+/// gave up starting without them. Restart it on the build that is back, if
+/// it is an app that is meant to run: enabled, on a routing slot, and not
+/// stopped.
+async fn restart_on_restored_build(state: &AppState, name: &str, task: &crate::ipc::tasks::TaskHandle) {
+    let unit = format!("{VPS_APP_PREFIX}{name}.service");
+    let meant_to_run = unit_prop(&unit, "UnitFileState").await == "enabled"
+        && matches!(unit_prop(&unit, "ActiveState").await.as_str(), "active" | "activating" | "failed")
+        && ensure_has_slot(state, name).await.is_ok();
+    if !meant_to_run {
+        return;
+    }
+    match app_systemctl(&["restart"], &unit).await {
+        Ok(()) => task.log(format!("restarted {unit} on the restored build")),
+        Err(e) => task.log(format!("could not restart {unit}: {e}")),
     }
 }
 
@@ -1806,8 +1943,11 @@ pub async fn delete(
         }
     }
 
-    // The fetch cache is no use without the app.
+    // The fetch cache is no use without the app, and neither is the build an
+    // interrupted install saved: it would be put back into a later app of
+    // the same name.
     app_git::remove_mirror(&name).await;
+    let _ = tokio::fs::remove_dir_all(format!("{BUILD_SNAPSHOT_BASE}/{name}")).await;
 
     // Optional wipe of /srv/apps/<name>. Hard-checked: refuse anything not
     // anchored at APPS_BASE_DIR/ to prevent a corrupt panel.db from making
@@ -1972,11 +2112,13 @@ pub(crate) fn refuse_if_app_task_running(state: &AppState, name: &str) -> AgentR
 }
 
 /// The app's task that is still running, as (what it is, task id): a deploy
-/// stage or an update.
+/// stage, an update, or the build put back at agent start
+/// (recover_interrupted_builds).
 fn running_app_task(state: &AppState, name: &str) -> Option<(&'static str, String)> {
     [
         ("deploy", format!("apps.create:{name}")),
         ("update", format!("apps.update:{name}")),
+        ("build recovery", format!("{RECOVER_TASK_PREFIX}{name}")),
     ]
     .into_iter()
     .find_map(|(what, kind)| state.tasks.live_task_id(&kind).map(|id| (what, id)))
@@ -3348,6 +3490,86 @@ mod tests {
         let again = ArtifactSnapshot::take_in(snaps.clone(), source_dir, &task).await;
         assert_eq!(std::fs::read_to_string(&module).unwrap(), "good");
         again.discard().await;
+        task.finish(true);
+    }
+
+    /// A tree with an installed and built app in it.
+    #[cfg(unix)]
+    fn built_app(src: &std::path::Path, build: &str) {
+        for (file, body) in [
+            ("node_modules/.package-lock.json", "{}"),
+            ("node_modules/pkg/index.js", build),
+            (".next/BUILD_ID", build),
+            (".next/prerender-manifest.json", "{}"),
+            (".next/server/app.js", build),
+        ] {
+            let path = src.join(file);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, body).unwrap();
+        }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn an_agent_start_puts_back_the_build_an_interrupted_run_left_saved() {
+        let (_db, tasks) = tracker();
+        let task = tasks.create("apps.update:web");
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("web");
+        let snaps = dir.path().join("snapshots/web");
+        built_app(&src, "good");
+        let source_dir = src.to_str().unwrap();
+        let module = src.join("node_modules/pkg/index.js");
+        let page = src.join(".next/server/app.js");
+
+        // No leftover snapshot, nothing to do.
+        assert!(ArtifactSnapshot::left_by_interrupted_run(snaps.clone(), source_dir).await.is_none());
+
+        // An update saves the build, `npm ci` deletes node_modules and has
+        // unpacked half of the new one when the agent stops.
+        drop(ArtifactSnapshot::take_in(snaps.clone(), source_dir, &task).await);
+        assert_eq!(snapshot_source_dir(&snaps).await.as_deref(), Some(source_dir));
+        std::fs::remove_dir_all(src.join("node_modules")).unwrap();
+        std::fs::create_dir_all(src.join("node_modules/half")).unwrap();
+        let left = ArtifactSnapshot::left_by_interrupted_run(snaps.clone(), source_dir).await.unwrap();
+        assert_eq!(left.names, ["node_modules", ".next"]);
+        assert!(left.restore(&task).await);
+        assert_eq!(std::fs::read_to_string(&module).unwrap(), "good");
+        assert!(!src.join("node_modules/half").exists());
+        assert_eq!(std::fs::read_to_string(&page).unwrap(), "good");
+        assert!(!snaps.exists());
+
+        // Stopped during `next build`: the output directory was emptied and
+        // has no BUILD_ID yet. The install before it had finished.
+        drop(ArtifactSnapshot::take_in(snaps.clone(), source_dir, &task).await);
+        std::fs::remove_dir_all(src.join(".next")).unwrap();
+        std::fs::create_dir_all(src.join(".next/cache")).unwrap();
+        // Replaced, not rewritten: the snapshot is hard links to the old files.
+        std::fs::remove_file(&module).unwrap();
+        std::fs::write(&module, "new").unwrap();
+        let left = ArtifactSnapshot::left_by_interrupted_run(snaps.clone(), source_dir).await.unwrap();
+        assert!(left.restore(&task).await);
+        // Both go back: the old build output belongs to the old node_modules.
+        assert_eq!(std::fs::read_to_string(&page).unwrap(), "good");
+        assert_eq!(std::fs::read_to_string(&module).unwrap(), "good");
+
+        // Stopped after the build had finished (the new version was being
+        // started): the new build is whole and stays.
+        drop(ArtifactSnapshot::take_in(snaps.clone(), source_dir, &task).await);
+        std::fs::remove_dir_all(src.join("node_modules")).unwrap();
+        std::fs::remove_dir_all(src.join(".next")).unwrap();
+        built_app(&src, "newer");
+        assert!(ArtifactSnapshot::left_by_interrupted_run(snaps.clone(), source_dir).await.is_none());
+        assert_eq!(std::fs::read_to_string(&page).unwrap(), "newer");
+        assert!(snaps.join("node_modules").is_dir(), "the snapshot waits for the next build");
+
+        // A snapshot from before the marker named its tree is left to the
+        // next Install, Build or Update, and so is one still being saved.
+        std::fs::remove_dir_all(src.join("node_modules")).unwrap();
+        std::fs::write(snaps.join(SNAPSHOT_COMPLETE), "").unwrap();
+        assert_eq!(snapshot_source_dir(&snaps).await, None);
+        std::fs::remove_file(snaps.join(SNAPSHOT_COMPLETE)).unwrap();
+        assert!(ArtifactSnapshot::left_by_interrupted_run(snaps.clone(), source_dir).await.is_none());
         task.finish(true);
     }
 
