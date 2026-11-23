@@ -303,8 +303,34 @@ async fn run_panel_host_task(
     // vhost while the running panel still set Secure cookies, and nobody
     // could log in.
     let before = PanelHostBefore::read().await;
-    let nginx_body = render_panel_vhost(&server_name, default_server, None)?;
-    let written: AgentResult<()> = async {
+    let http_body = render_panel_vhost(&server_name, default_server, None)?;
+    // The panel already serves HTTPS under this name and the certificate on
+    // disk is one nginx can go on serving (a re-save, the Renew button): the
+    // vhost keeps its 443 block from the start. Every run used to go through
+    // the HTTP-only vhost until the new certificate was there, and for that
+    // long a browser that had seen the panel's HSTS header refused to open
+    // the panel. Not for a name the panel is only now moving to: until its
+    // DNS is known to point here (step 7), the HTTP-only vhost is what keeps
+    // the panel reachable by IP. .env still starts with COOKIE_SECURE=0: the
+    // panel reads it at the restart in step 9, and by then step 8 has set it
+    // for the vhost that is in place.
+    let cert_path = format!("/etc/vps-panel/certs/{host}/fullchain.pem");
+    let key_path = format!("/etc/vps-panel/certs/{host}/privkey.pem");
+    let on_https_now = before
+        .vhost
+        .as_deref()
+        .is_some_and(|vhost| panel_vhost_serves_https(&String::from_utf8_lossy(vhost), &host));
+    let https_body = if !ip_only && issue_ssl_opt && on_https_now && panel_cert_usable(&host).await {
+        Some(render_panel_vhost(
+            &server_name,
+            default_server,
+            Some((&cert_path, &key_path)),
+        )?)
+    } else {
+        None
+    };
+    // Ok(true): the vhost with the certificate is the one in place.
+    let written: AgentResult<bool> = async {
         // 1. .env: write COOKIE_SECURE=0 up front. We only flip it back to 1 if
         //    SSL succeeds below — that's the whole footgun-fix.
         task.log("rewriting /etc/vps-panel/.env (COOKIE_SECURE=0)".to_string());
@@ -330,22 +356,51 @@ async fn run_panel_host_task(
             .await?;
         }
 
-        // 4. nginx vhost (HTTP-only for now; we re-render with SSL after issuance).
-        task.log("rewriting /etc/nginx/sites-available/vps-panel.conf".to_string());
+        // 4. nginx vhost: HTTP-only for now (re-rendered with SSL after
+        //    issuance), or with the certificate that is already there.
+        task.log(if https_body.is_some() {
+            "rewriting /etc/nginx/sites-available/vps-panel.conf (HTTPS stays on: the certificate on disk is valid)"
+                .to_string()
+        } else {
+            "rewriting /etc/nginx/sites-available/vps-panel.conf".to_string()
+        });
         crate::handlers::panel_access::ensure_file().await?;
-        fs_atomic::write(std::path::Path::new(NGINX_VHOST), nginx_body.as_bytes(), 0o644).await?;
+        let first_body = https_body.as_deref().unwrap_or(&http_body);
+        fs_atomic::write(std::path::Path::new(NGINX_VHOST), first_body.as_bytes(), 0o644).await?;
 
         // 5. nginx -t before anything is reloaded or restarted.
         task.log("nginx -t && systemctl reload nginx".to_string());
-        exec::run("nginx", ["-t"]).await?;
-        Ok(())
+        match exec::run("nginx", ["-t"]).await {
+            Ok(_) => Ok(https_body.is_some()),
+            // It may be the certificate on disk that nginx refuses (a key
+            // that is not its key), and the order in step 7 replaces the
+            // pair: through the HTTP-only vhost then, as every run used to.
+            Err(e) if https_body.is_some() => {
+                task.log(format!(
+                    "nginx -t refused the vhost with the certificate on disk ({e}); trying the HTTP-only vhost"
+                ));
+                fs_atomic::write(std::path::Path::new(NGINX_VHOST), http_body.as_bytes(), 0o644)
+                    .await?;
+                exec::run("nginx", ["-t"]).await?;
+                Ok(false)
+            }
+            Err(e) => Err(e),
+        }
     }
     .await;
-    if let Err(e) = written {
-        task.log("putting .env, the mail settings and the panel vhost back as they were".to_string());
-        before.restore().await;
-        return Err(e);
-    }
+    let https_from_start = match written {
+        Ok(https) => https,
+        Err(e) => {
+            task.log("putting .env, the mail settings and the panel vhost back as they were".to_string());
+            before.restore().await;
+            return Err(e);
+        }
+    };
+    // The vhost nginx has tested and is about to load.
+    let nginx_body: &str = match &https_body {
+        Some(body) if https_from_start => body,
+        _ => &http_body,
+    };
     // Only now that the new vhost is in: a site with this name is removed
     // for good (its panel.db rows too), so not before the test passed.
     if !ip_only {
@@ -365,7 +420,8 @@ async fn run_panel_host_task(
     //    this server and nothing else (dns::point_name_here), whether it is
     //    the zone's apex or a label in it. From here on nothing may end the
     //    task before the panel restart in step 9: nginx already serves the
-    //    HTTP-only vhost, and the running panel still sets Secure cookies.
+    //    new vhost (HTTP-only unless a certificate was there from the start),
+    //    and the running panel still sets Secure cookies.
     //    An error here (PowerDNS down) used to leave it like that.
     if !ip_only {
         task.log("checking managed PowerDNS zones".to_string());
@@ -508,8 +564,6 @@ async fn run_panel_host_task(
     //    COOKIE_SECURE=1.
     if ssl_ok {
         task.log("re-rendering nginx vhost with SSL enabled".to_string());
-        let cert_path = format!("/etc/vps-panel/certs/{host}/fullchain.pem");
-        let key_path = format!("/etc/vps-panel/certs/{host}/privkey.pem");
         let secured: AgentResult<()> = async {
             crate::handlers::panel_access::ensure_file().await?;
             let body = render_panel_vhost(
@@ -550,20 +604,24 @@ async fn run_panel_host_task(
                     task.log(format!("warning: COOKIE_SECURE stays 0: {e}"));
                 }
             }
-            // The HTTP-only vhost passed its test in step 5: back to it, so
-            // nginx can still reload and the panel stays reachable.
+            // Back to the HTTP-only vhost, so nginx can still reload and the
+            // panel stays reachable.
             Err(e) => {
                 task.log(format!(
                     "the vhost with SSL was refused, so the panel stays on HTTP: {e}"
                 ));
-                let _ = fs_atomic::write(
-                    std::path::Path::new(NGINX_VHOST),
-                    nginx_body.as_bytes(),
-                    0o644,
-                )
-                .await;
+                panel_vhost_to_http(&http_body, nginx_body, task).await;
             }
         }
+    } else if https_from_start {
+        // Step 7 did not find the name on this server. The vhost from step 4
+        // sends every visit, one by IP too, on to https://<name>: with it the
+        // panel could not be reached at all. The HTTP-only vhost answers by
+        // IP, and it is what this case always ended on.
+        task.log(
+            "putting the panel vhost back on HTTP only, so the panel can be reached by IP".to_string(),
+        );
+        panel_vhost_to_http(&http_body, nginx_body, task).await;
     }
 
     // 9. Schedule the panel restart. 5s instead of 3s so the SSE `Done` event
@@ -637,6 +695,36 @@ impl PanelHostBefore {
         }
         if let Some(name) = &self.myhostname {
             let _ = exec::run("postconf", ["-e", &format!("myhostname = {name}")]).await;
+        }
+    }
+}
+
+/// Does this panel vhost have a 443 block for `host`?
+fn panel_vhost_serves_https(vhost: &str, host: &str) -> bool {
+    let server_name = format!("server_name {host};");
+    let mut lines = vhost.lines().map(str::trim);
+    lines.clone().any(|l| l == server_name)
+        && lines.any(|l| {
+            l.strip_prefix("listen")
+                .is_some_and(|rest| rest.starts_with([' ', '\t']) && rest.contains("443"))
+        })
+}
+
+/// Put the HTTP-only panel vhost in place and load it. When nginx refuses
+/// even that, `loaded` goes back: the vhost nginx runs now, which passed its
+/// test in step 5.
+async fn panel_vhost_to_http(http_body: &str, loaded: &str, task: &TaskHandle) {
+    let path = std::path::Path::new(NGINX_VHOST);
+    let _ = fs_atomic::write(path, http_body.as_bytes(), 0o644).await;
+    match exec::run("nginx", ["-t"]).await {
+        Ok(_) => {
+            let _ = exec::run("systemctl", ["reload", "nginx"]).await;
+        }
+        Err(e) => {
+            task.log(format!(
+                "warning: nginx -t refused the HTTP-only vhost too ({e}); the vhost from before is back"
+            ));
+            let _ = fs_atomic::write(path, loaded.as_bytes(), 0o644).await;
         }
     }
 }
@@ -1989,7 +2077,10 @@ pub async fn delete_system_user(
 
 #[cfg(test)]
 mod tests {
-    use super::{dpkg_status_installed, publickey_hint, render_panel_vhost, validate_fqdn};
+    use super::{
+        dpkg_status_installed, panel_vhost_serves_https, publickey_hint, render_panel_vhost,
+        validate_fqdn,
+    };
     use crate::nginx_template::PEER_API_LOCATION;
 
     #[test]
@@ -2046,6 +2137,36 @@ mod tests {
         }
         let not_default = render_panel_vhost("p.example.com", false, None).unwrap();
         assert!(not_default.contains("listen 80;") && !not_default.contains("default_server"));
+    }
+
+    /// The hostname task keeps HTTPS on from its first step only for the
+    /// name the panel already serves over HTTPS.
+    #[test]
+    fn recognises_the_panel_vhost_that_is_on_https_for_a_name() {
+        let https = render_panel_vhost("p.example.com", true, Some(("/c", "/k"))).unwrap();
+        assert!(panel_vhost_serves_https(&https, "p.example.com"));
+        // The panel is moving to this name: not the one it is on.
+        assert!(!panel_vhost_serves_https(&https, "new.example.com"));
+        assert!(!panel_vhost_serves_https(&https, "example.com"));
+        let http = render_panel_vhost("p.example.com", true, None).unwrap();
+        assert!(!panel_vhost_serves_https(&http, "p.example.com"));
+        let ip_only = render_panel_vhost("_", true, None).unwrap();
+        assert!(!panel_vhost_serves_https(&ip_only, ""));
+        assert!(!panel_vhost_serves_https("", "p.example.com"));
+    }
+
+    /// The hostname task starts on this vhost when a valid certificate is
+    /// already there, and then orders the new one with it in place: port 80
+    /// has to go on answering the HTTP-01 challenge next to the redirect.
+    #[test]
+    fn the_https_panel_vhost_answers_acme_challenges_on_port_80() {
+        let body = render_panel_vhost("p.example.com", true, Some(("/c", "/k"))).unwrap();
+        let (port_80, port_443) = body.split_once("listen 443 ssl http2;").unwrap();
+        assert!(port_80.contains("location ^~ /.well-known/acme-challenge/ {"));
+        assert!(port_80.contains("return 301 https://p.example.com$request_uri;"));
+        assert!(!port_80.contains("proxy_pass"));
+        assert!(port_443.contains("ssl_certificate /c;") && port_443.contains("ssl_certificate_key /k;"));
+        assert!(!port_443.contains("acme-challenge"));
     }
 
     const REFUSED: &str = "git@github.com: Permission denied (publickey).\n\
