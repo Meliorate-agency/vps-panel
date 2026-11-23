@@ -1,7 +1,7 @@
 "use client";
 
 import { useRouter } from "next/navigation";
-import { useActionState, useEffect, useMemo, useRef, useState } from "react";
+import { useActionState, useEffect, useMemo, useRef, useState, useTransition } from "react";
 import styles from "@/components/page.module.css";
 import TaskProgress from "@/components/TaskProgress/TaskProgress";
 
@@ -121,6 +121,20 @@ export default function AddDomainForm({
       ? state
       : null;
 
+  // Submitted by hand rather than through <form action>: React resets a form
+  // after its action ran, which put the Mode select back on "Static folder"
+  // and the checkboxes back to checked while the fields below (and the
+  // state) still said otherwise, so the next submit - a retry after an error,
+  // or the next domain - sent a folder site the operator never picked.
+  const [, startTransition] = useTransition();
+  function onSubmit(e: React.FormEvent<HTMLFormElement>) {
+    e.preventDefault();
+    const fd = new FormData(e.currentTarget);
+    const submitter = (e.nativeEvent as SubmitEvent).submitter as HTMLButtonElement | null;
+    if (submitter?.name) fd.set(submitter.name, submitter.value);
+    startTransition(() => formAction(fd));
+  }
+
   function handleReplace(e: React.MouseEvent<HTMLButtonElement>) {
     if (
       !window.confirm(
@@ -132,7 +146,7 @@ export default function AddDomainForm({
   }
 
   return (
-    <form action={formAction} ref={formRef} id="add-domain">
+    <form onSubmit={onSubmit} ref={formRef} id="add-domain">
       <div className={styles.formRow}>
         {lockedDomain ? (
           <input type="hidden" name="domain" value={lockedDomain} />
