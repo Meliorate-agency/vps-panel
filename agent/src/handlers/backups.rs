@@ -295,14 +295,26 @@ const BACKUP_EXCLUDES: &[&str] = &[
 /// readable by the panel's group, and a dump holds every database.
 const DUMP_ROOT: &str = "/var/lib/vps-panel/db-dumps";
 
+/// Both levels are made root's as well as 0700: a re-run of an older
+/// install.sh did `chown -R vps-panel` over /var/lib/vps-panel, and a folder
+/// the panel user owns stays readable to it whatever its mode.
 async fn private_dump_dir(name: &str) -> AgentResult<std::path::PathBuf> {
     let root = std::path::Path::new(DUMP_ROOT);
     crate::fs_atomic::ensure_dir(root, 0o700).await?;
     crate::fs_atomic::chmod(root, 0o700).await?;
+    crate::fs_atomic::chown_blocking(root, 0, 0)?;
     let dir = root.join(name);
     crate::fs_atomic::ensure_dir(&dir, 0o700).await?;
     crate::fs_atomic::chmod(&dir, 0o700).await?;
+    crate::fs_atomic::chown_blocking(&dir, 0, 0)?;
     Ok(dir)
+}
+
+/// Deletes the previous dump so the new one is a new file of root's. Written
+/// over in place it kept its owner (the panel user after that chown -R) and
+/// any hard link made to it while the folder was open.
+async fn remove_old_dump(path: &std::path::Path) {
+    let _ = tokio::fs::remove_file(path).await;
 }
 
 /// pg_dumpall as the postgres user, when PostgreSQL is installed. Databases
@@ -314,6 +326,7 @@ async fn dump_postgres(task: &crate::ipc::tasks::TaskHandle) -> AgentResult<()> 
     }
     let dir = private_dump_dir("postgres").await?;
     let path = dir.join("all-databases.sql");
+    remove_old_dump(&path).await;
     task.log(format!("pg_dumpall -> {}", path.display()));
     let target = path.to_string_lossy().into_owned();
     // runuser drops to postgres for the dump; root's shell writes the file
@@ -416,6 +429,7 @@ async fn dump_mariadb(task: &crate::ipc::tasks::TaskHandle) -> AgentResult<()> {
     // The old location was group-readable; drop its copy.
     let _ = tokio::fs::remove_dir_all("/var/lib/vps-panel/mariadb-dump").await;
     let dump_path = dump_dir.join("all-databases.sql");
+    remove_old_dump(&dump_path).await;
     task.log(format!("mariadb-dump -> {}", dump_path.display()));
     exec::run(
         "mariadb-dump",
