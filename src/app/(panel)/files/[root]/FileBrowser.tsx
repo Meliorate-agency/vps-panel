@@ -187,6 +187,13 @@ export default function FileBrowser({
 
   const root = listing.root;
   const path = listing.path;
+  // The folder on screen now, for work that finishes after the operator may
+  // have moved on (an upload keeps running while they browse).
+  const pathRef = useRef(path);
+  pathRef.current = path;
+  // Bumped per preview opened or closed, so a slow text fetch for an earlier
+  // preview cannot fill in a later one.
+  const previewSeq = useRef(0);
 
   const load = useCallback(
     (next: string, push: boolean) => {
@@ -337,7 +344,10 @@ export default function FileBrowser({
       setUploading(null);
       if (failures.length > 0) setError(failures.join("; "));
       if (done > 0) setNotice(`Uploaded ${done} file${done === 1 ? "" : "s"}.`);
-      const fresh = await listDirAction(root.id, path);
+      // Re-read the folder being shown, which is not the upload's folder if
+      // the operator browsed on meanwhile: showing that listing again put
+      // them back in it under the other folder's URL.
+      const fresh = await listDirAction(root.id, pathRef.current);
       if (fresh.ok) setListing(fresh.listing);
     },
     [root.id, path, maxUploadMb],
@@ -345,6 +355,7 @@ export default function FileBrowser({
 
   const openPreview = useCallback(
     async (entry: FileEntry) => {
+      const seq = ++previewSeq.current;
       setPreview(entry);
       setPreviewText(null);
       if (previewKind(entry.name) !== "text") return;
@@ -354,12 +365,14 @@ export default function FileBrowser({
         );
         return;
       }
+      let text: string;
       try {
         const res = await fetch(downloadUrl(root.id, joinPath(path, entry.name)));
-        setPreviewText(res.ok ? await res.text() : `Couldn't read this file (${res.status}).`);
+        text = res.ok ? await res.text() : `Couldn't read this file (${res.status}).`;
       } catch (e: unknown) {
-        setPreviewText(e instanceof Error ? e.message : String(e));
+        text = e instanceof Error ? e.message : String(e);
       }
+      if (seq === previewSeq.current) setPreviewText(text);
     },
     [root.id, path],
   );
@@ -775,7 +788,9 @@ export default function FileBrowser({
       <div className={styles.footer}>
         <span>
           {listing.entries.length} item{listing.entries.length === 1 ? "" : "s"}
-          {selected.size > 0 && ` · ${selected.size} selected`}
+          {/* Counted from the listing: a selection kept after a partly failed
+              delete still names the items that did go. */}
+          {selectedEntries.length > 0 && ` · ${selectedEntries.length} selected`}
         </span>
         {listing.truncated && (
           <span className={pageStyles.muted}>
@@ -812,7 +827,8 @@ export default function FileBrowser({
             value={nameInput}
             onChange={(ev) => setNameInput(ev.target.value)}
             onKeyDown={(ev) => {
-              if (ev.key === "Enter" && nameInput.trim()) runDialog();
+              // Not while a submit is running: a second Enter sent it twice.
+              if (ev.key === "Enter" && nameInput.trim() && !pending) runDialog();
             }}
           />
         </div>
@@ -853,6 +869,7 @@ export default function FileBrowser({
           window.location.href = downloadUrl(root.id, joinPath(path, preview.name));
         }}
         onCancel={() => {
+          previewSeq.current++;
           setPreview(null);
           setPreviewText(null);
         }}
