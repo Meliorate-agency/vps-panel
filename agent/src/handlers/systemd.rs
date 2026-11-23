@@ -52,7 +52,9 @@ pub async fn service_action(
     if !is_safe_unit_name(&unit) {
         return Err(AgentError::Invalid("invalid unit name".into()));
     }
-    exec::run("systemctl", [action.as_str(), unit.as_str()]).await?;
+    // `--`: a name may start with `-` (`-.mount` is a real unit), and without
+    // it `--help` was read as an option and reported as a successful action.
+    exec::run("systemctl", [action.as_str(), "--", unit.as_str()]).await?;
     Ok(Json(OkResponse::default()))
 }
 
