@@ -36,6 +36,11 @@ type Relayed = { code: number; body: string };
  * answer failed with EPIPE, and that error could win the race against the
  * answer: the operator read "upload stream failed: write EPIPE" in place of
  * the reason.
+ *
+ * Once the body is on its way the agent can still stop (the disk fills up,
+ * the agent restarts). Its answer is shown when one arrives. When the
+ * connection just breaks, the operator gets a sentence that says so and
+ * names the likely causes.
  */
 export async function POST(req: NextRequest) {
   const refused = originRefusal(req.headers);
@@ -150,10 +155,33 @@ export async function POST(req: NextRequest) {
               });
             },
           );
+          // The relay broke while the file was on its way and the agent gave
+          // no answer of its own (when it does, that answer is shown). Which
+          // side broke decides what to say; the socket error ("write EPIPE",
+          // "socket hang up") says nothing an operator can act on.
+          let browserFailed = false;
+          const mb = () => `${(received / (1024 * 1024)).toFixed(received < 10 * 1024 * 1024 ? 1 : 0)} MB`;
+          const broken = (): Relayed =>
+            browserFailed
+              ? {
+                  code: 400,
+                  body: JSON.stringify({
+                    error: `the upload was cut short: the connection from the browser closed after ${mb()}`,
+                  }),
+                }
+              : {
+                  code: 502,
+                  body: JSON.stringify({
+                    error:
+                      `the upload stopped after ${mb()}: the agent closed the connection without giving a reason. ` +
+                      "Most often the disk filled up, or the agent was restarted (a panel update restarts it). " +
+                      "The file was not saved. Check the free space on the Dashboard, then upload it again.",
+                  }),
+                };
           upstream.on("error", (e) => {
             clearTimeout(unasked);
             if (answering && !stopped) return;
-            finish({ code: 502, body: `agent unreachable: ${e.message}` });
+            finish(sending ? broken() : { code: 502, body: `agent unreachable: ${e.message}` });
           });
           // Readable.fromWeb bridges the web ReadableStream to a node stream so
           // it can be piped without ever being fully realised. On any error
@@ -162,15 +190,14 @@ export async function POST(req: NextRequest) {
             if (sending || answering) return;
             sending = true;
             clearTimeout(unasked);
-            pipeline(
-              Readable.fromWeb(req.body as Parameters<typeof Readable.fromWeb>[0]),
-              counter,
-              upstream,
-              (err) => {
-                if (!err || (answering && !stopped)) return;
-                finish({ code: 400, body: JSON.stringify({ error: `upload stream failed: ${err.message}` }) });
-              },
-            );
+            const source = Readable.fromWeb(req.body as Parameters<typeof Readable.fromWeb>[0]);
+            source.once("error", () => {
+              browserFailed = true;
+            });
+            pipeline(source, counter, upstream, (err) => {
+              if (!err || (answering && !stopped)) return;
+              finish(broken());
+            });
           };
           upstream.once("continue", send);
           // The agent asks within milliseconds. Should the Expect go
