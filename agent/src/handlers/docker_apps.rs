@@ -680,9 +680,20 @@ async fn deploy(
         })
     })?;
 
-    apps::write_deploy_env(cfg, req.env.as_deref(), true, &env_path, task).await?;
+    // The settings file is what makes this a Docker app, and with it what
+    // says the env file is in docker's form. Before the first deploy there is
+    // none: an env file already there was written for systemd (patch_env, or
+    // a Node deploy of the name that never got its unit) and is rewritten.
+    let first_deploy = !is_docker_app(name);
     task.log(format!("writing {}", config_path(name).display()));
     write_config(name, spec).await?;
+    if let Err(e) = apps::write_deploy_env(cfg, req.env.as_deref(), true, first_deploy, &env_path, task).await {
+        // Not left behind over an env file that is still systemd's.
+        if first_deploy {
+            let _ = fs_atomic::remove_if_exists(&config_path(name)).await;
+        }
+        return Err(e);
+    }
 
     for folder in &spec.volumes {
         let volume = volume_name(name, folder);

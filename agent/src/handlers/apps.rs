@@ -897,7 +897,7 @@ async fn run_deploy(
         }
     }
 
-    write_deploy_env(cfg, req.env.as_deref(), false, &env_path, task).await?;
+    write_deploy_env(cfg, req.env.as_deref(), false, true, &env_path, task).await?;
     let exec_start = match &req.exec_start {
         Some(s) => s.clone(),
         None => existing_exec_start(&unit_path)
@@ -965,10 +965,13 @@ async fn run_deploy(
 /// The deploy's EnvironmentFile: the request's variables replace the file,
 /// none keeps it (an empty one for a new app). root:apps 0640. `docker`: the
 /// file is for `docker run --env-file`, not a unit (see render_app_env).
+/// `kept_is_for_systemd`: a file that is kept was written for a unit (see
+/// unit_env_to_docker), so a Docker deploy rewrites it for docker.
 pub(crate) async fn write_deploy_env(
     cfg: &crate::config::Config,
     env: Option<&[EnvKv]>,
     docker: bool,
+    kept_is_for_systemd: bool,
     env_path: &std::path::Path,
     task: &crate::ipc::tasks::TaskHandle,
 ) -> AgentResult<()> {
@@ -977,6 +980,19 @@ pub(crate) async fn write_deploy_env(
             task.log(format!("writing env file {}", env_path.display()));
             fs_atomic::ensure_dir(env_path.parent().unwrap(), 0o750).await?;
             fs_atomic::write(env_path, render_app_env(env, docker).as_bytes(), 0o640).await?;
+        }
+        None if env_path.exists() && docker && kept_is_for_systemd => {
+            let body = tokio::fs::read_to_string(env_path).await.map_err(AgentError::Io)?;
+            let for_docker = unit_env_to_docker(&body);
+            if for_docker == body {
+                task.log(format!("keeping the existing env file {}", env_path.display()));
+            } else {
+                task.log(format!(
+                    "keeping the variables in {}, written the way docker reads them",
+                    env_path.display()
+                ));
+                fs_atomic::write(env_path, for_docker.as_bytes(), 0o640).await?;
+            }
         }
         None if env_path.exists() => {
             task.log(format!("keeping the existing env file {}", env_path.display()));
@@ -2821,6 +2837,15 @@ fn parse_app_env(body: &str, docker: bool) -> Vec<EnvKv> {
     }
 }
 
+/// An env file written for systemd, as the file `docker run --env-file`
+/// reads the same values from. Which of the two an app is, is only known
+/// from its first deploy on: variables saved before it (patch_env) are
+/// written for systemd, and a first Docker deploy that kept that file gave
+/// the container every quoted value with its quotes and backslashes.
+fn unit_env_to_docker(body: &str) -> String {
+    render_env_file(&parse_unit_env_file(body))
+}
+
 /// One value as systemd's EnvironmentFile parser takes it: as is when nothing
 /// in it is special there, else in double quotes, where only `"`, `\`, `$`
 /// and a backtick need a backslash and a newline is kept.
@@ -3305,6 +3330,31 @@ mod tests {
         assert_eq!(std::fs::read_to_string(&module).unwrap(), "good");
         again.discard().await;
         task.finish(true);
+    }
+
+    #[test]
+    fn an_env_file_saved_before_a_first_docker_deploy_is_rewritten_for_docker() {
+        // What patch_env writes while the app is not known to be a Docker app.
+        let env = vec![
+            kv("PLAIN", "postgres://u:p@127.0.0.1:5432/db"),
+            kv("JSON", r#"{"key":"a\nb","id":"x"}"#),
+            kv("QUOTED", r#""in quotes""#),
+            kv("PATH_WIN", r"C:\data\new"),
+            kv("SPACES", "  padded  "),
+            kv("SHELL", "$HOME `id`"),
+        ];
+        let for_systemd = render_app_env(&env, false);
+        assert!(for_systemd.contains(r#"JSON="{\"key\":\"a\\nb\",\"id\":\"x\"}""#), "{for_systemd}");
+        // docker reads every line as it is: the quoting would reach the container.
+        assert_ne!(parse_app_env(&for_systemd, true), env);
+        let for_docker = unit_env_to_docker(&for_systemd);
+        assert_eq!(parse_app_env(&for_docker, true), env);
+        assert_eq!(for_docker, render_app_env(&env, true));
+        // A file with nothing systemd-specific in it is the same in both.
+        let plain = "A=1\nB=two words\n";
+        assert_eq!(unit_env_to_docker(plain), plain);
+        // A real newline is stored escaped, as a Docker app's values are.
+        assert_eq!(unit_env_to_docker("K=\"line one\nline two\"\n"), "K=line one\\nline two\n");
     }
 
     #[test]
