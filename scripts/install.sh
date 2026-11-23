@@ -30,18 +30,20 @@ fi
 # hostname). Without this it fell back to the system hostname and reset
 # Postfix's myhostname and Dovecot's postmaster address.
 if [[ -z "$PANEL_HOST" && -f /etc/vps-panel/.env ]]; then
-  PREV_HOST="$(grep -E '^PANEL_HOST=' /etc/vps-panel/.env | head -1 | cut -d= -f2-)"
+  # `|| true`: with pipefail, a .env without a PANEL_HOST line ended the
+  # installer right here, without a word.
+  PREV_HOST="$(grep -E '^PANEL_HOST=' /etc/vps-panel/.env | head -1 | cut -d= -f2- || true)"
   if [[ -n "$PREV_HOST" && ! "$PREV_HOST" =~ ^[0-9.]+$ && "$PREV_HOST" == *.* ]]; then
     PANEL_HOST="$PREV_HOST"
   fi
 fi
 
-if [[ -z "$PANEL_HOST" ]] && [[ -t 0 ]]; then
+if [[ -z "$PANEL_HOST" ]] && [[ -t 0 ]] && [[ $ASSUME_YES -eq 0 ]]; then
   echo "No --domain supplied. Leave blank to install in IP-only mode (you can"
   echo "set a real hostname later from the panel UI)."
   read -r -p "Panel hostname (e.g. panel.example.com, or blank): " PANEL_HOST
 fi
-if [[ -z "$ADMIN_EMAIL" ]] && [[ -t 0 ]]; then
+if [[ -z "$ADMIN_EMAIL" ]] && [[ -t 0 ]] && [[ $ASSUME_YES -eq 0 ]]; then
   echo "No --email supplied. Leave blank for the default admin@<hostname>."
   read -r -p "Admin email (or blank): " ADMIN_EMAIL
 fi
@@ -51,10 +53,17 @@ fi
 # hostname. When omitted, install in IP-only mode: nginx serves any Host,
 # Postfix uses the system hostname, cookies are non-Secure (HTTP works), and
 # the operator sets the real FQDN later through the panel UI.
+# Only the characters of a hostname: the value goes into .env, Postfix, a sed
+# expression for Dovecot and the nginx vhost. A pasted URL
+# (https://panel.example.com/) used to pass, land in .env and Postfix, and
+# then stop the installer at the Dovecot step.
 if [[ -n "$PANEL_HOST" ]]; then
-  if [[ "$PANEL_HOST" =~ ^[0-9.]+$ ]] || [[ "$PANEL_HOST" != *.* ]]; then
+  PANEL_HOST="${PANEL_HOST,,}"
+  if [[ "$PANEL_HOST" =~ ^[0-9.]+$ ]] || [[ "$PANEL_HOST" != *.* ]] \
+     || [[ ! "$PANEL_HOST" =~ ^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?(\.[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)+$ ]]; then
     echo "FATAL: PANEL_HOST '$PANEL_HOST' is not a valid FQDN." >&2
-    echo "       Use something like panel.example.com (must contain a dot, no all-digit labels)." >&2
+    echo "       Use something like panel.example.com: letters, digits, hyphens and dots only" >&2
+    echo "       (no http://, no path, must contain a dot, not an IP address)." >&2
     echo "       Or leave blank to defer the hostname choice." >&2
     exit 1
   fi
@@ -133,14 +142,14 @@ DEBIAN_FRONTEND=noninteractive apt-get update -qq
 DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
   curl ca-certificates gnupg lsb-release software-properties-common \
   build-essential pkg-config libssl-dev libsqlite3-dev libmariadb-dev \
-  jq acl htop iotop iftop ncdu \
+  jq acl htop iotop iftop ncdu rsync sudo \
   nginx \
   mariadb-server mariadb-client \
   pdns-server pdns-backend-mysql \
   postfix postfix-mysql \
   dovecot-core dovecot-imapd dovecot-pop3d dovecot-lmtpd dovecot-mysql \
   dovecot-sieve dovecot-managesieved \
-  ufw fail2ban \
+  ufw fail2ban nftables python3-systemd \
   unattended-upgrades apt-listchanges \
   chrony \
   auditd audispd-plugins \
@@ -827,7 +836,9 @@ kernel.dmesg_restrict=1
 fs.protected_hardlinks=1
 fs.protected_symlinks=1
 EOF
-sysctl --system >/dev/null
+# Not fatal: in a container (LXC, OpenVZ) the kernel.* keys are read-only and
+# sysctl exits non-zero, which ended the installer before the panel was built.
+sysctl --system >/dev/null || warn "some sysctl settings could not be applied (normal inside a container)"
 
 log "hardening journald"
 mkdir -p /var/log/journal
