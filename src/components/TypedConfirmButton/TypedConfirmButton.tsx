@@ -21,8 +21,9 @@ type Props = {
   confirmLabel?: string;
   /** Pending label for the confirm button. */
   pendingLabel?: string;
-  /** The (already-bound) action to run when typed phrase matches. */
-  action: () => Promise<void> | void;
+  /** The (already-bound) action to run when typed phrase matches. A refusal
+   *  comes back as `{ ok: false, error }`: the dialog stays open and shows it. */
+  action: () => Promise<void | { ok: true } | { ok: false; error: string }> | void;
 };
 
 export default function TypedConfirmButton({
@@ -39,9 +40,11 @@ export default function TypedConfirmButton({
   const dialogRef = useRef<HTMLDialogElement>(null);
   const [typed, setTyped] = useState("");
   const [pending, start] = useTransition();
+  const [error, setError] = useState<string | null>(null);
 
   function open() {
     setTyped("");
+    setError(null);
     dialogRef.current?.showModal();
   }
 
@@ -52,11 +55,20 @@ export default function TypedConfirmButton({
   function onSubmit(e: React.FormEvent) {
     e.preventDefault();
     if (typed !== phrase || pending) return;
+    setError(null);
     start(async () => {
+      // It used to close whatever happened, so a refused delete looked done
+      // (or ended on the error screen). Closed only when the action went
+      // through.
       try {
-        await action();
-      } finally {
+        const res = await action();
+        if (res && !res.ok) {
+          setError(res.error);
+          return;
+        }
         close();
+      } catch (e) {
+        setError(e instanceof Error ? e.message : String(e));
       }
     });
   }
@@ -98,6 +110,11 @@ export default function TypedConfirmButton({
               aria-label={`Type ${phrase} to confirm`}
             />
           </label>
+          {error && (
+            <div role="alert" className={pageStyles.error}>
+              {error}
+            </div>
+          )}
           <div className={styles.actions}>
             <button
               type="button"

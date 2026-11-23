@@ -130,17 +130,34 @@ export async function updateMailboxAction(
   }
 }
 
-export async function deleteMailboxAction(email: string): Promise<void> {
+// Returns the agent's refusal instead of throwing it: Next replaces a thrown
+// message in a production build, and the dialogs show what comes back here.
+export async function deleteMailboxAction(email: string): Promise<ActionResult> {
   const s = await requireAdmin();
-  const resp = await agent.mail.deleteMailbox(email);
-  writeAudit({
-    actorId: s.userId,
-    action: "mail.mailboxes.delete",
-    target: email,
-    result: "ok",
-    message: resp?.maildir_trash_id ? `maildir moved to trash ${resp.maildir_trash_id}` : undefined,
-  });
-  revalidatePath("/mailboxes");
+  try {
+    const resp = await agent.mail.deleteMailbox(email);
+    writeAudit({
+      actorId: s.userId,
+      action: "mail.mailboxes.delete",
+      target: email,
+      result: "ok",
+      message: resp?.maildir_trash_id ? `maildir moved to trash ${resp.maildir_trash_id}` : undefined,
+    });
+    revalidatePath("/mailboxes");
+    return { ok: true };
+  } catch (e: unknown) {
+    const error = agentErrorMessage(e);
+    writeAudit({
+      actorId: s.userId,
+      action: "mail.mailboxes.delete",
+      target: email,
+      result: "error",
+      message: error,
+    });
+    // The login may be gone even when its mail could not be moved to the trash.
+    revalidatePath("/mailboxes");
+    return { ok: false, error };
+  }
 }
 
 /**

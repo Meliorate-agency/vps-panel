@@ -6,10 +6,11 @@ import styles from "@/components/page.module.css";
 
 /**
  * Fallback for any error thrown while rendering a panel page or by a server
- * action that returns nothing (Delete, Restart, Adopt, Renew, ...). Without
- * this boundary one failed action replaced the whole panel with Next's error
- * screen. In production the server hides the real message and sends only a
- * digest, so the page says where to find it.
+ * action. Without this boundary one failed action replaced the whole panel
+ * with Next's error screen. In production the server hides the real message
+ * and sends only a digest, so the page says where to find it. The actions
+ * behind Delete, Restart, Adopt, Renew and the like return their refusal
+ * instead of throwing it, so those show the reason next to the button.
  */
 export default function PanelError({
   error,

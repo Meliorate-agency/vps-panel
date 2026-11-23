@@ -26,7 +26,7 @@ type Props = {
   currentQuotaMb: number;
   currentUsageMb: number;
   updateAction: (prev: UpdateResult | null, fd: FormData) => Promise<UpdateResult>;
-  deleteAction: () => Promise<void>;
+  deleteAction: () => Promise<void | { ok: true } | { ok: false; error: string }>;
 };
 
 type View = "menu" | "edit" | "delete";
@@ -70,6 +70,7 @@ export default function MailboxActions({
   // Delete state — typed-confirm requires the user to type the email.
   const [deleteTyped, setDeleteTyped] = useState("");
   const [deletePending, startDelete] = useTransition();
+  const [deleteError, setDeleteError] = useState<string | null>(null);
 
   const minQuota = currentUsageMb + 1;
   const domain = email.split("@")[1] ?? "";
@@ -79,6 +80,7 @@ export default function MailboxActions({
     setOpen(false);
     setView("menu");
     setDeleteTyped("");
+    setDeleteError(null);
     setEditPassword("");
   }
 
@@ -126,8 +128,20 @@ export default function MailboxActions({
 
   function onDeleteConfirm() {
     if (deleteTyped !== email || deletePending) return;
+    setDeleteError(null);
     startDelete(async () => {
-      await deleteAction();
+      // A refusal stays in the dialog instead of closing it as if done.
+      try {
+        const res = await deleteAction();
+        if (res && !res.ok) {
+          setDeleteError(res.error);
+          router.refresh();
+          return;
+        }
+      } catch (e) {
+        setDeleteError(e instanceof Error ? e.message : String(e));
+        return;
+      }
       closeAll();
       router.refresh();
     });
@@ -333,6 +347,11 @@ export default function MailboxActions({
               placeholder={email}
             />
           </label>
+          {deleteError && (
+            <div role="alert" className={pageStyles.error} style={{ marginTop: 10 }}>
+              {deleteError}
+            </div>
+          )}
           <div className={local.menuFoot}>
             <button
               type="button"
