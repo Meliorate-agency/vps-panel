@@ -188,11 +188,16 @@ export async function deleteDomainAction(zone: string): Promise<ActionResult> {
 
   let siteResult: "deleted" | "missing" | "error" = "missing";
   let sitesDeleted = 0;
+  // Sites gone from the server so far, for the message when a later step fails.
+  const removed: string[] = [];
+  const alreadyRemoved = () =>
+    removed.length > 0 ? ` (already removed: ${removed.join(", ")})` : "";
   for (const domain of allDomains) {
     try {
       await agent.sites.delete(domain);
       siteResult = "deleted";
       sitesDeleted += 1;
+      removed.push(domain);
     } catch (e) {
       if (e instanceof AgentError && e.status === 404) {
         // vhost wasn't on disk for some reason; treat as missing, keep going
@@ -207,9 +212,15 @@ export async function deleteDomainAction(zone: string): Promise<ActionResult> {
           message: `sites_deleted=${sitesDeleted} site ${domain}: ${msg}`,
         });
         revalidatePath("/domains");
-        return { ok: false, error: `Could not remove the site ${domain}: ${msg}` };
+        return { ok: false, error: `Could not remove the site ${domain}: ${msg}${alreadyRemoved()}` };
       }
     }
+    // This site's rows go as soon as the server no longer has it. Left for
+    // step 3, a failure further down kept the rows of every site removed up
+    // to then: /domains listed sites, and /redirects rules, that nothing
+    // served any more.
+    db().prepare(`DELETE FROM sites WHERE domain = ?`).run(domain);
+    db().prepare(`DELETE FROM redirects WHERE domain = ?`).run(domain);
   }
 
   // 2. Drop the PowerDNS zone — this wipes the zone itself plus every record
@@ -232,7 +243,7 @@ export async function deleteDomainAction(zone: string): Promise<ActionResult> {
         message: `sites_deleted=${sitesDeleted} site=${siteResult} dns zone: ${msg}`,
       });
       revalidatePath("/domains");
-      return { ok: false, error: `Could not remove the DNS zone ${target}: ${msg}` };
+      return { ok: false, error: `Could not remove the DNS zone ${target}: ${msg}${alreadyRemoved()}` };
     }
   }
 
