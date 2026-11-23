@@ -17,7 +17,10 @@ rm -f /etc/nginx/sites-enabled/vps-panel.conf
 rm -f /etc/nginx/sites-available/vps-panel.conf
 nginx -t && systemctl reload nginx || true
 
-rm -f /usr/local/bin/vps-panel-agent
+# With the previous version update.sh keeps for a rollback (the previous
+# panel install is /opt/vps-panel/app.prev).
+rm -f /usr/local/bin/vps-panel-agent /usr/local/bin/vps-panel-agent.prev
+rm -rf /var/backups/vps-panel-config/units.prev
 rm -rf /opt/vps-panel
 rm -rf /run/vps-panel
 

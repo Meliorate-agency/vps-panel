@@ -44,7 +44,17 @@ The Update button in the panel's top bar, or by hand:
 bash /root/vps-panel-src/scripts/update.sh
 ```
 
-Pulls, builds the agent and the panel, and only then installs them and restarts both services. If a build fails, the previous panel install is restored and nothing else changes (the previous install stays in `/opt/vps-panel/app.prev` until the next update). SQLite migrations run on panel start.
+Pulls, builds the agent and the panel, and only then installs them and restarts both services. If a build fails, the previous panel install is restored and nothing else changes. When the agent build fails, Rust is updated (`rustup update stable`) and the build is tried once more. SQLite migrations run on panel start.
+
+If the new agent or the new panel does not stay up after the restart, or the script is stopped between the build and the restart, the update is rolled back: the previous agent binary, unit files and panel install are put back together, both services are restarted on them, and the script says so and exits non-zero (the update task in the panel is marked failed). Not undone:
+
+- Database migrations. They only add tables and columns, which the previous version ignores.
+- What the update changed in the nginx, mail and DNS configuration. Each of those changes is checked when it is made and put back by itself if the check fails.
+- The checkout. It stays at the new commit, so the panel shows no update until there is a newer one; running the update again tries the same version again.
+
+The previous version stays on the server until the next update: `/opt/vps-panel/app.prev`, `/usr/local/bin/vps-panel-agent.prev` and the unit files in `/var/backups/vps-panel-config/units.prev`.
+
+Use the Update button or SSH, not the panel's own terminal: there the script is ended by the agent restart it performs, and nothing checks the result or rolls it back.
 
 ## Uninstall
 

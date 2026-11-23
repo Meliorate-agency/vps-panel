@@ -82,6 +82,15 @@ PREV_DIR="$INSTALL_DIR/app.prev"
 # Exists while $APP_DIR is a build in progress and the working install is in
 # $PREV_DIR.
 BUILDING="$INSTALL_DIR/.update-building"
+# What goes with $PREV_DIR: the agent binary and the unit files that were
+# installed when the panel was moved there, so a new version that does not
+# start can be replaced by the whole previous one. In root-only places, not
+# in $INSTALL_DIR, which the panel's user can write to.
+AGENT_BIN=/usr/local/bin/vps-panel-agent
+AGENT_PREV="$AGENT_BIN.prev"
+UNIT_DIR=/etc/systemd/system
+UNITS_PREV=/var/backups/vps-panel-config/units.prev
+UNITS=(vps-panel-agent.service vps-panel.service)
 
 build_panel() {
   # Match install.sh: panel files live under /opt/vps-panel/app, not directly
@@ -119,6 +128,51 @@ restore_panel() {
   rm -f "$BUILDING"
 }
 
+# The agent binary and unit files as they are now, kept for restore_agent.
+save_agent() {
+  local u
+  rm -f "$AGENT_PREV"
+  rm -rf "$UNITS_PREV"
+  install -d -m 0700 "$(dirname "$UNITS_PREV")" "$UNITS_PREV"
+  if [[ -f "$AGENT_BIN" ]]; then
+    cp -a "$AGENT_BIN" "$AGENT_PREV"
+  fi
+  for u in "${UNITS[@]}"; do
+    if [[ -f "$UNIT_DIR/$u" ]]; then
+      cp -a "$UNIT_DIR/$u" "$UNITS_PREV/$u"
+    fi
+  done
+}
+
+# The saved agent binary and unit files back in place. `install` puts a new
+# file there; writing into the binary of a running agent is refused (Text
+# file busy). Every step is tried even when one fails.
+restore_agent() {
+  local u
+  if [[ -f "$AGENT_PREV" ]]; then
+    install -m 0755 -o root -g root "$AGENT_PREV" "$AGENT_BIN" \
+      || echo "could not put $AGENT_PREV back as $AGENT_BIN" >&2
+  fi
+  for u in "${UNITS[@]}"; do
+    if [[ -f "$UNITS_PREV/$u" ]]; then
+      install -m 0644 "$UNITS_PREV/$u" "$UNIT_DIR/$u" \
+        || echo "could not put $UNITS_PREV/$u back" >&2
+    fi
+  done
+  systemctl daemon-reload || true
+}
+
+# Is the running panel the install that was moved to $PREV_DIR? A process
+# keeps its working directory through a rename, and /proc shows where that
+# directory is now.
+panel_runs_from_prev() {
+  local pid cwd
+  pid="$(systemctl show -p MainPID --value vps-panel.service 2>/dev/null || true)"
+  [[ "$pid" =~ ^[1-9][0-9]*$ ]] || return 1
+  cwd="$(readlink "/proc/$pid/cwd" 2>/dev/null || true)"
+  [[ "$cwd" == "$PREV_DIR" ]]
+}
+
 # An update that died during the panel build (killed, out of memory, a
 # reboot) left the half-built tree in $APP_DIR and the working install in
 # $PREV_DIR. Put it back first: the lines below would delete $PREV_DIR and
@@ -127,10 +181,23 @@ restore_panel() {
 if [[ -e "$BUILDING" && -d "$PREV_DIR" ]]; then
   echo "the last update stopped during the panel build - putting the previous panel install back first"
   restore_panel
+elif [[ -d "$PREV_DIR" ]] && panel_runs_from_prev; then
+  # An update that was killed after the build and before it restarted the
+  # services (one that only failed there cleans up itself, further down). The
+  # old panel process is still running, from $PREV_DIR. The `rm -rf` below
+  # used to delete the files under it, and the build that was never started
+  # became "previous". Put the install it runs from back, with its agent
+  # binary and units, so what is on disk is what is running.
+  echo "the last update stopped before it restarted the panel - putting the previous version back first"
+  restore_agent
+  restore_panel
 fi
 rm -f "$BUILDING"
 
 rm -rf "$PREV_DIR"
+# Before the panel moves to $PREV_DIR, so that whenever $PREV_DIR exists the
+# saved binary and units are the ones that belong to it.
+save_agent
 # Ctrl-C, a dropped SSH session or systemd stopping the update's unit: put
 # the working install back before going.
 trap 'echo "interrupted - restoring the previous panel install" >&2; restore_panel; exit 130' INT TERM HUP
@@ -150,11 +217,97 @@ echo "new panel built in $APP_DIR (previous install kept in $PREV_DIR)"
 
 # ---------------------------------------------------------------------------
 # Both builds succeeded: install them.
+#
+# From here until both services are confirmed running, the new version is
+# either installed as a whole or not at all. Whatever ends the script on the
+# way (a failed step, Ctrl-C, a new agent or panel that does not stay up)
+# puts the previous agent binary, unit files and panel install back together.
+# An agent that crashed at start used to leave the server without agent and
+# panel, the previous binary gone; and an update that stopped before the
+# restarts left the old panel process running from $PREV_DIR, the files the
+# next update deletes first.
+#
+# Not put back:
+# - panel.db and the mail database. The new panel (src/lib/db.ts) and the new
+#   agent (ensure_agent_schema, migrate_mail_schema) may have migrated them
+#   before failing. Their migrations only create tables and add columns with
+#   defaults, which the previous version does not notice. A migration that
+#   the previous version could not live with must not ship without a way
+#   back here.
+# - What the steps below change in nginx, Postfix, Dovecot, PowerDNS and
+#   fail2ban. Each checks its own result, puts its own files back when the
+#   check fails, and does not depend on which version of the panel runs.
 # ---------------------------------------------------------------------------
+
+# What `finish` has to undo. install: files are being replaced, the old
+# processes still run. restart: the services are being restarted. Anything
+# else: nothing.
+STAGE=install
+
+# The update is running inside the agent's own service (started from the
+# panel's terminal, or by the Update button of a very old agent): restarting
+# the agent ends this script too, so it can neither check the restart nor
+# undo it.
+INSIDE_AGENT=0
+if grep -qs '/vps-panel-agent\.service' /proc/self/cgroup; then
+  INSIDE_AGENT=1
+fi
+
+# The previous version back after a restart that did not work, and both
+# services restarted on it.
+roll_back() {
+  echo "putting the previous agent, unit files and panel install back" >&2
+  # Stopped first: the new panel must not run on while its files go.
+  systemctl stop vps-panel.service || true
+  restore_agent
+  restore_panel
+  systemctl restart vps-panel-agent.service || true
+  sleep 1
+  systemctl restart vps-panel.service || true
+  sleep 3
+  local unit down=0
+  for unit in "${UNITS[@]}"; do
+    if ! systemctl is-active --quiet "$unit"; then
+      echo "$unit is not running on the previous version either. Check: journalctl -u $unit -n 50" >&2
+      down=1
+    fi
+  done
+  if [[ $down -eq 0 ]]; then
+    echo "the update was rolled back: the previous version is running again. The checkout stays at the new commit; a later update tries it again." >&2
+  else
+    echo "the update was rolled back, but not everything came up (see above)." >&2
+  fi
+}
+
+finish() {
+  local rc=$?
+  # Nothing may cut the clean-up short: not a failing command, not a second
+  # Ctrl-C, not a terminal that is gone.
+  set +e
+  trap - EXIT
+  trap '' INT TERM HUP PIPE
+  case "$STAGE" in
+    install)
+      echo "the update stopped before the restart - putting the previous agent, unit files and panel install back. The running services were not touched." >&2
+      restore_agent
+      restore_panel
+      ;;
+    restart)
+      roll_back
+      ;;
+    *)
+      exit "$rc"
+      ;;
+  esac
+  [[ $rc -ne 0 ]] || rc=1
+  exit "$rc"
+}
+trap finish EXIT
+trap 'exit 130' INT TERM HUP
 
 install -m 0755 -o root -g root \
   "$REPO_DIR/target/release/vps-panel-agent" \
-  /usr/local/bin/vps-panel-agent
+  "$AGENT_BIN"
 
 # Move the ACME webroot out of /var/lib/vps-panel, then take www-data out of
 # the vps-panel group. That group reads .env (JWT secret, agent token) and
@@ -202,9 +355,9 @@ install -d -m 0700 -o root -g root /root/.ssh
 install -d -m 0755 -o root -g root /root/.npm
 
 install -m 0644 "$REPO_DIR/scripts/systemd/vps-panel-agent.service" \
-  /etc/systemd/system/vps-panel-agent.service
+  "$UNIT_DIR/vps-panel-agent.service"
 install -m 0644 "$REPO_DIR/scripts/systemd/vps-panel.service" \
-  /etc/systemd/system/vps-panel.service
+  "$UNIT_DIR/vps-panel.service"
 systemctl daemon-reload
 
 # Backfill the upload limits into the LIVE panel vhost.
@@ -772,17 +925,51 @@ retire_nginx_jails() {
 }
 retire_nginx_jails || true
 
+# How often systemd has restarted the unit by itself since its last start.
+unit_restarts() {
+  local n
+  n="$(systemctl show -p NRestarts --value "$1" 2>/dev/null || true)"
+  [[ "$n" =~ ^[0-9]+$ ]] || n=0
+  echo "$n"
+}
+
+if [[ $INSIDE_AGENT -eq 1 ]]; then
+  # The script is killed with the agent it restarts; systemd restarts the
+  # panel along with the agent (Requires=). As before, nothing checks the
+  # result, and there is no rollback: STAGE says so to `finish`.
+  echo "running inside the agent's own service: this script ends when the agent restarts and cannot check the result. Use the Update button or run it over SSH."
+  STAGE=handoff
+else
+  STAGE=restart
+fi
 systemctl restart vps-panel-agent.service
+AGENT_RESTARTS="$(unit_restarts vps-panel-agent.service)"
 sleep 1
 systemctl restart vps-panel.service
+PANEL_RESTARTS="$(unit_restarts vps-panel.service)"
 # Both units are Type=simple: restart succeeds once the process is started,
-# even if it exits right after. An update that left one of them down must
-# not end with "updated." and exit 0.
-sleep 3
-for unit in vps-panel-agent.service vps-panel.service; do
-  if ! systemctl is-active --quiet "$unit"; then
-    echo "$unit is not running after the update. Check: journalctl -u $unit -n 50" >&2
-    exit 1
+# even if it exits right after, and with Restart=on-failure a unit that
+# crashes at every start is "active" again for a moment every two seconds.
+# So: both stay active, and systemd restarts neither by itself, for six
+# seconds. An update that fails this is rolled back (`finish`) and does not
+# end with "updated." and exit 0.
+DOWN=""
+for _ in 1 2 3 4 5 6; do
+  sleep 1
+  if ! systemctl is-active --quiet vps-panel-agent.service \
+     || [[ "$(unit_restarts vps-panel-agent.service)" -gt "$AGENT_RESTARTS" ]]; then
+    DOWN=vps-panel-agent.service
+  elif ! systemctl is-active --quiet vps-panel.service \
+     || [[ "$(unit_restarts vps-panel.service)" -gt "$PANEL_RESTARTS" ]]; then
+    DOWN=vps-panel.service
   fi
+  [[ -z "$DOWN" ]] || break
 done
+if [[ -n "$DOWN" ]]; then
+  echo "$DOWN did not stay up after the update. Its last log lines:" >&2
+  journalctl -u "$DOWN" -n 30 --no-pager >&2 || true
+  exit 1
+fi
+STAGE=done
+trap - EXIT INT TERM HUP
 echo "updated."
