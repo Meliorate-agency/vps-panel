@@ -33,6 +33,17 @@ export function slotConflict(name: string, port: number, subdomain: string): str
 }
 
 /**
+ * Apps that have never come up: name -> the tasks of their deploys so far,
+ * oldest first. Only the newest of them may take the row away again. On
+ * globalThis: the deploy form and the MCP route can be separate module
+ * instances.
+ */
+function unprovenApps(): Map<string, string[]> {
+  const g = globalThis as { __appsUnproven?: Map<string, string[]> };
+  return (g.__appsUnproven ??= new Map());
+}
+
+/**
  * Record a deploy the agent accepted. A brand-new app whose deploy then fails
  * is removed again, so /apps never lists an app that never ran. Watching the
  * task happens in the background; if the panel restarts meanwhile the row
@@ -41,6 +52,8 @@ export function slotConflict(name: string, port: number, subdomain: string): str
 export function recordAppDeploy(req: CreateApp, taskId: string): void {
   const conn = db();
   const existed = !!conn.prepare(`SELECT 1 FROM apps WHERE name = ?`).get(req.name);
+  // A row whose first deploy is not settled yet is still a brand-new app.
+  const earlier = unprovenApps().get(req.name);
   conn
     .prepare(
       `INSERT INTO apps (name, source_dir, port, subdomain, runtime, entrypoint, ssl_enabled, repo_url)
@@ -62,10 +75,14 @@ export function recordAppDeploy(req: CreateApp, taskId: string): void {
       req.repo_url ?? null,
       req.exec_start ?? null,
     );
-  if (!existed) void forgetIfDeployFails(req.name, taskId);
+  if (!existed || earlier) {
+    unprovenApps().set(req.name, [...(earlier ?? []), taskId]);
+    void forgetIfDeployFails(req.name, taskId);
+  }
 }
 
-async function forgetIfDeployFails(name: string, taskId: string): Promise<void> {
+/** How the task ended, or null when it was still running after an hour. */
+async function taskOutcome(taskId: string): Promise<"succeeded" | "failed" | null> {
   const deadline = Date.now() + 60 * 60 * 1000;
   while (Date.now() < deadline) {
     await new Promise((r) => setTimeout(r, 3000));
@@ -75,10 +92,46 @@ async function forgetIfDeployFails(name: string, taskId: string): Promise<void> 
     } catch {
       continue;
     }
-    if (status === "succeeded") return;
-    if (status === "failed") {
-      db().prepare(`DELETE FROM apps WHERE name = ?`).run(name);
+    if (status === "succeeded" || status === "failed") return status;
+  }
+  return null;
+}
+
+/**
+ * Removes the row of a brand-new app when the deploy `taskId` fails, unless
+ * the row is no longer this deploy's. A second deploy started before the
+ * failure was noticed here (the task is looked at every 3 s) reuses the row,
+ * and the first deploy's failure used to delete it under the second one.
+ */
+async function forgetIfDeployFails(name: string, taskId: string): Promise<void> {
+  const outcome = await taskOutcome(taskId);
+  const unproven = unprovenApps();
+  const isNewest = () => {
+    const tasks = unproven.get(name);
+    return !!tasks && tasks[tasks.length - 1] === taskId;
+  };
+  if (!unproven.has(name)) return;
+  if (outcome !== "failed") {
+    // The app came up (or nobody can tell): the row stays from here on.
+    unproven.delete(name);
+    return;
+  }
+  // A later deploy has the row now; what happens to it is that one's call.
+  if (!isNewest()) return;
+  // The agent runs one deploy of an app at a time, so the earlier ones are
+  // over. If one of them came up, the app has run and keeps its row.
+  for (const earlier of (unproven.get(name) ?? []).slice(0, -1)) {
+    const status = await agent.tasks
+      .get(earlier)
+      .then((t) => t.status)
+      .catch(() => null);
+    if (status !== "failed") {
+      unproven.delete(name);
       return;
     }
   }
+  // Looked at again: a deploy accepted during those lookups has the row.
+  if (!isNewest()) return;
+  db().prepare(`DELETE FROM apps WHERE name = ?`).run(name);
+  unproven.delete(name);
 }
