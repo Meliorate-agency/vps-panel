@@ -298,13 +298,21 @@ function ServicesStep({
     }
   }
 
+  // The repair task whose end TaskProgress has reported. Until then the
+  // task counts as running: the action returns as soon as the agent accepts
+  // it, and a second Install meanwhile ran a second apt alongside it.
+  const [repairDone, setRepairDone] = useState<string | null>(null);
+  const repairTask = installState?.ok ? (installState.data?.taskId ?? null) : null;
+  const repairRunning = repairTask !== null && repairDone !== repairTask;
+
   useEffect(() => {
     // Auto-refresh while a repair task is in flight so freshly installed
     // services flip to healthy without the operator having to hit the button.
-    if (!installState?.ok || !installState.data?.taskId) return;
+    // It used to keep polling for as long as the step stayed open.
+    if (!repairRunning) return;
     const t = setInterval(refresh, 4000);
     return () => clearInterval(t);
-  }, [installState]);
+  }, [repairRunning]);
 
   const allOk = services.every((s) => s.installed && s.active);
 
@@ -353,7 +361,7 @@ function ServicesStep({
                   <button
                     type="submit"
                     className={shared.btnGhost}
-                    disabled={installPending}
+                    disabled={installPending || repairRunning}
                   >
                     {installPending ? "..." : "Install"}
                   </button>
@@ -373,7 +381,10 @@ function ServicesStep({
         <div style={{ marginTop: 12 }}>
           <TaskProgress
             taskId={installState.data.taskId}
-            onComplete={() => refresh()}
+            onComplete={() => {
+              setRepairDone(installState.data!.taskId!);
+              void refresh();
+            }}
           />
         </div>
       )}
