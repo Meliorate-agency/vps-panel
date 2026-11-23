@@ -357,6 +357,42 @@ mod tests {
         assert_eq!(rows[0].detail, "connect to slow.example[198.51.100.2]:25: Connection refused");
     }
 
+    /// The per-domain services (smtp-ipv4, smtp-ipv6 in master.cf, mail_ip.rs)
+    /// run the same `smtp` program, so their lines carry the same
+    /// `postfix/smtp` tag; a service with its own syslog_name (the stock
+    /// `relay`) logs as `postfix/relay/smtp`. Neither is local delivery.
+    #[test]
+    fn deliveries_over_ipv6_and_by_other_smtp_services_are_tracked() {
+        let log = "\
+2026-11-20T10:00:00+0100 vps postfix/submission/smtpd[10]: 8AC1F2E3D4: client=unknown[2001:db8:9::7], sasl_method=PLAIN, sasl_username=jane@example.com
+2026-11-20T10:00:01+0100 vps postfix/qmgr[900]: 8AC1F2E3D4: from=<jane@example.com>, size=900, nrcpt=3 (queue active)
+2026-11-20T10:00:02+0100 vps postfix/smtp[11]: 8AC1F2E3D4: to=<a@gmail.com>, relay=gmail-smtp-in.l.google.com[2a00:1450:4010:c0e::1b]:25, delay=1.4, delays=0.1/0/0.5/0.8, dsn=2.0.0, status=sent (250 2.0.0 OK 1700000000 x1si)
+2026-11-20T10:00:03+0100 vps postfix/smtp[11]: 8AC1F2E3D4: to=<b@v6only.example>, relay=none, delay=2, delays=0.1/0/1.9/0, dsn=4.4.1, status=deferred (connect to mx.v6only.example[2001:db8:5::25]:25: Network is unreachable)
+2026-11-20T10:00:04+0100 vps postfix/relay/smtp[12]: 8AC1F2E3D4: to=<c@partner.example>, relay=mx.partner.example[203.0.113.25]:25, delay=3, dsn=2.0.0, status=sent (250 ok)
+2026-11-20T10:01:00+0100 vps postfix/smtpd[13]: NOQUEUE: reject: RCPT from unknown[2001:db8:bad::66]: 554 5.7.1 <jane@example.com>: Relay access denied; from=<spam@bad.example> to=<jane@example.com> proto=ESMTP helo=<bad.example>
+";
+        let rows = track_rows(log, "jane@example.com");
+        assert_eq!(
+            statuses(&rows),
+            vec![
+                ("a@gmail.com", "sent", "jane@example.com"),
+                ("b@v6only.example", "deferred", "jane@example.com"),
+                ("c@partner.example", "sent", "jane@example.com"),
+                ("jane@example.com", "rejected", "spam@bad.example"),
+            ]
+        );
+        assert_eq!(
+            rows[0].detail,
+            "gmail-smtp-in.l.google.com[2a00:1450:4010:c0e::1b]:25: 250 2.0.0 OK 1700000000 x1si"
+        );
+        assert_eq!(
+            rows[1].detail,
+            "connect to mx.v6only.example[2001:db8:5::25]:25: Network is unreachable"
+        );
+        assert_eq!(rows[2].detail, "mx.partner.example[203.0.113.25]:25: 250 ok");
+        assert_eq!(rows[3].detail, "554 5.7.1 <jane@example.com>: Relay access denied");
+    }
+
     #[test]
     fn queue_ids_and_fields() {
         assert!(is_queue_id("4AB12C3D4E"));

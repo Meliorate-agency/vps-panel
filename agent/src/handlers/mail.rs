@@ -33,6 +33,7 @@ fn symlink(_src: &std::path::Path, _dst: &std::path::Path) -> std::io::Result<()
 }
 
 static MAIL_INITIALIZED: AtomicBool = AtomicBool::new(false);
+static MAIL_MIGRATED: AtomicBool = AtomicBool::new(false);
 const MAIL_SCHEMA: &str = include_str!("mail_schema.sql");
 
 fn default_true() -> bool {
@@ -54,6 +55,9 @@ pub struct DomainRow {
     pub id: u32,
     pub name: String,
     pub mailboxes: u32,
+    /// default | ipv4 | ipv6: the IP protocol this domain's outgoing mail
+    /// prefers (mail_ip.rs).
+    pub ip_preference: crate::handlers::mail_ip::Preference,
 }
 
 #[derive(Deserialize)]
@@ -120,7 +124,10 @@ pub struct MailSslResp {
 pub(crate) async fn mail_conn(state: &AppState) -> AgentResult<mysql_async::Conn> {
     let mut conn = state.mariadb.pool().get_conn().await?;
     match conn.query_drop(format!("USE `{MAIL_DB}`")).await {
-        Ok(()) => Ok(conn),
+        Ok(()) => {
+            migrate_mail_schema(&mut conn).await;
+            Ok(conn)
+        }
         Err(e) if is_unknown_database(&e) => {
             ensure_mail_schema(state).await?;
             let mut conn = state.mariadb.pool().get_conn().await?;
@@ -128,6 +135,26 @@ pub(crate) async fn mail_conn(state: &AppState) -> AgentResult<mysql_async::Conn
             Ok(conn)
         }
         Err(e) => Err(e.into()),
+    }
+}
+
+/// Columns added after the first release. `ensure_mail_schema` only runs when
+/// the database is missing, so a server installed earlier never sees a changed
+/// mail_schema.sql: bring its tables up to date here, once per agent start.
+/// `IF NOT EXISTS` makes it a no-op afterwards.
+async fn migrate_mail_schema(conn: &mut mysql_async::Conn) {
+    if MAIL_MIGRATED.load(Ordering::Acquire) {
+        return;
+    }
+    match conn
+        .query_drop(
+            "ALTER TABLE virtual_domains \
+             ADD COLUMN IF NOT EXISTS ip_preference VARCHAR(8) NOT NULL DEFAULT 'default'",
+        )
+        .await
+    {
+        Ok(()) => MAIL_MIGRATED.store(true, Ordering::Release),
+        Err(e) => tracing::warn!(error = %e, "could not add virtual_domains.ip_preference"),
     }
 }
 
@@ -163,11 +190,11 @@ async fn ensure_mail_schema(state: &AppState) -> AgentResult<()> {
 
 pub async fn list_domains(State(state): State<AppState>) -> AgentResult<Json<Vec<DomainRow>>> {
     let mut conn = mail_conn(&state).await?;
-    let rows: Vec<(u32, String)> = conn
-        .query("SELECT id, name FROM virtual_domains ORDER BY name")
+    let rows: Vec<(u32, String, String)> = conn
+        .query("SELECT id, name, ip_preference FROM virtual_domains ORDER BY name")
         .await?;
     let mut out = Vec::new();
-    for (id, name) in rows {
+    for (id, name, ip_preference) in rows {
         let count: u32 = conn
             .exec_first(
                 "SELECT COUNT(*) FROM virtual_users WHERE domain_id = ?",
@@ -179,6 +206,7 @@ pub async fn list_domains(State(state): State<AppState>) -> AgentResult<Json<Vec
             id,
             name,
             mailboxes: count,
+            ip_preference: crate::handlers::mail_ip::Preference::from_db(&ip_preference),
         });
     }
     Ok(Json(out))
@@ -431,7 +459,7 @@ async fn publish_mail_records(
     };
 
     let server_ip = crate::server_ip::resolve_ipv4(None, &state.config.panel_host).await;
-    let server_ip_v6 = crate::server_ip::resolve_ipv6(None, &state.config.panel_host).await;
+    let server_ip_v6 = crate::server_ip::published_ipv6(None, &state.config.panel_host).await;
 
     let dkim_value = format!("\"v=DKIM1; k=rsa; p={dkim_pubkey}\"");
     let spf = crate::handlers::dns::format_spf(server_ip.as_deref(), server_ip_v6.as_deref());

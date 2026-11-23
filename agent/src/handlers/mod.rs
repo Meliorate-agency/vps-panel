@@ -13,6 +13,8 @@ pub mod hostname;
 pub mod logs;
 pub mod mail;
 pub mod mail_aliases;
+pub mod mail_check;
+pub mod mail_ip;
 pub mod mail_log;
 pub mod nginx;
 pub mod panel_access;
@@ -130,6 +132,13 @@ pub fn router(state: AppState) -> Router {
         // Make sure a valid cert covers mail.<tenant> (re-issue site cert with
         // the SAN, or a standalone mail.<tenant> cert). Returns a task id.
         .route("/mail/domains/{name}/ssl", post(mail::ensure_ssl))
+        // Outgoing mail over IPv4 or IPv6: the server-wide default and a
+        // choice per domain (mail_ip.rs), and the live checks behind them
+        // (mail_check.rs; slow, they look records up in public DNS).
+        .route("/mail/ip-settings", get(mail_ip::get_settings).put(mail_ip::put_settings))
+        .route("/mail/domains/{name}/ip-preference", put(mail_ip::put_domain_preference))
+        .route("/mail/ip-check", get(mail_check::ip_check))
+        .route("/mail/domains/{name}/dns-check", get(mail_check::domain_dns_check))
         // Databases — MariaDB
         .route("/db/users", post(databases::create_user).get(databases::list_users))
         .route("/db/databases", post(databases::create_database).get(databases::list_databases))

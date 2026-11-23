@@ -78,6 +78,8 @@ async fn serve() -> Result<()> {
     // Webmail filters and Out of Office; spawned so a slow docker can't hold
     // up the socket.
     tokio::spawn(handlers::quick_install::ensure_roundcube_managesieve());
+    // Outgoing mail: IPv6 only from the published address, else IPv4 only.
+    tokio::spawn(handlers::mail_ip::ensure_at_startup(state.clone()));
     // The panel vhost includes the access allowlist; nginx -t fails without it.
     if let Err(e) = handlers::panel_access::ensure_file().await {
         tracing::warn!(error = %e, "could not create the panel access file");

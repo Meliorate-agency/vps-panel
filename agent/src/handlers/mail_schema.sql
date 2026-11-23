@@ -1,6 +1,7 @@
 CREATE TABLE IF NOT EXISTS virtual_domains (
   id INT AUTO_INCREMENT PRIMARY KEY,
-  name VARCHAR(255) NOT NULL UNIQUE
+  name VARCHAR(255) NOT NULL UNIQUE,
+  ip_preference VARCHAR(8) NOT NULL DEFAULT 'default'
 ) Engine=InnoDB;
 
 CREATE TABLE IF NOT EXISTS virtual_users (

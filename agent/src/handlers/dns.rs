@@ -228,6 +228,29 @@ pub async fn create_zone(
     create_zone_inner(&state, req).await.map(Json)
 }
 
+/// The NS records at the apex of `zone` as this panel's PowerDNS serves them,
+/// lowercased without the trailing dot. None when the zone is not hosted here.
+pub(crate) async fn zone_ns(state: &AppState, zone: &str) -> Option<Vec<String>> {
+    let mut conn = pdns_conn(state).await.ok()?;
+    let id: u32 = conn
+        .exec_first("SELECT id FROM domains WHERE name = ?", (zone,))
+        .await
+        .ok()??;
+    let rows: Vec<String> = conn
+        .exec(
+            "SELECT content FROM records \
+             WHERE domain_id = ? AND name = ? AND type = 'NS' AND COALESCE(disabled, 0) = 0",
+            (id, zone),
+        )
+        .await
+        .unwrap_or_default();
+    Some(
+        rows.iter()
+            .map(|c| c.trim_end_matches('.').to_lowercase())
+            .collect(),
+    )
+}
+
 /// Programmatic counterpart to `create_zone` for in-agent callers (e.g.
 /// the panel-host setup task in `system.rs`). Same behavior, no Axum
 /// extractors.
@@ -265,7 +288,7 @@ pub(crate) async fn create_zone_inner(
         &state.config.panel_host,
     )
     .await;
-    let server_ip_v6 = crate::server_ip::resolve_ipv6(
+    let server_ip_v6 = crate::server_ip::published_ipv6(
         req.seed_ip.as_deref(),
         &state.config.panel_host,
     )
@@ -447,7 +470,7 @@ pub async fn reconcile_zone(
 
     let (ns1, ns2) = ns_pair_for(&zone, &state.panel_db);
     let server_ip = crate::server_ip::resolve_ipv4(None, &state.config.panel_host).await;
-    let server_ip_v6 = crate::server_ip::resolve_ipv6(None, &state.config.panel_host).await;
+    let server_ip_v6 = crate::server_ip::published_ipv6(None, &state.config.panel_host).await;
     let has_mail = mail_domain_exists(&mut conn, &zone).await;
     let dkim_pubkey = if has_mail {
         read_dkim_pubkey(&zone).await.ok()
@@ -643,7 +666,7 @@ async fn mail_domain_exists(conn: &mut mysql_async::Conn, zone: &str) -> bool {
     matches!(res, Ok(Some(_)))
 }
 
-async fn read_dkim_pubkey(zone: &str) -> AgentResult<String> {
+pub(crate) async fn read_dkim_pubkey(zone: &str) -> AgentResult<String> {
     let path = std::path::PathBuf::from(format!("{DKIM_DIR}/{zone}.{DKIM_SELECTOR}.key"));
     if !path.exists() {
         return Err(AgentError::Other(anyhow::anyhow!(
@@ -1194,7 +1217,7 @@ pub(crate) async fn ensure_subdomain_records(
         return Ok(SubdomainRecords::ZoneApex);
     }
     let v4 = crate::server_ip::resolve_ipv4(None, &state.config.panel_host).await;
-    let v6 = crate::server_ip::resolve_ipv6(None, &state.config.panel_host).await;
+    let v6 = crate::server_ip::published_ipv6(None, &state.config.panel_host).await;
     if v4.is_none() && v6.is_none() {
         return Ok(SubdomainRecords::NoServerIp);
     }
