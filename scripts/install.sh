@@ -976,10 +976,19 @@ systemctl reload nginx
 
 #-------------------------------------------------- start services
 log "enabling agent and panel"
-systemctl enable --now vps-panel-agent.service
+# restart, not `enable --now`: on a re-run both are already running, and
+# `--now` left the old agent and the old panel process on the new files.
+systemctl enable vps-panel-agent.service vps-panel.service
+systemctl restart vps-panel-agent.service
 sleep 1
-systemctl enable --now vps-panel.service
-sleep 1
+systemctl restart vps-panel.service
+sleep 3
+# Type=simple: restart succeeds even when the process exits right after.
+for unit in vps-panel-agent.service vps-panel.service; do
+  if ! systemctl is-active --quiet "$unit"; then
+    warn "$unit is not running. Check: journalctl -u $unit -n 50"
+  fi
+done
 
 #-------------------------------------------------- summary
 log "panel ready"
