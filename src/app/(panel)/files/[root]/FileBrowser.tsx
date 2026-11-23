@@ -17,6 +17,60 @@ import {
 
 type DialogKind = "newFolder" | "newFile" | "rename" | "delete";
 
+/** An error to show: a sentence, or a summary with one line per item that a
+ *  move or a move to Trash refused. */
+type ErrorState = string | { summary: string; items: string[] };
+
+/** The agent's sentence out of an action's error. A refusal of the whole
+ *  request reaches us as `agent <status>: <JSON body>`; per-item errors keep
+ *  the agent's "conflict: " / "invalid input: " prefixes. */
+function agentSentence(msg: string): string {
+  let s = msg;
+  const m = /^agent \d+: ([\s\S]*)$/.exec(s);
+  if (m) {
+    s = m[1];
+    try {
+      const body = JSON.parse(s) as { error?: unknown };
+      if (typeof body.error === "string") s = body.error;
+    } catch {
+      // not JSON: keep the body as it is
+    }
+  }
+  return s.replace(/(^|: |; )(?:conflict|invalid input): /g, "$1");
+}
+
+/** A failed move or move to Trash of `count` items, from moveAction's /
+ *  trashAction's "Moved N[ to Trash], failed M: <item>: <why>; ..." text:
+ *  what did go, then each refused item with the agent's reason. */
+function itemErrors(error: string, count: number, toTrash: boolean): ErrorState {
+  const s = agentSentence(error);
+  if (count < 2) return s;
+  const m = /^Moved (\d+)(?: to Trash)?, failed \d+: ([\s\S]*)$/.exec(s);
+  const moved = m ? Number(m[1]) : 0;
+  const where = toTrash ? " to Trash" : "";
+  return {
+    summary:
+      moved > 0
+        ? `Moved ${moved} of ${count} items${where}. These were not:`
+        : `None of the ${count} items were moved${where}:`,
+    items: (m ? m[2] : s).split("; "),
+  };
+}
+
+function ErrorBody({ error }: { error: ErrorState }) {
+  if (typeof error === "string") return <>{error}</>;
+  return (
+    <>
+      {error.summary}
+      <ul style={{ margin: "6px 0 0", paddingLeft: 18 }}>
+        {error.items.map((item, i) => (
+          <li key={i}>{item}</li>
+        ))}
+      </ul>
+    </>
+  );
+}
+
 /** Join a directory path and a name, both relative to the root. */
 function joinPath(dir: string, name: string): string {
   return dir ? `${dir}/${name}` : name;
@@ -148,7 +202,8 @@ export default function FileBrowser({
 }) {
   const [listing, setListing] = useState<FileListing>(initial);
   const [selected, setSelected] = useState<Set<string>>(new Set());
-  const [error, setError] = useState<string | null>(null);
+  const [error, setError] = useState<ErrorState | null>(null);
+  const errorRef = useRef<HTMLDivElement>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const [dialog, setDialog] = useState<DialogKind | null>(null);
   const [nameInput, setNameInput] = useState("");
@@ -185,6 +240,11 @@ export default function FileBrowser({
     }
   }, [dialog]);
 
+  // A refused drop happens down in a long list; the banner is above it.
+  useEffect(() => {
+    if (error && !dialog) errorRef.current?.scrollIntoView({ block: "nearest" });
+  }, [error, dialog]);
+
   const root = listing.root;
   const path = listing.path;
   // The folder on screen now, for work that finishes after the operator may
@@ -200,7 +260,7 @@ export default function FileBrowser({
       startTransition(async () => {
         const res = await listDirAction(root.id, next);
         if (!res.ok) {
-          setError(res.error);
+          setError(agentSentence(res.error));
           return;
         }
         setListing(res.listing);
@@ -254,7 +314,7 @@ export default function FileBrowser({
     startTransition(async () => {
       const res = await moveAction(root.id, paths, dest);
       if (!res.ok) {
-        setError(res.error);
+        setError(itemErrors(res.error, paths.length, false));
       } else {
         setError(null);
         setNotice(
@@ -383,6 +443,7 @@ export default function FileBrowser({
     const name = nameInput.trim();
     startTransition(async () => {
       let res;
+      const count = selectedEntries.length;
       if (dialog === "newFolder") res = await createFolderAction(root.id, path, name);
       else if (dialog === "newFile") res = await createFileAction(root.id, path, name);
       else if (dialog === "rename") {
@@ -398,7 +459,11 @@ export default function FileBrowser({
       else return;
 
       if (!res.ok) {
-        setError(res.error);
+        // Shown in the dialog, which stays open: on the page behind it the
+        // refusal went unseen and the click looked like it did nothing.
+        setError(
+          dialog === "delete" ? itemErrors(res.error, count, true) : agentSentence(res.error),
+        );
       } else {
         setError(null);
         setNotice(
@@ -495,7 +560,12 @@ export default function FileBrowser({
         </div>
       </div>
 
-      {error && <div className={pageStyles.error}>{error}</div>}
+      {/* While a dialog is open its own copy is the one in view. */}
+      {error && !dialog && (
+        <div ref={errorRef} className={pageStyles.error} role="alert">
+          <ErrorBody error={error} />
+        </div>
+      )}
       {notice && <div className={pageStyles.notice}>{notice}</div>}
 
       <div className={styles.bar}>
@@ -835,6 +905,11 @@ export default function FileBrowser({
         <div className={pageStyles.muted} style={{ fontSize: 12, marginTop: 8 }}>
           In <span className={pageStyles.code}>{listing.abs_path}</span>
         </div>
+        {error && (
+          <div className={pageStyles.error} role="alert" style={{ marginTop: 10 }}>
+            <ErrorBody error={error} />
+          </div>
+        )}
       </ConfirmDialog>
 
       <ConfirmDialog
@@ -848,6 +923,11 @@ export default function FileBrowser({
         onConfirm={runDialog}
         onCancel={() => setDialog(null)}
       >
+        {error && (
+          <div className={pageStyles.error} role="alert">
+            <ErrorBody error={error} />
+          </div>
+        )}
         <div style={{ fontSize: 13 }}>
           These are moved to the panel&apos;s trash, not erased. You can restore them
           from the Trash page for 30 days, after which they&apos;re purged automatically.
