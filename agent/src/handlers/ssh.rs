@@ -951,6 +951,14 @@ pub async fn update_public_key(
     let ssh_dir = ssh_home_dir_lookup(&q.user)?;
     let path = authorized_keys_path(&q.user)?;
     let existing = read_user_file(&path).await?;
+    // Editing one line into a key another line already holds made the same
+    // duplicate `add` refuses: two rows with one fingerprint, deleted together.
+    if new_fp != fp && has_key_with_fingerprint(&existing, &new_fp).await {
+        return Err(AgentError::Conflict(format!(
+            "this key is already authorised for {}",
+            q.user
+        )));
+    }
     let mut out_lines: Vec<String> = Vec::with_capacity(existing.lines().count() + 1);
     let mut replaced = false;
     for line in existing.lines() {

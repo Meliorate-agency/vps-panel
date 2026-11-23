@@ -208,8 +208,9 @@ export default async function DatabasesPage() {
                 <p>
                   This permanently deletes the database{" "}
                   <span className={styles.code}>{d.name}</span> and{" "}
-                  <strong>all tables and data inside it</strong>. This cannot
-                  be undone.
+                  <strong>all tables and data inside it</strong>. The grants
+                  users have on it are removed too, so a database created later
+                  under the same name starts with none. This cannot be undone.
                 </p>
               }
             />
