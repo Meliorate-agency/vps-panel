@@ -24,12 +24,12 @@ The script will:
 
 1. Update apt and install all packages (see [SECURITY.md](SECURITY.md) for what each is hardened to).
 2. Create system users `vps-panel`, `apps`, `vmail`.
-3. Install rustup as `vps-panel`, build the agent in release mode, install it to `/usr/local/bin/vps-panel-agent`.
-4. Install Node 20 LTS from NodeSource, run `npm ci && npm run build`, install the standalone output to `/opt/vps-panel/.next/standalone`.
+3. Install rustup (as root), build the agent in release mode, install it to `/usr/local/bin/vps-panel-agent`.
+4. Install Node 22 LTS from NodeSource (a server that already has Node 20 or newer keeps it), copy the source to `/opt/vps-panel/app` and run `npm ci && npm run build` there as `vps-panel`.
 5. Generate `JWT_SECRET`, `AGENT_TOKEN`, `RESTIC_PASSWORD` and write `/etc/vps-panel/.env`.
 6. Initialize MariaDB, create databases `panel`, `pdns`, `mail`, plus their service users.
 7. Configure PowerDNS, Postfix, Dovecot, Rspamd to read from MariaDB.
-8. Apply hardening (SSH lockdown, sysctl, AppArmor checks, unattended-upgrades, fail2ban jails).
+8. Apply hardening (UFW, fail2ban jails, sysctl, unattended-upgrades, chrony). SSH is left permissive on purpose, see [SECURITY.md](SECURITY.md).
 9. Install the panel nginx vhost on `panel.example.com` (HTTP first; you will issue HTTPS from the panel UI).
 10. Enable + start `vps-panel-agent.service` and `vps-panel.service`.
 11. Print the bootstrap admin credentials.
@@ -52,7 +52,7 @@ Pulls, builds the agent and the panel, and only then installs them and restarts 
 bash /root/vps-panel-src/scripts/uninstall.sh
 ```
 
-Stops both services, removes systemd units, removes the nginx vhost, leaves `/var/lib/vps-panel` and MariaDB databases alone. Pass `--purge` to wipe state too.
+Stops both services, removes systemd units, the panel's nginx vhost, the agent binary and `/opt/vps-panel`; leaves `/var/lib/vps-panel`, `/etc/vps-panel` and the MariaDB databases alone. `--purge` also removes the panel's own state: `/var/lib/vps-panel` (panel.db, the Files trash), its logs, `.env`, the agent token, the panel access list and the `panel` database. Certificates, app env files, the backup key and repository, the `pdns` and `mail` databases, site vhosts and app units stay: nginx, your apps, DNS and mail keep running on them.
 
 ## Backups
 
@@ -64,6 +64,6 @@ If the panel is broken and you need to fix it from SSH:
 
 - Panel logs: `journalctl -u vps-panel.service -f`
 - Agent logs: `journalctl -u vps-panel-agent.service -f`
-- Panel DB: `sqlite3 /var/lib/vps-panel/panel.db`
+- Panel DB: `sqlite3 /var/lib/vps-panel/panel.db` (`apt install sqlite3` first; the installer does not install the CLI)
 - Agent socket health: `curl --unix-socket /run/vps-panel/agent.sock http://x/health -H "Authorization: Bearer $(cat /etc/vps-panel/agent.token)"`
-- Reset admin password: `sudo /usr/local/bin/vps-panel-agent admin-reset --email you@example.com` (writes new argon2 hash to `panel.db`).
+- Reset admin password: `sudo /usr/local/bin/vps-panel-agent admin-reset --email you@example.com` (type the new password, Enter, then Ctrl-D; writes new argon2 hash to `panel.db`).
