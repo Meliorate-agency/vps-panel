@@ -23,6 +23,9 @@ export type Session = {
    *  the access/refresh JWTs so the TOTP re-issuance + future refresh
    *  cycles keep using the 30-day TTL instead of the configured default. */
   remember: boolean;
+  /** jti of the refresh token issued with this access token, so logout can
+   *  revoke it too. Absent on tokens issued before this claim existed. */
+  refreshJti?: string;
 };
 
 export type IssuedSession = {
@@ -81,6 +84,7 @@ export async function issueSession(
     role,
     needsTotp,
     remember,
+    rjti: refreshJti,
     typ: "access",
   })
     .setProtectedHeader({ alg: "HS256" })
@@ -132,7 +136,9 @@ export async function setAuthCookies(
 export async function clearAuthCookies() {
   const jar = await cookies();
   jar.delete(COOKIE_NAME);
-  jar.delete(REFRESH_COOKIE);
+  // A cookie is only replaced by one with the same path. Deleting it at the
+  // default "/" left the refresh cookie in the browser after logout.
+  jar.delete({ name: REFRESH_COOKIE, path: "/api/auth/refresh" });
 }
 
 export async function getSession(): Promise<Session | null> {
@@ -154,6 +160,7 @@ export async function getSession(): Promise<Session | null> {
       jti,
       needsTotp: Boolean(payload.needsTotp),
       remember: Boolean(payload.remember),
+      refreshJti: typeof payload.rjti === "string" ? payload.rjti : undefined,
     };
   } catch {
     return null;

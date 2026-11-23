@@ -45,7 +45,14 @@ export async function POST(req: NextRequest) {
     .get(userId) as { email: string; role: string; totp_enabled: number } | undefined;
   if (!user) return new NextResponse("user gone", { status: 401 });
 
-  const needsTotp = Boolean(payload.needsTotp) && Boolean(user.totp_enabled);
+  // A session that still owes its TOTP code never turns into a full one
+  // here. If two-factor was switched off meanwhile (the agent's password
+  // reset clears it), the password that opened this session may be the old
+  // one: sign in again.
+  if (payload.needsTotp && !user.totp_enabled) {
+    return new NextResponse("sign in again", { status: 401 });
+  }
+  const needsTotp = Boolean(payload.needsTotp);
   // Carry Remember-me forward across the refresh cycle. Without this the
   // first refresh after a remembered login would silently downgrade the
   // 30-day cookie back to the configured `panel.session_ttl_minutes` default.
@@ -64,6 +71,7 @@ export async function POST(req: NextRequest) {
     role: user.role,
     needsTotp,
     remember,
+    rjti: newRefreshJti,
     typ: "access",
   })
     .setProtectedHeader({ alg: "HS256" })

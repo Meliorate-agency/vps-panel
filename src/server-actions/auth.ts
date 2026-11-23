@@ -11,7 +11,7 @@ import {
   syncAdminFromEnv,
 } from "@/lib/auth";
 import { dummyPasswordHash, hashPassword, verifyPassword } from "@/lib/crypto";
-import { checkLogin, recordLoginAttempt } from "@/lib/rateLimit";
+import { checkLogin, markLoginSucceeded, recordLoginAttempt } from "@/lib/rateLimit";
 import { getClientIp } from "@/lib/getClientIp";
 import { newSecret, totpUri, totpQr, verifyTotp } from "@/lib/totp";
 import { writeAudit } from "@/lib/audit";
@@ -42,6 +42,10 @@ export async function loginAction(_prev: ActionResult | null, fd: FormData): Pro
   if (!rate.allowed) {
     return { ok: false, error: rate.reason };
   }
+  // Counted as a failure right away, before anything is awaited: attempts
+  // sent at once must not all get past the limit while the first one is
+  // still being verified.
+  const attempt = recordLoginAttempt(ip, email, false);
 
   const user = db()
     .prepare(`SELECT id, email, password_hash, totp_secret, totp_enabled, role FROM users WHERE email = ?`)
@@ -50,18 +54,16 @@ export async function loginAction(_prev: ActionResult | null, fd: FormData): Pro
     // Same argon2 work as a real check, so the response time does not tell
     // whether the email has an account.
     await verifyPassword(await dummyPasswordHash(), password);
-    recordLoginAttempt(ip, email, false);
     writeAudit({ actorId: null, action: "login.fail", target: email, result: "error", message: "no such user" });
     return { ok: false, error: "invalid email or password" };
   }
 
   const ok = await verifyPassword(user.password_hash, password);
   if (!ok) {
-    recordLoginAttempt(ip, email, false);
     writeAudit({ actorId: user.id, action: "login.fail", target: email, result: "error", message: "bad password" });
     return { ok: false, error: "invalid email or password" };
   }
-  recordLoginAttempt(ip, email, true);
+  markLoginSucceeded(attempt);
 
   const needsTotp = Boolean(user.totp_enabled);
   const issued = await issueSession(user.id, user.email, user.role, needsTotp, remember);
@@ -81,30 +83,49 @@ export async function logoutAction(): Promise<void> {
   const s = await getSession();
   if (s) {
     revokeSession(s.jti);
+    // The refresh token too: it could otherwise still be traded for a new
+    // session after signing out.
+    if (s.refreshJti) revokeSession(s.refreshJti);
     writeAudit({ actorId: s.userId, action: "logout", result: "ok" });
   }
   await clearAuthCookies();
   redirect("/login");
 }
 
-export async function startTotpEnrollAction(): Promise<{ secret: string; qrDataUrl: string; uri: string } | { error: string }> {
+/**
+ * The session for the account actions below, or null. A session that still
+ * owes its TOTP code (password accepted, second factor not yet) does not
+ * count: with the password alone it could otherwise enroll a new
+ * authenticator or change the password and email.
+ */
+async function fullSession() {
   const s = await getSession();
+  return s && !s.needsTotp ? s : null;
+}
+
+export async function startTotpEnrollAction(): Promise<{ secret: string; qrDataUrl: string; uri: string } | { error: string }> {
+  const s = await fullSession();
   if (!s) return { error: "not authenticated" };
   const secret = newSecret();
-  db().prepare(`UPDATE users SET totp_secret = ?, totp_enabled = 0 WHERE id = ?`).run(secret, s.userId);
+  // Only for an account without two-factor: starting over on an enrolled one
+  // replaced its secret and switched TOTP off on the spot, confirmed or not.
+  const started = db()
+    .prepare(`UPDATE users SET totp_secret = ? WHERE id = ? AND totp_enabled = 0`)
+    .run(secret, s.userId);
+  if (started.changes === 0) return { error: "Two-factor authentication is already on for this account." };
   const uri = totpUri(s.email, secret);
   const qrDataUrl = await totpQr(uri);
   return { secret, qrDataUrl, uri };
 }
 
 export async function confirmTotpEnrollAction(_prev: ActionResult | null, fd: FormData): Promise<ActionResult> {
-  const s = await getSession();
+  const s = await fullSession();
   if (!s) return { ok: false, error: "not authenticated" };
   const code = String(fd.get("code") ?? "").trim();
   const row = db()
-    .prepare(`SELECT totp_secret FROM users WHERE id = ?`)
-    .get(s.userId) as { totp_secret: string | null } | undefined;
-  if (!row?.totp_secret) return { ok: false, error: "no pending TOTP enrollment" };
+    .prepare(`SELECT totp_secret, totp_enabled FROM users WHERE id = ?`)
+    .get(s.userId) as { totp_secret: string | null; totp_enabled: number } | undefined;
+  if (!row?.totp_secret || row.totp_enabled) return { ok: false, error: "no pending TOTP enrollment" };
   const step = verifyTotp(row.totp_secret, code);
   if (step === null) return { ok: false, error: "invalid code" };
   db()
@@ -164,7 +185,7 @@ export async function verifyTotpAction(_prev: ActionResult | null, fd: FormData)
 }
 
 export async function changePasswordAction(_prev: ActionResult | null, fd: FormData): Promise<ActionResult> {
-  const s = await getSession();
+  const s = await fullSession();
   if (!s) return { ok: false, error: "not authenticated" };
   const current = String(fd.get("current") ?? "");
   const next = String(fd.get("next") ?? "");
@@ -176,6 +197,12 @@ export async function changePasswordAction(_prev: ActionResult | null, fd: FormD
   }
   const newHash = await hashPassword(next);
   db().prepare(`UPDATE users SET password_hash = ? WHERE id = ?`).run(newHash, s.userId);
+  // Sign out every other browser: whoever held a session under the old
+  // password (the reason it is often changed) must not keep it. This browser
+  // gets a new session in place of the revoked one.
+  db().prepare(`UPDATE sessions SET revoked = 1 WHERE user_id = ? AND revoked = 0`).run(s.userId);
+  const issued = await issueSession(s.userId, s.email, s.role, false, s.remember);
+  await setAuthCookies(issued.access, issued.refresh, issued.accessSeconds, issued.refreshSeconds);
   writeAudit({ actorId: s.userId, action: "password.change", result: "ok" });
   return { ok: true };
 }
@@ -184,7 +211,7 @@ export async function changeAdminEmailAction(
   _prev: ActionResult | null,
   fd: FormData,
 ): Promise<ActionResult> {
-  const s = await getSession();
+  const s = await fullSession();
   if (!s) return { ok: false, error: "not authenticated" };
   const next = String(fd.get("email") ?? "").trim().toLowerCase();
   if (!next) return { ok: false, error: "email required" };

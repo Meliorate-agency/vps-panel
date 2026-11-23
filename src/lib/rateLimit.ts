@@ -50,8 +50,19 @@ export function checkLogin(ip: string, email: string): RateCheck {
   };
 }
 
-export function recordLoginAttempt(ip: string, email: string, success: boolean) {
-  db()
+/** Returns the row id, for markLoginSucceeded. */
+export function recordLoginAttempt(ip: string, email: string, success: boolean): number {
+  const res = db()
     .prepare(`INSERT INTO login_attempts (ip, email, success) VALUES (?, ?, ?)`)
     .run(ip, email, success ? 1 : 0);
+  return Number(res.lastInsertRowid);
+}
+
+/**
+ * A login counts as failed from the moment it passes checkLogin until its
+ * password is verified. Recording the failure only after the (slow) password
+ * check let any number of attempts sent at once all pass the limit first.
+ */
+export function markLoginSucceeded(attemptId: number) {
+  db().prepare(`UPDATE login_attempts SET success = 1 WHERE id = ?`).run(attemptId);
 }
