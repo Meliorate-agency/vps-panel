@@ -56,8 +56,14 @@ pub struct UpdateSite {
     pub folder_path: Option<String>,
     #[serde(default)]
     pub force_www_redirect: bool,
+    /// Order a certificate when the one on disk does not cover the site.
+    /// False orders nothing; it does not take HTTPS away (see `remove_ssl`).
     #[serde(default)]
     pub issue_ssl: bool,
+    /// Rewrite the site to HTTP only although it serves HTTPS with a valid
+    /// certificate.
+    #[serde(default)]
+    pub remove_ssl: bool,
 }
 
 #[derive(Serialize)]
@@ -417,6 +423,35 @@ pub async fn create(
     Ok(Json(CreateSiteResponse { ok: true, task_id }))
 }
 
+/// Whether an updated site is written with its 443 block. With `issue_ssl`
+/// as before: whenever a certificate covers the site. Without it the site
+/// keeps the HTTPS it has, as long as that certificate is valid: "Auto-issue
+/// SSL" unticked on the routing form (an adopted site, a certificate
+/// installed by hand) and `issue_ssl: false` from the MCP tool mean "order
+/// nothing". They used to rewrite a working HTTPS site to HTTP only, and
+/// browsers that had seen its HSTS header then refused to open it. Only
+/// `remove_ssl` takes HTTPS away.
+fn https_after_update(
+    issue_ssl: bool,
+    remove_ssl: bool,
+    cert_covers_site: bool,
+    cert_valid: bool,
+    serves_https: bool,
+) -> bool {
+    if remove_ssl || !cert_covers_site {
+        return false;
+    }
+    issue_ssl || (serves_https && cert_valid)
+}
+
+/// Does this vhost have a server block on 443?
+fn vhost_serves_https(vhost: &str) -> bool {
+    vhost.lines().map(str::trim_start).any(|l| {
+        l.strip_prefix("listen")
+            .is_some_and(|rest| rest.starts_with([' ', '\t']) && rest.contains("443"))
+    })
+}
+
 pub async fn update(
     State(state): State<AppState>,
     Path(domain): Path<String>,
@@ -424,6 +459,11 @@ pub async fn update(
 ) -> AgentResult<Json<CreateSiteResponse>> {
     if !is_safe_subdomain(&domain) {
         return Err(AgentError::Invalid("invalid domain".into()));
+    }
+    if req.issue_ssl && req.remove_ssl {
+        return Err(AgentError::Invalid(
+            "issue_ssl and remove_ssl cannot both be set".into(),
+        ));
     }
     let route = build_route(
         &req.mode,
@@ -436,24 +476,36 @@ pub async fn update(
     if !vhost_path.exists() {
         return Err(AgentError::NotFound);
     }
+    let serves_https = tokio::fs::read_to_string(&vhost_path)
+        .await
+        .is_ok_and(|vhost| vhost_serves_https(&vhost));
 
     if let Some(ref f) = route.folder {
         ensure_folder(f).await?;
     }
 
     let needed_names = ssl_required_names(&domain, route.force_www_redirect);
-    let (cert_ok, cert_covers_site) = match existing_cert_paths(&domain) {
+    let (cert_ok, cert_covers_site, cert_valid) = match existing_cert_paths(&domain) {
         Some((cert_path, _)) => (
             cert_covers_names(&cert_path, &needed_names).await,
             cert_covers_names(&cert_path, &[domain.clone()]).await,
+            crate::handlers::ssl::cert_expiry(std::path::Path::new(&cert_path))
+                .await
+                .is_some_and(|(_, days)| days >= 0),
         ),
-        None => (false, false),
+        None => (false, false, false),
     };
     // A cert that covers the site but not yet www stays in use while the new
     // one is ordered. Turning "Force www" on used to rewrite the vhost
     // without SSL first, and when the order then failed (no DNS record for
     // www) the site was left on plain HTTP with a valid cert on disk.
-    let ssl_now = req.issue_ssl && cert_covers_site;
+    let ssl_now = https_after_update(
+        req.issue_ssl,
+        req.remove_ssl,
+        cert_covers_site,
+        cert_valid,
+        serves_https,
+    );
 
     install_vhost_tested(&domain, &route, ssl_now).await?;
     exec::run("systemctl", ["reload", "nginx"]).await?;
@@ -654,7 +706,36 @@ async fn covering_parent_cert(domain: &str) -> Option<(String, String)> {
 
 #[cfg(test)]
 mod tests {
-    use super::ssl_required_names;
+    use super::{https_after_update, ssl_required_names, vhost_serves_https};
+
+    #[test]
+    fn an_update_without_issue_ssl_keeps_the_https_the_site_has() {
+        // (issue_ssl, remove_ssl, cert covers the site, cert valid, serves https)
+        // Routing saved with "Auto-issue SSL" off on a site that is on HTTPS.
+        assert!(https_after_update(false, false, true, true, true));
+        // Asked for explicitly.
+        assert!(!https_after_update(false, true, true, true, true));
+        // An HTTP-only site is not switched to a certificate left on disk.
+        assert!(!https_after_update(false, false, true, true, false));
+        // An expired certificate is not kept on the caller's behalf.
+        assert!(!https_after_update(false, false, true, false, true));
+        // With issue_ssl as before: any certificate that covers the site.
+        assert!(https_after_update(true, false, true, true, false));
+        assert!(https_after_update(true, false, true, false, true));
+        // No certificate for the name: nothing to serve HTTPS with.
+        assert!(!https_after_update(true, false, false, false, true));
+        assert!(!https_after_update(false, false, false, true, true));
+    }
+
+    #[test]
+    fn finds_the_443_block_of_a_vhost() {
+        let https = "server {\n    listen 80;\n}\nserver {\n    listen 443 ssl http2;\n    listen [::]:443 ssl http2;\n}\n";
+        assert!(vhost_serves_https(https));
+        assert!(vhost_serves_https("server {\n\tlisten\t[::]:443 ssl;\n}\n"));
+        let http = "server {\n    listen 80;\n    listen [::]:80;\n    # listen 443 ssl;\n    proxy_pass http://127.0.0.1:4430;\n}\n";
+        assert!(!vhost_serves_https(http));
+        assert!(!vhost_serves_https(""));
+    }
 
     #[test]
     fn the_certificate_is_asked_for_www_whenever_the_vhost_gets_a_www_block() {
