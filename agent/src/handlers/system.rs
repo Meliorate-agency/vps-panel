@@ -196,7 +196,10 @@ pub async fn set_panel_host(
     State(state): State<AppState>,
     Json(req): Json<PanelHostReq>,
 ) -> AgentResult<Json<TaskAccepted>> {
+    // "panel.example.com." is the same name; with the dot it reached nginx,
+    // Postfix and .env as typed and no managed zone matched it.
     let host = req.host.trim().to_lowercase();
+    let host = host.strip_suffix('.').unwrap_or(&host).to_string();
     if !host.is_empty() {
         // Fail fast on bad input — invalid FQDNs should be a 400 from the
         // handler, not a "task failed" the UI has to discover via SSE.
@@ -289,44 +292,66 @@ async fn run_panel_host_task(
         )
     };
 
-    // 1. .env: write COOKIE_SECURE=0 up front. We only flip it back to 1 if
-    //    SSL succeeds below — that's the whole footgun-fix.
-    task.log("rewriting /etc/vps-panel/.env (COOKIE_SECURE=0)".to_string());
-    let env_after = rewrite_env(&env_host, "0").await?;
-    fs_atomic::write(std::path::Path::new(ENV_PATH), env_after.as_bytes(), 0o640).await?;
-
-    // 2. Postfix myhostname.
-    task.log(format!("setting Postfix myhostname={mail_host}"));
-    exec::run("postconf", ["-e", &format!("myhostname = {mail_host}")]).await?;
-
-    // 3. Dovecot postmaster_address.
-    task.log(format!(
-        "setting Dovecot postmaster_address=postmaster@{mail_host}"
-    ));
-    let dovecot = tokio::fs::read_to_string(DOVECOT_CONF).await?;
-    let dovecot_after = replace_postmaster(&dovecot, &mail_host);
-    if dovecot_after != dovecot {
-        fs_atomic::write(
-            std::path::Path::new(DOVECOT_CONF),
-            dovecot_after.as_bytes(),
-            0o644,
-        )
-        .await?;
-    }
-
-    // 4. nginx vhost (HTTP-only for now; we re-render with SSL after issuance).
-    if !ip_only {
-        take_over_site(panel_db, &host, task).await?;
-    }
-    task.log("rewriting /etc/nginx/sites-available/vps-panel.conf".to_string());
-    crate::handlers::panel_access::ensure_file().await?;
+    // Steps 1-4 rewrite files that only take effect together, at the reload
+    // and the panel restart. When one of them fails, or nginx refuses the
+    // new vhost, everything goes back as it was. They used to stay: the next
+    // nginx reload (any site change) then switched the panel to the HTTP-only
+    // vhost while the running panel still set Secure cookies, and nobody
+    // could log in.
+    let before = PanelHostBefore::read().await;
     let nginx_body = render_panel_vhost(&server_name, default_server, None)?;
-    fs_atomic::write(std::path::Path::new(NGINX_VHOST), nginx_body.as_bytes(), 0o644).await?;
+    let written: AgentResult<()> = async {
+        // 1. .env: write COOKIE_SECURE=0 up front. We only flip it back to 1 if
+        //    SSL succeeds below — that's the whole footgun-fix.
+        task.log("rewriting /etc/vps-panel/.env (COOKIE_SECURE=0)".to_string());
+        let env_after = rewrite_env(&env_host, "0").await?;
+        fs_atomic::write(std::path::Path::new(ENV_PATH), env_after.as_bytes(), 0o640).await?;
 
-    // 5. Reload services. nginx -t first so a broken template doesn't take
-    //    nginx down — we want the failure surfaced before we touch postfix.
-    task.log("nginx -t && systemctl reload nginx".to_string());
-    exec::run("nginx", ["-t"]).await?;
+        // 2. Postfix myhostname.
+        task.log(format!("setting Postfix myhostname={mail_host}"));
+        exec::run("postconf", ["-e", &format!("myhostname = {mail_host}")]).await?;
+
+        // 3. Dovecot postmaster_address.
+        task.log(format!(
+            "setting Dovecot postmaster_address=postmaster@{mail_host}"
+        ));
+        let dovecot = tokio::fs::read_to_string(DOVECOT_CONF).await?;
+        let dovecot_after = replace_postmaster(&dovecot, &mail_host);
+        if dovecot_after != dovecot {
+            fs_atomic::write(
+                std::path::Path::new(DOVECOT_CONF),
+                dovecot_after.as_bytes(),
+                0o644,
+            )
+            .await?;
+        }
+
+        // 4. nginx vhost (HTTP-only for now; we re-render with SSL after issuance).
+        task.log("rewriting /etc/nginx/sites-available/vps-panel.conf".to_string());
+        crate::handlers::panel_access::ensure_file().await?;
+        fs_atomic::write(std::path::Path::new(NGINX_VHOST), nginx_body.as_bytes(), 0o644).await?;
+
+        // 5. nginx -t before anything is reloaded or restarted.
+        task.log("nginx -t && systemctl reload nginx".to_string());
+        exec::run("nginx", ["-t"]).await?;
+        Ok(())
+    }
+    .await;
+    if let Err(e) = written {
+        task.log("putting .env, the mail settings and the panel vhost back as they were".to_string());
+        before.restore().await;
+        return Err(e);
+    }
+    // Only now that the new vhost is in: a site with this name is removed
+    // for good (its panel.db rows too), so not before the test passed.
+    if !ip_only {
+        if let Err(e) = take_over_site(panel_db, &host, task).await {
+            task.log(format!(
+                "warning: could not remove the site that had this name ({e}); \
+                 nginx may keep serving it instead of the panel"
+            ));
+        }
+    }
     let _ = exec::run("systemctl", ["reload", "nginx"]).await;
     task.log("restarting postfix and dovecot".to_string());
     let _ = exec::run("systemctl", ["restart", "postfix"]).await;
@@ -334,7 +359,10 @@ async fn run_panel_host_task(
 
     // 6. DNS — skipped for IP-only mode. The name must end up answering with
     //    this server and nothing else (dns::point_name_here), whether it is
-    //    the zone's apex or a label in it.
+    //    the zone's apex or a label in it. From here on nothing may end the
+    //    task before the panel restart in step 9: nginx already serves the
+    //    HTTP-only vhost, and the running panel still sets Secure cookies.
+    //    An error here (PowerDNS down) used to leave it like that.
     if !ip_only {
         task.log("checking managed PowerDNS zones".to_string());
         let zone_names = crate::handlers::dns::list_zone_names(state)
@@ -351,19 +379,27 @@ async fn run_panel_host_task(
             // the main domain" path the user asked for.
             let parent_name = labels[1..].join(".");
             task.log(format!("creating parent zone {parent_name}"));
-            let parent_zone = crate::handlers::dns::create_zone_inner(
+            match crate::handlers::dns::create_zone_inner(
                 state,
                 crate::handlers::dns::CreateZone {
                     name: parent_name.clone(),
                     seed_ip: None,
                 },
             )
-            .await?;
-            task.log(format!(
-                "created zone {} with {} records",
-                parent_zone.name, parent_zone.records
-            ));
-            Some(parent_name)
+            .await
+            {
+                Ok(parent_zone) => {
+                    task.log(format!(
+                        "created zone {} with {} records",
+                        parent_zone.name, parent_zone.records
+                    ));
+                    Some(parent_name)
+                }
+                Err(e) => {
+                    task.log(dns_step_warning(&host, &e));
+                    None
+                }
+            }
         } else if labels.len() >= 3 {
             task.log(format!(
                 "no managed zone for {host} and creating one is off: DNS left to you"
@@ -371,16 +407,24 @@ async fn run_panel_host_task(
             None
         } else {
             task.log(format!("creating PowerDNS zone {host}"));
-            let z = crate::handlers::dns::create_zone_inner(
+            match crate::handlers::dns::create_zone_inner(
                 state,
                 crate::handlers::dns::CreateZone {
                     name: host.clone(),
                     seed_ip: None,
                 },
             )
-            .await?;
-            task.log(format!("created zone {} with {} records", z.name, z.records));
-            Some(host.clone())
+            .await
+            {
+                Ok(z) => {
+                    task.log(format!("created zone {} with {} records", z.name, z.records));
+                    Some(host.clone())
+                }
+                Err(e) => {
+                    task.log(dns_step_warning(&host, &e));
+                    None
+                }
+            }
         };
         if let Some(zone) = zone {
             let ipv4 = match crate::server_ip::ipv4_on_interfaces().await {
@@ -394,10 +438,9 @@ async fn run_panel_host_task(
                 ),
                 Some(ip) => {
                     let ipv6s = server_ipv6s().await;
-                    for line in
-                        crate::handlers::dns::point_name_here(state, &zone, &host, &ip, &ipv6s).await?
-                    {
-                        task.log(line);
+                    match crate::handlers::dns::point_name_here(state, &zone, &host, &ip, &ipv6s).await {
+                        Ok(lines) => lines.into_iter().for_each(|line| task.log(line)),
+                        Err(e) => task.log(dns_step_warning(&host, &e)),
                     }
                 }
             }
@@ -429,6 +472,18 @@ async fn run_panel_host_task(
                         task.log("certificate issued".to_string());
                         ssl_ok = true;
                     }
+                    // No new certificate, but the name reaches this server
+                    // and the one on disk is still good: keep HTTPS. A failed
+                    // order on a re-save (the Renew button; a rate limit for
+                    // one) used to leave the panel on plain HTTP next to a
+                    // valid certificate, and a browser that had seen the
+                    // panel's HSTS header then refused to open it.
+                    Err(e) if panel_cert_usable(&host).await => {
+                        task.log(format!(
+                            "SSL issuance failed: {e} — keeping the certificate already on disk, it is still valid"
+                        ));
+                        ssl_ok = true;
+                    }
                     Err(e) => {
                         task.log(format!(
                             "SSL issuance failed: {e} — keeping COOKIE_SECURE=0 so HTTP login still works"
@@ -451,36 +506,72 @@ async fn run_panel_host_task(
         task.log("re-rendering nginx vhost with SSL enabled".to_string());
         let cert_path = format!("/etc/vps-panel/certs/{host}/fullchain.pem");
         let key_path = format!("/etc/vps-panel/certs/{host}/privkey.pem");
-        crate::handlers::panel_access::ensure_file().await?;
-        let body = render_panel_vhost(
-            &host,
-            !other_default_server().await,
-            Some((&cert_path, &key_path)),
-        )?;
-        fs_atomic::write(std::path::Path::new(NGINX_VHOST), body.as_bytes(), 0o644).await?;
+        let secured: AgentResult<()> = async {
+            crate::handlers::panel_access::ensure_file().await?;
+            let body = render_panel_vhost(
+                &host,
+                !other_default_server().await,
+                Some((&cert_path, &key_path)),
+            )?;
+            fs_atomic::write(std::path::Path::new(NGINX_VHOST), body.as_bytes(), 0o644).await?;
 
-        task.log("nginx -t && systemctl reload nginx (SSL)".to_string());
-        exec::run("nginx", ["-t"]).await?;
-        let _ = exec::run("systemctl", ["reload", "nginx"]).await;
-
-        task.log("rewiring postfix/dovecot to use the new cert".to_string());
-        let cert_dir = std::path::PathBuf::from(format!("/etc/vps-panel/certs/{host}"));
-        if let Err(e) = crate::handlers::ssl::apply_mail_cert(&host, &cert_dir).await {
-            task.log(format!("mail cert update warning: {e}"));
+            task.log("nginx -t && systemctl reload nginx (SSL)".to_string());
+            exec::run("nginx", ["-t"]).await?;
+            Ok(())
         }
+        .await;
+        match secured {
+            Ok(()) => {
+                let _ = exec::run("systemctl", ["reload", "nginx"]).await;
 
-        task.log("flipping COOKIE_SECURE=1".to_string());
-        let env_after = rewrite_env(&host, "1").await?;
-        fs_atomic::write(std::path::Path::new(ENV_PATH), env_after.as_bytes(), 0o640).await?;
+                task.log("rewiring postfix/dovecot to use the new cert".to_string());
+                let cert_dir = std::path::PathBuf::from(format!("/etc/vps-panel/certs/{host}"));
+                if let Err(e) = crate::handlers::ssl::apply_mail_cert(&host, &cert_dir).await {
+                    task.log(format!("mail cert update warning: {e}"));
+                }
+
+                task.log("flipping COOKIE_SECURE=1".to_string());
+                let flipped = match rewrite_env(&host, "1").await {
+                    Ok(env_after) => {
+                        fs_atomic::write(
+                            std::path::Path::new(ENV_PATH),
+                            env_after.as_bytes(),
+                            0o640,
+                        )
+                        .await
+                    }
+                    Err(e) => Err(e),
+                };
+                if let Err(e) = flipped {
+                    task.log(format!("warning: COOKIE_SECURE stays 0: {e}"));
+                }
+            }
+            // The HTTP-only vhost passed its test in step 5: back to it, so
+            // nginx can still reload and the panel stays reachable.
+            Err(e) => {
+                task.log(format!(
+                    "the vhost with SSL was refused, so the panel stays on HTTP: {e}"
+                ));
+                let _ = fs_atomic::write(
+                    std::path::Path::new(NGINX_VHOST),
+                    nginx_body.as_bytes(),
+                    0o644,
+                )
+                .await;
+            }
+        }
     }
 
     // 9. Schedule the panel restart. 5s instead of 3s so the SSE `Done` event
     //    flushes through the panel's proxy before the panel goes down.
+    //    --collect: without it a restart unit that once failed stays loaded
+    //    and every later systemd-run under this name is refused.
     task.log("scheduling panel restart in 5s".to_string());
-    let _ = exec::run(
+    if let Err(e) = exec::run(
         "systemd-run",
         [
             "--on-active=5",
+            "--collect",
             "--unit=vps-panel-restart-after-rename.timer",
             "--",
             "systemctl",
@@ -488,10 +579,80 @@ async fn run_panel_host_task(
             "vps-panel.service",
         ],
     )
-    .await;
+    .await
+    {
+        // The new settings only apply once the panel restarts; saying
+        // "done" here left the operator on a panel that never did.
+        return Err(AgentError::Other(anyhow::anyhow!(
+            "the panel restart could not be scheduled ({e}). Run `systemctl restart vps-panel` on the server to finish"
+        )));
+    }
 
     task.log("done".to_string());
     Ok(())
+}
+
+/// What steps 1-4 of the panel-host task overwrite, as it was before them.
+struct PanelHostBefore {
+    env: Option<Vec<u8>>,
+    vhost: Option<Vec<u8>>,
+    dovecot: Option<Vec<u8>>,
+    myhostname: Option<String>,
+}
+
+impl PanelHostBefore {
+    async fn read() -> Self {
+        PanelHostBefore {
+            env: tokio::fs::read(ENV_PATH).await.ok(),
+            vhost: tokio::fs::read(NGINX_VHOST).await.ok(),
+            dovecot: tokio::fs::read(DOVECOT_CONF).await.ok(),
+            myhostname: exec::run("postconf", ["-h", "myhostname"])
+                .await
+                .ok()
+                .map(|out| out.stdout.trim().to_string())
+                .filter(|name| !name.is_empty()),
+        }
+    }
+
+    /// Best effort. Only what the task got to change is written again.
+    async fn restore(&self) {
+        for (path, before, mode) in [
+            (ENV_PATH, &self.env, 0o640),
+            (NGINX_VHOST, &self.vhost, 0o644),
+            (DOVECOT_CONF, &self.dovecot, 0o644),
+        ] {
+            let path = std::path::Path::new(path);
+            let now = tokio::fs::read(path).await.ok();
+            if now == *before {
+                continue;
+            }
+            let _ = match before {
+                Some(body) => fs_atomic::write(path, body, mode).await,
+                None => fs_atomic::remove_if_exists(path).await,
+            };
+        }
+        if let Some(name) = &self.myhostname {
+            let _ = exec::run("postconf", ["-e", &format!("myhostname = {name}")]).await;
+        }
+    }
+}
+
+fn dns_step_warning(host: &str, e: &AgentError) -> String {
+    format!("warning: DNS for {host} was not set up ({e}); add the record yourself")
+}
+
+/// Whether the panel's certificate directory holds a pair nginx can serve
+/// for `host`: both files there, the name listed, at least a day left.
+async fn panel_cert_usable(host: &str) -> bool {
+    let dir = std::path::PathBuf::from(format!("/etc/vps-panel/certs/{host}"));
+    let cert = dir.join("fullchain.pem");
+    if !cert.exists() || !dir.join("privkey.pem").exists() {
+        return false;
+    }
+    crate::handlers::ssl::cert_covers(&cert, host).await
+        && crate::handlers::ssl::cert_expiry(&cert)
+            .await
+            .is_some_and(|(_, days)| days >= 1)
 }
 
 /// Right-to-left label walk: return the first ancestor of `host` that's in
@@ -580,6 +741,16 @@ fn validate_fqdn(s: &str) -> AgentResult<()> {
     if !ok {
         return Err(AgentError::Invalid(
             "hostname contains invalid characters".into(),
+        ));
+    }
+    // "a..b.com" and "-x.example.com" passed the checks above. Postfix does
+    // not start with such a myhostname, and the task failed at the DNS step
+    // after .env and the nginx vhost had been rewritten.
+    let label_ok =
+        |l: &str| !l.is_empty() && l.len() <= 63 && !l.starts_with('-') && !l.ends_with('-');
+    if !s.split('.').all(label_ok) {
+        return Err(AgentError::Invalid(
+            "hostname has an empty label, or one that starts or ends with a hyphen".into(),
         ));
     }
     Ok(())
@@ -1806,8 +1977,29 @@ pub async fn delete_system_user(
 
 #[cfg(test)]
 mod tests {
-    use super::{publickey_hint, render_panel_vhost};
+    use super::{publickey_hint, render_panel_vhost, validate_fqdn};
     use crate::nginx_template::PEER_API_LOCATION;
+
+    #[test]
+    fn the_panel_hostname_has_whole_labels() {
+        for good in ["panel.example.com", "example.co.uk", "a-b.example.com", "xn--bcher-kva.example"] {
+            assert!(validate_fqdn(good).is_ok(), "{good}");
+        }
+        let long_label = format!("{}.example.com", "a".repeat(64));
+        for bad in [
+            "localhost",
+            "1.2.3.4",
+            "panel.example.com.",
+            ".example.com",
+            "panel..example.com",
+            "-panel.example.com",
+            "panel-.example.com",
+            "panel_x.example.com",
+            long_label.as_str(),
+        ] {
+            assert!(validate_fqdn(bad).is_err(), "{bad} was accepted");
+        }
+    }
 
     /// Every server block that proxies to the panel lets the servers of a
     /// network through to /api/peer/ (past the access list) and carries the
