@@ -16,7 +16,28 @@ APP_DIR="$INSTALL_DIR/app"
 export PATH="/root/.cargo/bin:$PATH"
 
 cd "$REPO_DIR"
-git pull --ff-only
+
+# One update at a time. A second run (by hand while the Update button's run
+# is still building, say) deleted the first one's saved copy of the panel and
+# moved its half-built tree aside as "previous"; both builds then failed and
+# removed what was left.
+exec 9>/run/vps-panel-update.lock
+if ! flock -n 9; then
+  echo "another update.sh is already running" >&2
+  exit 1
+fi
+
+# 9>&-: git may leave `gc --auto` running in the background, and it must not
+# keep the lock.
+BEFORE_PULL="$(git rev-parse HEAD)"
+git pull --ff-only 9>&-
+# The pull may have replaced this very file. bash goes on running the old
+# one, so the steps a new version adds (migrations, the build and swap
+# below) did not run until the update after. Start again from the new file.
+if [[ "$(git rev-parse HEAD)" != "$BEFORE_PULL" && -z "${VPS_PANEL_UPDATE_REEXEC:-}" ]]; then
+  export VPS_PANEL_UPDATE_REEXEC=1
+  exec bash "$REPO_DIR/scripts/update.sh"
+fi
 
 # NOTE: deliberately NOT copying any .env file from the repo. /etc/vps-panel/.env
 # is the deployment's source of truth — install.sh generates it on first run
@@ -40,6 +61,9 @@ cargo build --release --locked --manifest-path agent/Cargo.toml
 # throughout (its restart is the last step below); pages it has not loaded yet
 # may error until then, as they did with the in-place build.
 PREV_DIR="$INSTALL_DIR/app.prev"
+# Exists while $APP_DIR is a build in progress and the working install is in
+# $PREV_DIR.
+BUILDING="$INSTALL_DIR/.update-building"
 
 build_panel() {
   # Match install.sh: panel files live under /opt/vps-panel/app, not directly
@@ -68,18 +92,42 @@ build_panel() {
   [[ -d "$APP_DIR/.next" ]]
 }
 
+# The working install back in place of a build that did not finish.
+restore_panel() {
+  if [[ -d "$PREV_DIR" ]]; then
+    rm -rf "$APP_DIR"
+    mv "$PREV_DIR" "$APP_DIR"
+  fi
+  rm -f "$BUILDING"
+}
+
+# An update that died during the panel build (killed, out of memory, a
+# reboot) left the half-built tree in $APP_DIR and the working install in
+# $PREV_DIR. Put it back first: the lines below would delete $PREV_DIR and
+# keep the half-built tree as "previous", so a build that then failed
+# "restored" a panel that cannot start.
+if [[ -e "$BUILDING" && -d "$PREV_DIR" ]]; then
+  echo "the last update stopped during the panel build - putting the previous panel install back first"
+  restore_panel
+fi
+rm -f "$BUILDING"
+
 rm -rf "$PREV_DIR"
+# Ctrl-C, a dropped SSH session or systemd stopping the update's unit: put
+# the working install back before going.
+trap 'echo "interrupted - restoring the previous panel install" >&2; restore_panel; exit 130' INT TERM HUP
 if [[ -d "$APP_DIR" ]]; then
+  touch "$BUILDING"
   mv "$APP_DIR" "$PREV_DIR"
 fi
 if ! build_panel; then
   echo "panel build failed - restoring the previous panel install; nothing else was changed" >&2
   rm -rf "$APP_DIR"
-  if [[ -d "$PREV_DIR" ]]; then
-    mv "$PREV_DIR" "$APP_DIR"
-  fi
+  restore_panel
   exit 1
 fi
+rm -f "$BUILDING"
+trap - INT TERM HUP
 echo "new panel built in $APP_DIR (previous install kept in $PREV_DIR)"
 
 # ---------------------------------------------------------------------------
