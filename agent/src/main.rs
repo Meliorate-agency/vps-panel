@@ -51,6 +51,9 @@ async fn serve() -> Result<()> {
 
     let mariadb = MariaDb::connect(&config.mariadb_url)?;
     let tasks = TaskTracker::new(panel_db.clone());
+    // Tell the notification channels about the tasks the sweep below marks
+    // failed: nothing else reports them.
+    notify::interrupted_tasks(&panel_db);
     // Reconcile any task rows left in 'pending' / 'running' from a previous
     // agent process. Self-update tasks resolve to 'succeeded' (reaching this
     // boot IS the success condition); anything else resolves to 'failed'
@@ -90,7 +93,8 @@ async fn serve() -> Result<()> {
     tokio::spawn(handlers::privacy::ensure_at_startup(state.clone()));
     // Collects /files trash entries past their 30-day retention.
     tokio::spawn(handlers::files::purge_loop());
-    // Failed units and a filling disk, for /notifications.
+    // Failed and stopped services, full disks, a stuck mail queue and the
+    // OOM killer, for /notifications.
     tokio::spawn(notify::monitor_loop(state.panel_db.clone()));
     // Task rows keep whole build logs; drop them after the retention window.
     let tasks = state.tasks.clone();
@@ -163,6 +167,10 @@ fn ensure_agent_schema(db: &PanelDb) -> Result<()> {
     // migration adds it too; this one fails harmlessly when it already exists
     // or the panel has not created the table yet.
     let _ = db.with(|conn| conn.execute("ALTER TABLE notifications ADD COLUMN secret TEXT", []));
+    // What the notifications have reported, so they report it once.
+    if let Err(e) = notify::ensure_schema(db) {
+        tracing::warn!(error = %e, "could not create the notification state table");
+    }
     Ok(())
 }
 

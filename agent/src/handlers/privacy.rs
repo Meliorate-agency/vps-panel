@@ -172,6 +172,7 @@ pub async fn ensure_at_startup(state: AppState) {
                 {
                     tracing::warn!("privacy settings not fully applied: {why}");
                 }
+                crate::notify::privacy_applied(&state.panel_db, [failures.nginx, failures.journal, failures.nginx_files].into_iter().flatten().chain(failures.system_files).collect());
             }
             Err(e) => tracing::warn!(error = %e, "privacy settings not readable; logs left as they are"),
         }

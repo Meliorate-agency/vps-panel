@@ -828,9 +828,12 @@ async fn scan_and_renew(state: &AppState) -> AgentResult<()> {
                     for tenant in tenants {
                         if let Err(e) = crate::handlers::mail::ensure_mail_http_vhost(&tenant).await {
                             tracing::warn!(tenant = %tenant, error = %e, "mail cert renewal: helper vhost setup failed");
+                            crate::notify::cert_cannot_start(&state.panel_db, &tenant, &e.to_string());
                             continue;
                         }
+                        crate::notify::cert_started(&state.panel_db, &tenant);
                         if let Some(task_id) = spawn_mail_cert_task(state, &tenant).await {
+                            crate::notify::cert_expiry(&state.panel_db, &domain, days);
                             tracing::info!(
                                 tenant = %tenant,
                                 cert = %domain,
@@ -842,6 +845,7 @@ async fn scan_and_renew(state: &AppState) -> AgentResult<()> {
                     }
                     continue;
                 }
+                crate::notify::cert_expiry(&state.panel_db, &domain, days);
                 // The loop also runs at agent start, so a restart in the
                 // middle of a renewal must not stack a second order. The
                 // whole kind, not a prefix: example.com.au's task is not
@@ -878,6 +882,8 @@ async fn scan_and_renew(state: &AppState) -> AgentResult<()> {
                         }
                     }
                 });
+            } else {
+                crate::notify::cert_expiry(&state.panel_db, &domain, days);
             }
         }
     }

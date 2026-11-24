@@ -478,7 +478,9 @@ impl TaskHandle {
             });
             (unsaved_log(&g), g.state.kind.clone(), g.log.last(NOTIFY_TAIL_LINES))
         };
-        if !success {
+        if success {
+            crate::notify::task_succeeded(&self.tracker.db, &kind);
+        } else {
             crate::notify::task_failed(&self.tracker.db, &kind, &self.id, &tail);
         }
         self.tracker.settle(&self.id, status.as_str(), now, log_blob);
