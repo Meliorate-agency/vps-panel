@@ -243,8 +243,8 @@ fn status_notes(facts: &Ipv6Facts, zones: &ZoneCounts) -> Vec<String> {
     if !zones.partial.is_empty() {
         let (it, has) = if zones.partial.len() == 1 { ("it", "has") } else { ("them", "have") };
         notes.push(format!(
-            "{} {has} AAAA records for this server but none at the apex, so IPv6 counts as off, and the next Reconcile removes those records. \
-             Switch IPv6 on for {it} on the domain's page to keep them.",
+            "{} {has} AAAA records for this server but none at the apex, so IPv6 counts as off there. Those records stay as they are \
+             until you decide: switch IPv6 on for {it} on the domain's page to complete them, or off to remove them.",
             mail_check::join_names(&zones.partial)
         ));
     }
@@ -760,7 +760,7 @@ fn zone_notes(view: &dns::ZoneIpv6View, facts: &Ipv6Facts, panel_host: &str) -> 
     if !view.enabled && view.plan.records.iter().any(|r| r.rtype == "AAAA" && r.present) {
         notes.push(format!(
             "IPv6 counts as off for {zone} because its apex has no AAAA record for this server, but other names have one. \
-             The next Reconcile removes them: switch IPv6 on to keep them, or off to remove them now."
+             They stay as they are until you decide: switch IPv6 on to complete them, or off to remove them."
         ));
     }
     let host = panel_host.trim_end_matches('.').to_ascii_lowercase();
@@ -1489,6 +1489,45 @@ server {
         assert!(log.iter().any(|l| l.starts_with(&format!("removed AAAA panel.off.test -> {A6}: IPv6 is off for off.test"))), "{log:?}");
         assert!(!rows(&state, "off.test", "AAAA").await.iter().any(|(n, _)| n == "panel.off.test"));
 
+        // A mail zone from before the choice existed, written while IPv6 was
+        // published but never reconciled: AAAA for mail and a site, ip6 in
+        // its SPF record, none at the apex. It counts as off, and keeps all
+        // of it through Reconcile and the panel hostname task.
+        {
+            use mysql_async::prelude::*;
+            let mut c = state.mariadb.pool().get_conn().await.unwrap();
+            c.query_drop("INSERT INTO pdns.domains (name, type) VALUES ('partial.test', 'NATIVE')").await.unwrap();
+            c.query_drop("INSERT INTO mail.virtual_domains (name) VALUES ('partial.test')").await.unwrap();
+        }
+        for (name, rtype, content) in [
+            ("partial.test", "A", V4),
+            ("mail.partial.test", "A", V4),
+            ("mail.partial.test", "AAAA", A6),
+            ("shop.partial.test", "A", V4),
+            ("shop.partial.test", "AAAA", A6),
+            ("panel.partial.test", "A", V4),
+            ("panel.partial.test", "AAAA", A6),
+            ("partial.test", "TXT", "\"v=spf1 mx ip4:198.51.100.127 ip6:2001:db8:1::1 -all\""),
+        ] {
+            add(&state, "partial.test", name, rtype, content).await;
+        }
+        let Json(r) = dns::reconcile_zone(State(state.clone()), Path("partial.test".into())).await.unwrap();
+        assert!(r.removed.is_empty() && !r.added.iter().any(|a| a.starts_with("AAAA")), "{:?} {:?}", r.removed, r.added);
+        let partial_aaaa = named(&[("mail.partial.test", A6), ("panel.partial.test", A6), ("shop.partial.test", A6)]);
+        assert_eq!(rows(&state, "partial.test", "AAAA").await, partial_aaaa);
+        let spf = rows(&state, "partial.test", "TXT").await.into_iter().find(|(_, c)| c.contains("v=spf1")).unwrap().1;
+        assert_eq!(spf, dns::format_spf(Some(V4), Some(A6)));
+        let log = dns::point_name_here(&state, "partial.test", "panel.partial.test", V4, &own).await.unwrap();
+        assert!(!log.iter().any(|l| l.contains("removed")), "{log:?}");
+        assert_eq!(rows(&state, "partial.test", "AAAA").await, partial_aaaa);
+        let Json(d) = get_zone(State(state.clone()), Path("partial.test".into())).await.unwrap();
+        assert!(!d.enabled);
+        assert!(d.notes.iter().any(|n| n.contains("They stay as they are until you decide")), "{:?}", d.notes);
+        let Json(s) = status(State(state.clone())).await.unwrap();
+        assert!(s.notes.iter().any(|n| n.starts_with("partial.test has AAAA records for this server but none at the apex")), "{:?}", s.notes);
+        // Outgoing mail does not hold it to IPv4 for that: no choice is stored.
+        assert!(!dns::zones_stored_off(&state).await.unwrap().contains("partial.test"));
+
         // The list says which zones have IPv6 on; one from before the choice
         // existed counts by its apex.
         {
@@ -1509,7 +1548,7 @@ server {
         let Json(s) = put_settings(State(state.clone()), Json(PutSettings { address: Some(B6.into()), new_domains: None }))
             .await
             .unwrap();
-        assert_eq!((s.address.as_deref(), s.domains_on, s.domains_total), (Some(B6), 4, 7));
+        assert_eq!((s.address.as_deref(), s.domains_on, s.domains_total), (Some(B6), 4, 8));
         for zone in ["on.test", "default.test", "mail.test", "legacy.test"] {
             let aaaa = rows(&state, zone, "AAAA").await;
             assert!(!aaaa.is_empty() && aaaa.iter().all(|(_, c)| c == B6), "{zone}: {aaaa:?}");

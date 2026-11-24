@@ -506,11 +506,28 @@ async fn publish_mail_records(
     let own = crate::handlers::dns::own_addrs(state).await;
     let server_ip = own.v4.clone();
     // IPv6 as the zone has it (dns.rs): with IPv6 on, mail.<d> gets its
-    // AAAA and SPF its `ip6:` term; with IPv6 off neither, and this server's
-    // are taken away.
-    let ipv6_on =
+    // AAAA and SPF its `ip6:` term; switched off neither, and this server's
+    // are taken away. A zone that only counts as off keeps what it has: the
+    // panel calls this before every new mailbox (dns::removes_ipv6).
+    let (ipv6_on, stored) =
         crate::handlers::dns::zone_ipv6_on(&mut pconn, domain_id, domain, &own.own_v6).await?;
-    let server_ip_v6 = own.v6.clone().filter(|_| ipv6_on);
+    let removes = crate::handlers::dns::removes_ipv6(stored);
+    let current_spf: Option<String> = pconn
+        .exec_first(
+            "SELECT content FROM records WHERE domain_id = ? AND name = ? AND type = 'TXT' \
+             AND TRIM(LEADING '\"' FROM content) LIKE 'v=spf1%' ORDER BY id LIMIT 1",
+            (domain_id, domain),
+        )
+        .await?;
+    let server_ip_v6 = if ipv6_on {
+        own.v6.clone()
+    } else if removes {
+        None
+    } else {
+        current_spf
+            .as_deref()
+            .and_then(|spf| crate::handlers::dns::spf_own_ip6(spf, &own.own_v6))
+    };
 
     let dkim_value = format!("\"v=DKIM1; k=rsa; p={dkim_pubkey}\"");
     let spf = crate::handlers::dns::format_spf(server_ip.as_deref(), server_ip_v6.as_deref());
@@ -524,16 +541,7 @@ async fn publish_mail_records(
     upsert_txt_prefixed(&mut pconn, domain_id, &format!("{DKIM_SELECTOR}._domainkey.{domain}"), "v=DKIM1", &dkim_value).await?;
     // IPv6 on without an address to name: an SPF record there is stays as
     // it is, with its `ip6:` term (reconcile_zone does the same).
-    let keep_spf = ipv6_on
-        && own.v6.is_none()
-        && pconn
-            .exec_first::<u32, _, _>(
-                "SELECT id FROM records WHERE domain_id = ? AND name = ? AND type = 'TXT' \
-                 AND TRIM(LEADING '\"' FROM content) LIKE 'v=spf1%' LIMIT 1",
-                (domain_id, domain),
-            )
-            .await?
-            .is_some();
+    let keep_spf = ipv6_on && own.v6.is_none() && current_spf.is_some();
     if !keep_spf {
         upsert_txt_prefixed(&mut pconn, domain_id, domain, "v=spf1", &spf).await?;
     }
@@ -543,7 +551,9 @@ async fn publish_mail_records(
     if let Some(ip) = &server_ip {
         upsert_record(&mut pconn, domain_id, &format!("mail.{domain}"), "A", ip, 0).await?;
     }
-    if !crate::handlers::dns::cname_at(&mut pconn, domain_id, &format!("mail.{domain}")).await? {
+    if (ipv6_on || removes)
+        && !crate::handlers::dns::cname_at(&mut pconn, domain_id, &format!("mail.{domain}")).await?
+    {
         crate::handlers::dns::mail_host_ipv6(&mut pconn, domain_id, domain, ipv6_on, &own).await?;
     }
 

@@ -478,9 +478,11 @@ pub struct ReconcileResp {
 
 /// Bring an existing PowerDNS zone up to the panel's standard shape.
 ///
-/// Never deletes user-added records, with one exception: in a zone with
-/// IPv6 off, AAAA records that name this server go (`plan_ipv6`). An AAAA
-/// that points elsewhere is never touched. Records that don't fit
+/// Never deletes user-added records, with one exception: in a zone the
+/// operator switched IPv6 off for, AAAA records that name this server go
+/// (`plan_ipv6`). A zone that only counts as off keeps what it has
+/// (`removes_ipv6`). An AAAA that points elsewhere is never touched. Records
+/// that don't fit
 /// the standard template are reported under `non_standard_extras` so the
 /// operator can clean them up by hand if they want.
 ///
@@ -601,7 +603,12 @@ pub async fn reconcile_zone(
     let stored = stored_ipv6(&mut conn, domain_id).await?;
     let records = zone_records(&mut conn, domain_id).await?;
     let ipv6_on = ipv6_enabled(stored, &zone, &records, &own.own_v6);
-    let plan = plan_ipv6(&zone, [&ns1, &ns2], has_mail, &records, ipv6_on, &own, !has_mail);
+    // A zone that only counts as off keeps what it has (`removes_ipv6`).
+    let plan = if ipv6_on || removes_ipv6(stored) {
+        plan_ipv6(&zone, [&ns1, &ns2], has_mail, &records, ipv6_on, &own, !has_mail)
+    } else {
+        Ipv6Plan::default()
+    };
     apply_ipv6(&mut conn, domain_id, &plan, own.v6.as_deref()).await?;
     report.added.extend(plan.add.iter().map(|name| format!("AAAA {name}")));
     report.updated.extend(plan.update.iter().map(|(_, name)| format!("AAAA {name}")));
@@ -620,7 +627,17 @@ pub async fn reconcile_zone(
             ));
         }
     }
-    let server_ip_v6 = own.v6.clone().filter(|_| ipv6_on);
+    let server_ip_v6 = if ipv6_on {
+        own.v6.clone()
+    } else if removes_ipv6(stored) {
+        None
+    } else {
+        // Counts as off: the `ip6:` term the SPF record has for this server stays.
+        records
+            .iter()
+            .filter(|r| r.rtype == "TXT" && r.name == zone && txt_has_prefix(&r.content, "\"v=spf1"))
+            .find_map(|r| spf_own_ip6(&r.content, &own.own_v6))
+    };
 
     // CAA at apex.
     upsert_single(
@@ -1196,7 +1213,8 @@ pub(crate) async fn find_enclosing_zone(
 /// (two answers, part of the visits going elsewhere) and a CNAME or an old
 /// AAAA kept pointing away. `ipv6s` are this server's own IPv6 addresses.
 /// With IPv6 on the name gets one AAAA, for the server's address in effect;
-/// with IPv6 off it keeps none. Returns what changed, for the task log.
+/// switched off it keeps none; in a zone that only counts as off its AAAA
+/// for this server stays. Returns what changed, for the task log.
 pub(crate) async fn point_name_here(
     state: &AppState,
     zone: &str,
@@ -1217,6 +1235,9 @@ pub(crate) async fn point_name_here(
     let stored = stored_ipv6(&mut conn, zone_id).await?;
     let records = zone_records(&mut conn, zone_id).await?;
     let ipv6_on = ipv6_enabled(stored, &zone, &records, &own_v6);
+    // On without an address, or off without the operator's say: this
+    // server's own AAAA stay, none is added.
+    let keep_own = (ipv6_on && facts.address().is_none()) || (!ipv6_on && !removes_ipv6(stored));
     let target = facts.address().filter(|_| ipv6_on);
     let mut log = Vec::new();
     let mut has_a = false;
@@ -1225,8 +1246,7 @@ pub(crate) async fn point_name_here(
     for r in records.iter().filter(|r| r.name == fqdn) {
         let keep = match r.rtype.as_str() {
             "A" => r.content == ipv4,
-            // With IPv6 on and no address in effect, this server's own stay.
-            "AAAA" if ipv6_on && target.is_none() => is_own_ip(&r.content, &own_v6),
+            "AAAA" if keep_own => is_own_ip(&r.content, &own_v6),
             "AAAA" => !has_aaaa && target.as_deref().is_some_and(|t| same_ip(&r.content, t)),
             "CNAME" => false,
             _ => continue,
@@ -2126,16 +2146,37 @@ async fn store_ipv6<Q: Queryable>(q: &mut Q, domain_id: u32, on: bool) -> AgentR
     Ok(())
 }
 
-/// Is IPv6 on for this zone (`ipv6_enabled`)?
+/// Is IPv6 on for this zone (`ipv6_enabled`), and the stored choice.
 pub(crate) async fn zone_ipv6_on<Q: Queryable>(
     q: &mut Q,
     domain_id: u32,
     zone: &str,
     own_v6: &[String],
-) -> AgentResult<bool> {
+) -> AgentResult<(bool, Option<bool>)> {
     let stored = stored_ipv6(q, domain_id).await?;
     let records = zone_records(q, domain_id).await?;
-    Ok(ipv6_enabled(stored, zone, &records, own_v6))
+    Ok((ipv6_enabled(stored, zone, &records, own_v6), stored))
+}
+
+/// A writer that is not the switch itself removes IPv6 records only from a
+/// zone switched off by the operator. A zone that merely counts as off
+/// (no stored choice, no AAAA at its apex) keeps what it has: the update
+/// must not change existing zones, and a mail domain whose SPF record lost
+/// its `ip6:` term this way would keep sending over IPv6 until the mail
+/// routing is built again, and fail SPF meanwhile.
+pub(crate) fn removes_ipv6(stored: Option<bool>) -> bool {
+    stored == Some(false)
+}
+
+/// The address of the first `ip6:` term of the SPF record that names this
+/// server (`own`), to keep it where a writer must not remove it.
+pub(crate) fn spf_own_ip6(content: &str, own: &[String]) -> Option<String> {
+    let (terms, _) = spf_terms(content)?;
+    terms.iter().find(|t| own_ip6_term(t, own)).and_then(|t| {
+        let t = t.strip_prefix('+').unwrap_or(t);
+        let arg = t.get(4..)?;
+        crate::server_ip::parse_ipv6(arg.strip_suffix("/128").unwrap_or(arg))
+    })
 }
 
 pub(crate) async fn apply_ipv6<Q: Queryable>(
@@ -2501,9 +2542,9 @@ pub(crate) async fn move_zones_ipv6(
 #[cfg(test)]
 mod tests {
     use super::{
-        format_spf, ipv6_enabled, is_own_address, judge_public_dns, plan_ipv6, spf_names_ip6,
-        spf_with_ip6, spf_without_ip6, txt_content, txt_has_prefix, txt_text, Ipv6Plan, OwnAddrs,
-        ZoneRec,
+        format_spf, ipv6_enabled, is_own_address, judge_public_dns, plan_ipv6, removes_ipv6,
+        spf_names_ip6, spf_own_ip6, spf_with_ip6, spf_without_ip6, txt_content, txt_has_prefix,
+        txt_text, Ipv6Plan, OwnAddrs, ZoneRec,
     };
 
     fn list(items: &[&str]) -> Vec<String> {
@@ -2854,6 +2895,19 @@ mod tests {
         assert_eq!(txt_content("a", true), "\"a\"");
         // Escapes are not guessed at: left alone.
         assert_eq!(spf_with_ip6("\"v=spf1 \\\"x\\\" -all\"", V6, &own6), None);
+    }
+
+    #[test]
+    fn only_a_zone_switched_off_loses_records_to_writers_other_than_the_switch() {
+        assert!(removes_ipv6(Some(false)));
+        // Counts as off without a stored choice: it keeps what it has.
+        assert!(!removes_ipv6(None) && !removes_ipv6(Some(true)));
+        let own6 = vec![V6.to_string(), V6B.to_string()];
+        // The term a writer keeps, in any spelling.
+        assert_eq!(spf_own_ip6("\"v=spf1 mx ip6:2001:DB8:1:0::2/128 -all\"", &own6).as_deref(), Some(V6B));
+        assert_eq!(spf_own_ip6("v=spf1 mx +ip6:2001:db8:1::1 -all", &own6).as_deref(), Some(V6));
+        assert_eq!(spf_own_ip6("\"v=spf1 mx ip6:2001:db8:1::/64 -all\"", &own6), None);
+        assert_eq!(spf_own_ip6("\"v=spf1 mx -all\"", &own6), None);
     }
 
     #[test]
