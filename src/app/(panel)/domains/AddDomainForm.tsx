@@ -40,6 +40,7 @@ export default function AddDomainForm({
   prefillUpstreamPort,
   submitLabel = "Add domain",
   managedZones = [],
+  ipv6,
 }: {
   action: Action;
   enableRecovery?: boolean;
@@ -66,6 +67,13 @@ export default function AddDomainForm({
    * one.
    */
   managedZones?: string[];
+  /**
+   * The IPv6 choice for a zone this form creates: `available` = the server
+   * has an IPv6 address, `defaultOn` = Settings > DNS & SSL > IPv6 gives new
+   * domains IPv6. Left out (an agent without IPv6 settings, or it could not
+   * be asked), there is no checkbox and the agent applies its default.
+   */
+  ipv6?: { available: boolean; defaultOn: boolean } | null;
 }) {
   const router = useRouter();
   const [state, formAction, pending] = useActionState<Result | null, FormData>(
@@ -103,6 +111,12 @@ export default function AddDomainForm({
   const [forceWwwRedirect, setForceWwwRedirect] = useState(true);
   const [createDnsZone, setCreateDnsZone] = useState(true);
   const [configureMail, setConfigureMail] = useState(true);
+  const [ipv6On, setIpv6On] = useState(ipv6?.defaultOn ?? false);
+  // The default changed in Settings since this form was rendered.
+  const ipv6Default = ipv6?.defaultOn ?? false;
+  useEffect(() => {
+    setIpv6On(ipv6Default);
+  }, [ipv6Default]);
 
   const parentZone = useMemo(
     () => findParentManagedZone(domain, managedZones),
@@ -115,6 +129,10 @@ export default function AddDomainForm({
     const labels = domain.split(".").filter((l) => l.length > 0);
     return labels.length >= 3;
   }, [domain]);
+  // Only a zone created here takes the choice: a name in a managed parent
+  // zone follows the parent, an existing zone keeps its own.
+  const offerIpv6 =
+    ipv6 != null && createDnsZone && !parentZone && !managedZones.includes(domain);
 
   const conflict =
     state?.ok === false && "conflict" in state && state.conflict === "agent_only"
@@ -240,6 +258,25 @@ export default function AddDomainForm({
           />
           {parentZone ? "Add record in parent zone" : "Create DNS zone"}
         </label>
+        {offerIpv6 && (
+          <label className={styles.checkbox}>
+            <input
+              type="checkbox"
+              checked={ipv6.available && ipv6On}
+              disabled={!ipv6.available}
+              onChange={(e) => setIpv6On(e.target.checked)}
+            />
+            {/* What the box shows is what is sent: off while the server
+                has no address. */}
+            <input type="hidden" name="ipv6" value={ipv6.available && ipv6On ? "on" : "off"} />
+            IPv6 (AAAA records)
+            {!ipv6.available ? (
+              <span style={{ marginLeft: 8, opacity: 0.6, fontSize: "0.85em" }}>
+                (this server has no IPv6 address)
+              </span>
+            ) : null}
+          </label>
+        )}
         <label className={styles.checkbox}>
           <input
             type="checkbox"

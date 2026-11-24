@@ -31,6 +31,8 @@ import EditRoutingForm from "./EditRoutingForm";
 import EnableDnsForm from "./EnableDnsForm";
 import AddDomainForm from "../AddDomainForm";
 import ReconcileButton from "./ReconcileButton";
+import Ipv6Card from "./Ipv6Card";
+import { domainIpv6Action, setDomainIpv6Action } from "@/server-actions/ipv6";
 import DomainDeleteButton from "../DomainDeleteButton";
 import SiteDeleteButton from "../SiteDeleteButton";
 import SslIssuingBadge from "../SslIssuingBadge";
@@ -115,6 +117,12 @@ export default async function DomainDetailPage({
     }
     return null;
   })();
+  // The routing form below creates a zone only for a name that has none
+  // and no managed parent: only then does it offer the IPv6 choice.
+  const ipv6Status =
+    !site && !zoneExistsInPdns && !parentManagedZone
+      ? await agent.ipv6.status().catch(() => null)
+      : null;
 
   // Reconcile SSL status: the agent issues certs in a background task and
   // never writes back to panel.db, so we self-heal here. If a cert is on
@@ -160,10 +168,26 @@ export default async function DomainDetailPage({
               lockedDomain={domain}
               submitLabel="Add HTTP routing"
               managedZones={managedZones}
+              ipv6={
+                ipv6Status
+                  ? { available: ipv6Status.address !== null, defaultOn: ipv6Status.new_domains === "on" }
+                  : null
+              }
             />
           </div>
         )}
       </div>
+
+      {/* Keyed by domain: another domain's page starts with its own state. */}
+      {dnsZone && (
+        <Ipv6Card
+          key={domain}
+          domain={domain}
+          initialEnabled={allZones.find((z) => z.name === domain)?.ipv6}
+          readAction={domainIpv6Action}
+          setAction={setDomainIpv6Action}
+        />
+      )}
 
       <div className={styles.section}>
         <div

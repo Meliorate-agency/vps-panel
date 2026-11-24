@@ -1,0 +1,144 @@
+/* The IPv6 card on a domain's page. The check list, spinner, rows and notes
+ * are the Settings > Mail ones (settings/mailIp.module.css); colours come
+ * from the theme variables only. */
+
+.head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 12px;
+}
+
+.head h2 {
+  margin: 0;
+}
+
+/* State on the left, the switch on the right; stacked on a phone. */
+.top {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px 16px;
+  padding: 10px 12px;
+  background: var(--bg-elev-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  font-size: 13px;
+}
+
+.state {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  flex: 1 1 260px;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.stateTitle {
+  font-weight: 600;
+}
+
+.block {
+  margin-top: 18px;
+}
+
+.blockHead {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px 10px;
+  margin-bottom: 6px;
+}
+
+.blockTitle {
+  font-size: 13px;
+  font-weight: 600;
+  margin: 0;
+  color: var(--text);
+}
+
+.hint {
+  font-size: 12px;
+  color: var(--text-dim);
+  margin-bottom: 10px;
+  overflow-wrap: anywhere;
+}
+
+/* What on means: one line per record, badge first. */
+.records {
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  font-size: 13px;
+}
+
+.record {
+  display: grid;
+  grid-template-columns: 112px 1fr;
+  gap: 2px 10px;
+  align-items: start;
+  min-width: 0;
+}
+
+.recordBadge {
+  grid-row: span 2;
+}
+
+.recordName {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.recordName code {
+  font-family: var(--mono);
+  font-weight: 600;
+}
+
+.recordType {
+  margin-left: 6px;
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--text-dim);
+  letter-spacing: 0.04em;
+}
+
+.recordContent {
+  font-family: var(--mono);
+  font-size: 12px;
+  color: var(--text-dim);
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+/* In the confirmation: the records that go. */
+.removeList {
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin: 8px 0 12px;
+  font-family: var(--mono);
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
+
+.dialogText {
+  font-size: 13px;
+  margin-bottom: 10px;
+  overflow-wrap: anywhere;
+}
+
+@media (max-width: 640px) {
+  .record {
+    grid-template-columns: 1fr;
+  }
+
+  .recordBadge {
+    grid-row: auto;
+  }
+}

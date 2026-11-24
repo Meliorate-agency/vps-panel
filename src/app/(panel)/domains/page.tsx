@@ -91,6 +91,8 @@ export default async function DomainsPage({
         .all() as { name: string; subdomain: string }[]
     ).map((a) => [a.subdomain, a.name]),
   );
+  // Started now, awaited with the form below: it reads the interfaces.
+  const ipv6StatusP = agent.ipv6.status().catch(() => null);
   const agentList = await agent.sites.list().catch(() => []);
   // Mail tenants: their `mail.<d>` ACME-helper vhosts surface as agent-only
   // rows, and those get an "Issue SSL" control when nothing covers the name.
@@ -104,6 +106,8 @@ export default async function DomainsPage({
 
   const knownDomains = new Set(rows.map((r) => r.domain));
   const pdnsZones = await agent.dns.listZones().catch(() => []);
+  // Zones with IPv6 on, from the zone list itself: no call per row.
+  const ipv6Zones = new Set(pdnsZones.filter((z) => z.ipv6 === true).map((z) => z.name));
   const untrackedZones = pdnsZones
     .filter((z) => !knownDomains.has(z.name) && !httpDomainSet.has(z.name))
     .map((z) => z.name)
@@ -187,6 +191,7 @@ export default async function DomainsPage({
     }
     void apex; // suppress unused
   }
+  const ipv6Status = await ipv6StatusP;
 
   return (
     <div>
@@ -215,6 +220,11 @@ export default async function DomainsPage({
           managedZones={pdnsZones.map((z) => z.name)}
           prefillDomain={prefillDomain}
           prefillUpstreamPort={prefillUpstreamPort}
+          ipv6={
+            ipv6Status
+              ? { available: ipv6Status.address !== null, defaultOn: ipv6Status.new_domains === "on" }
+              : null
+          }
         />
       </div>
 
@@ -242,6 +252,7 @@ export default async function DomainsPage({
           subSiteCountByZone,
           appBySite,
           mailTenants,
+          ipv6Zones,
         })}
         empty="No domains yet. Add one above."
       />
@@ -280,6 +291,8 @@ type BuildArgs = {
   /** Mail tenants (apex names). Their `mail.<d>` helper vhosts get an
    *  "Issue SSL" control when no cert covers the name. */
   mailTenants: Set<string>;
+  /** Zones with IPv6 on: their DNS cell carries an IPv6 badge. */
+  ipv6Zones: Set<string>;
 };
 
 function buildGroupedRows({
@@ -292,6 +305,7 @@ function buildGroupedRows({
   subSiteCountByZone,
   mailTenants,
   appBySite,
+  ipv6Zones,
 }: BuildArgs): GroupedRow[] {
   type Item =
     | { kind: "tracked"; domain: string; data: DomainRow }
@@ -380,7 +394,7 @@ function buildGroupedRows({
           ssl: renderSslCell(r, statusByDomain.get(r.domain)),
           dns:
             r.has_dns === 1 ? (
-              renderManagedDns()
+              renderManagedDns(ipv6Zones.has(r.domain))
             ) : (
               <span style={{ display: "inline-flex", alignItems: "center" }}>
                 <StatusBadge text="external" tone="muted" />
@@ -497,9 +511,9 @@ function buildGroupedRows({
             domain.startsWith("mail.") && mailTenants.has(domain.slice("mail.".length)),
           ),
           dns: hasZone ? (
-            renderManagedDns()
+            renderManagedDns(ipv6Zones.has(domain))
           ) : zoneUntracked ? (
-            renderUntrackedDns()
+            renderUntrackedDns(ipv6Zones.has(domain))
           ) : (
             <span style={{ display: "inline-flex", alignItems: "center" }}>
               <StatusBadge text="external" tone="muted" />
@@ -553,7 +567,7 @@ function buildGroupedRows({
           ),
           target: <span className={styles.muted}>—</span>,
           ssl: <span className={styles.muted}>—</span>,
-          dns: renderUntrackedDns(),
+          dns: renderUntrackedDns(ipv6Zones.has(domain)),
           actions: renderAdoptButton(domain),
         };
         break;
@@ -649,26 +663,37 @@ function buildGroupedRows({
   });
 }
 
-function renderManagedDns() {
+function renderManagedDns(ipv6: boolean) {
   return (
-    <span style={{ display: "inline-flex", alignItems: "center" }}>
+    <span style={{ display: "inline-flex", alignItems: "center", flexWrap: "wrap", gap: "4px 0" }}>
       <StatusBadge text="managed" tone="ok" />
       <InfoTooltip
         label="What does Managed mean?"
         text="The PowerDNS zone for this domain lives on this VPS and is tracked by the panel. The DNS records you see on the domain detail page are what's actually served — provided the registrar's nameservers point here."
       />
+      {ipv6 && renderIpv6Badge()}
     </span>
   );
 }
 
-function renderUntrackedDns() {
+function renderUntrackedDns(ipv6: boolean) {
   return (
-    <span style={{ display: "inline-flex", alignItems: "center" }}>
+    <span style={{ display: "inline-flex", alignItems: "center", flexWrap: "wrap", gap: "4px 0" }}>
       <StatusBadge text="untracked" tone="warn" />
       <InfoTooltip
         label="What does Untracked DNS mean?"
         text="A PowerDNS zone exists for this domain on the VPS, but the panel's database has no record of it. Click Adopt to start tracking it via the panel. Until you do, you can't edit records here."
       />
+      {ipv6 && renderIpv6Badge()}
+    </span>
+  );
+}
+
+/** IPv6 is on for the zone: it publishes this server's IPv6 address. */
+function renderIpv6Badge() {
+  return (
+    <span title="IPv6 is on: the zone publishes this server's IPv6 address. It is switched on the domain's page.">
+      <StatusBadge text="IPv6" tone="ok" />
     </span>
   );
 }
