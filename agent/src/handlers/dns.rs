@@ -1022,6 +1022,27 @@ pub(crate) async fn create_record_inner(
         return Err(AgentError::Invalid("unsupported record type".into()));
     }
     check_cname_rules(&mut conn, domain_id, &zone, &name, &rtype, None).await?;
+    // The very same record is not added twice: an RRset holds each record
+    // once. The IPv6 switch adds a site's AAAA with its A record (below), and
+    // the panel then puts back the A and the AAAA a replaced site had.
+    let same: Option<(u32, Option<u32>, Option<i8>)> = conn
+        .exec_first(
+            "SELECT id, ttl, disabled FROM records \
+             WHERE domain_id = ? AND name = ? AND type = ? AND content = ? AND COALESCE(prio, 0) = ? LIMIT 1",
+            (domain_id, &name, &rtype, &req.content, req.prio),
+        )
+        .await?;
+    if let Some((id, ttl, disabled)) = same {
+        return Ok(RecordRow {
+            id,
+            name,
+            r#type: rtype,
+            content: req.content,
+            ttl: ttl.unwrap_or(req.ttl),
+            prio: req.prio,
+            disabled: disabled.unwrap_or(0) != 0,
+        });
+    }
     conn.exec_drop(
         "INSERT INTO records (domain_id, name, type, content, ttl, prio, disabled) VALUES (?, ?, ?, ?, ?, ?, 0)",
         (domain_id, &name, &rtype, &req.content, req.ttl, req.prio),

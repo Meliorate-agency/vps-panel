@@ -1479,6 +1479,12 @@ server {
         assert!(on_aaaa.contains(&("app.on.test".to_string(), A6.to_string())), "{on_aaaa:?}");
         assert!(!on_aaaa.iter().any(|(n, _)| n == "ext.on.test"));
         assert!(!rows(&state, "off.test", "AAAA").await.iter().any(|(n, _)| n == "app.off.test"));
+        // The panel puts back a replaced site's A and then its AAAA: the
+        // AAAA the A brought is not doubled.
+        let aaaa = dns::CreateRecord { name: "app".into(), r#type: "AAAA".into(), content: A6.into(), ttl: 3600, prio: 0 };
+        dns::create_record_inner(&state, "on.test".into(), aaaa).await.unwrap();
+        let app: Vec<_> = rows(&state, "on.test", "AAAA").await.into_iter().filter(|(n, _)| n == "app.on.test").collect();
+        assert_eq!(app.len(), 1, "{app:?}");
 
         // The panel hostname task.
         let own = vec![A6.to_string(), B6.to_string()];
