@@ -1034,7 +1034,6 @@ pub fn last_lines(s: &str, n: usize) -> &str {
 /// A panel update that update.sh reported failed, once the agent it
 /// restarted has settled the task (system::finalize_self_update). `log` is
 /// what that appends to the task.
-#[allow(dead_code)] // called from handlers/system.rs
 pub fn self_update_failed(db: &PanelDb, task_id: &str, log: &str) {
     let (subject, body) = if log.contains("the update was rolled back: the previous version is running again") {
         (
@@ -1144,7 +1143,6 @@ pub fn privacy_applied(db: &PanelDb, problems: Vec<String>) {
 
 /// Postfix could not be brought in line with the mail IP settings at agent
 /// start (handlers/mail_ip.rs); the change was undone.
-#[allow(dead_code)] // called from handlers/mail_ip.rs
 pub fn mail_settings_failed(db: &PanelDb, why: &str) {
     problem(
         db,
@@ -1164,14 +1162,12 @@ pub fn mail_settings_failed(db: &PanelDb, why: &str) {
     );
 }
 
-#[allow(dead_code)] // called from handlers/mail_ip.rs
 pub fn mail_settings_applied(db: &PanelDb) {
     resolved(db, "mail.settings");
 }
 
 /// Outgoing mail sent over IPv6 and, at agent start, no longer can (the
 /// address is gone): it leaves over IPv4 now (handlers/mail_ip.rs).
-#[allow(dead_code)] // called from handlers/mail_ip.rs
 pub fn mail_ipv6_dropped(db: &PanelDb, address: &str) {
     problem(
         db,
@@ -1190,7 +1186,6 @@ pub fn mail_ipv6_dropped(db: &PanelDb, address: &str) {
     );
 }
 
-#[allow(dead_code)] // called from handlers/mail_ip.rs
 pub fn mail_ipv6_back(db: &PanelDb) {
     resolved(db, "mail.ipv6");
 }

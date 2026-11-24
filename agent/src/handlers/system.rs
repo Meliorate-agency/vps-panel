@@ -1349,6 +1349,13 @@ pub async fn finalize_self_update(state: AppState) {
         appended.push_str(&format!("\n--- update.sh output ({SELF_UPDATE_LOG}) ---\n{tail}"));
     }
     appended.push_str(&format!("\n{verdict}"));
+    // The task is settled here, not through TaskHandle::finish, so nothing
+    // else tells the notification channels about a failed update.
+    if !success {
+        if let Some(id) = ids.first() {
+            crate::notify::self_update_failed(&state.panel_db, id, &appended);
+        }
+    }
     for id in ids {
         state.tasks.finalize_persisted(&id, success, &appended);
     }

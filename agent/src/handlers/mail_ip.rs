@@ -1932,12 +1932,22 @@ pub async fn ensure_at_startup(state: AppState) {
     )
     .await;
     match settled {
-        Ok(false) => {}
+        Ok(false) => crate::notify::mail_settings_applied(&state.panel_db),
         Ok(true) => {
             let after = read_postfix().await.ok();
+            crate::notify::mail_settings_applied(&state.panel_db);
             match after.as_ref().map(Postfix::sending) {
                 Some(Sending::Pinned(addr)) => {
+                    crate::notify::mail_ipv6_back(&state.panel_db);
                     tracing::info!(%addr, "postfix: outgoing mail may use IPv6, from this address only")
+                }
+                Some(Sending::Ipv4Only) => {
+                    // Mail went out over IPv6 until now: the operator hears
+                    // that it no longer does.
+                    if let Sending::Pinned(before) = postfix.sending() {
+                        crate::notify::mail_ipv6_dropped(&state.panel_db, &before.to_string());
+                    }
+                    tracing::info!("postfix: outgoing mail limited to IPv4")
                 }
                 _ => tracing::info!("postfix: outgoing mail limited to IPv4"),
             }
@@ -1945,7 +1955,10 @@ pub async fn ensure_at_startup(state: AppState) {
                 tracing::info!(%addr, "postfix: IPv4 mail is sent from this address, the one DNS records publish");
             }
         }
-        Err(e) => tracing::warn!(error = %e, "could not bring postfix in line with the mail IP settings"),
+        Err(e) => {
+            tracing::warn!(error = %e, "could not bring postfix in line with the mail IP settings");
+            crate::notify::mail_settings_failed(&state.panel_db, &e.to_string());
+        }
     }
 }
 
