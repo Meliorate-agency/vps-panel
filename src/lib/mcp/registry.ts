@@ -14,15 +14,17 @@ import { TOOLS as CRON } from "./tools/cron";
 import { TOOLS as BACKUPS } from "./tools/backups";
 import { TOOLS as SSH } from "./tools/ssh";
 import { TOOLS as TASKS } from "./tools/tasks";
+import { TOOLS as PRIVACY } from "./tools/privacy";
 
 /**
  * Tools a read-only token may call: they read state and return no secrets.
  * Anything not listed needs a full-access token, so a new tool is
  * write-level until someone decides otherwise. Left out on purpose:
  * apps.list_env_files (returns .env contents), tasks.get (task logs can
- * hold build output and env values), mail.track_delivery (who mails whom)
- * and cron.list (every job's command line, which can hold a token or a
- * password; the /cron page is for admins for the same reason).
+ * hold build output and env values), mail.track_delivery (who mails whom),
+ * cron.list (every job's command line, which can hold a token or a
+ * password; the /cron page is for admins for the same reason) and
+ * privacy.subject_search (log lines and records about one person).
  */
 const READ_ONLY_TOOLS = new Set([
   "sysinfo",
@@ -55,6 +57,7 @@ const READ_ONLY_TOOLS = new Set([
   "ssh.list_keys",
   "ssh.get_server_config",
   "tasks.list",
+  "privacy.status",
 ]);
 
 /**
@@ -76,6 +79,7 @@ const ALL: Tool[] = [
   ...BACKUPS,
   ...SSH,
   ...TASKS,
+  ...PRIVACY,
 ];
 
 // Sanity-check at module load: every tool name must be unique. A duplicate
