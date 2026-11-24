@@ -738,6 +738,14 @@ fn ipv6_address_item(addrs: &MailAddrs) -> MailCheckItem {
     const ID: &str = "address";
     const LABEL: &str = "Public IPv6 address";
     match (&addrs.ipv6, &addrs.ipv6_missing) {
+        (Some(a), _) if addrs.facts.chosen().is_some() => item(
+            ID,
+            LABEL,
+            Status::Ok,
+            format!(
+                "{a} is on this server and is the IPv6 address chosen under Settings > DNS & SSL > IPv6. Postfix sends over IPv6 from this address only."
+            ),
+        ),
         // Kept because Postfix is pinned to it, though the lookup found no
         // AAAA (mail_ip::mail_ipv6).
         (Some(a), _) if addrs.facts.published.is_none() => item(
@@ -801,9 +809,32 @@ fn ptr_item(ptr: &Lookup, addr: &str, helo: &str) -> MailCheckItem {
     }
 }
 
+/// The zone on this panel the HELO name is in, and whether it has IPv6 on.
+pub(crate) type HeloZone = (String, bool);
+
+/// What publishes `name`'s AAAA for `addr` when its zone is on this panel:
+/// the zone's IPv6 switch, not a record added by hand (with IPv6 off the
+/// next Reconcile would take that away again).
+fn hosted_aaaa_fix(name: &str, addr: &str, zone: &HeloZone) -> String {
+    match zone {
+        (zone, false) => format!(
+            "Its zone {zone} is on this panel: switch IPv6 on for it (Domains > {zone} > IPv6) to publish {name} AAAA {addr}."
+        ),
+        (zone, true) => format!(
+            "Its zone {zone} is on this panel with IPv6 on: run Reconcile on {zone} if {name} has no AAAA record there. Public DNS can take up to an hour to follow."
+        ),
+    }
+}
+
 /// Does a reverse name resolve back to the address (forward-confirmed
 /// reverse DNS)? `forward` holds the lookup of each reverse name.
-fn fcrdns_item(forward: &[(String, Lookup)], addr: &str, helo: &str, family: Family) -> MailCheckItem {
+fn fcrdns_item(
+    forward: &[(String, Lookup)],
+    addr: &str,
+    helo: &str,
+    family: Family,
+    helo_zone: Option<&HeloZone>,
+) -> MailCheckItem {
     const ID: &str = "fcrdns";
     const LABEL: &str = "Reverse name resolves back";
     let rtype = family.rtype();
@@ -821,21 +852,52 @@ fn fcrdns_item(forward: &[(String, Lookup)], addr: &str, helo: &str, family: Fam
         Lookup::Empty => format!("it has no {rtype} record"),
         Lookup::Failed(why) => format!("the lookup failed: {why}"),
     };
+    let or_add = match helo_zone {
+        Some(zone) if family == Family::V6 && name == helo => {
+            format!(" {}", hosted_aaaa_fix(name, addr, zone))
+        }
+        _ => format!(", or add the record {name} {rtype} {addr}."),
+    };
+    let or_add = if or_add.starts_with(',') { or_add } else { format!(".{or_add}") };
     item(
         ID,
         LABEL,
         Status::Fail,
         format!(
             "{name} does not resolve back to {addr} ({found}). Receivers that check this refuse the mail (Gmail: 550 5.7.25). \
-             Set the reverse DNS of {addr} to {helo} at your hosting provider, or add the record {name} {rtype} {addr}."
+             Set the reverse DNS of {addr} to {helo} at your hosting provider{or_add}"
         ),
     )
 }
 
-fn helo_item(lookup: &Lookup, helo: &str, addr: &str, family: Family) -> MailCheckItem {
+fn helo_item(
+    lookup: &Lookup,
+    helo: &str,
+    addr: &str,
+    family: Family,
+    helo_zone: Option<&HeloZone>,
+) -> MailCheckItem {
     const ID: &str = "helo";
     const LABEL: &str = "HELO name resolves";
     let rtype = family.rtype();
+    // For IPv6 in a zone on this panel, the zone's switch publishes the record.
+    if let (Some(zone), Family::V6, Lookup::Records(_) | Lookup::Empty) = (helo_zone, family, lookup) {
+        if !matches!(lookup, Lookup::Records(a) if a.iter().any(|x| x == addr)) {
+            let found = match lookup {
+                Lookup::Records(a) => format!("resolves to {}, not {addr}", join_names(a)),
+                _ => "has no AAAA record".to_string(),
+            };
+            return item(
+                ID,
+                LABEL,
+                Status::Fail,
+                format!(
+                    "{helo}, the name Postfix introduces itself with, {found}. {}",
+                    hosted_aaaa_fix(helo, addr, zone)
+                ),
+            );
+        }
+    }
     match lookup {
         Lookup::Records(a) if a.iter().any(|x| x == addr) => {
             item(ID, LABEL, Status::Ok, format!("{helo} resolves to {addr}."))
@@ -870,12 +932,14 @@ fn helo_item(lookup: &Lookup, helo: &str, addr: &str, family: Family) -> MailChe
 /// SPF of every mail domain against one address. `results` pairs each domain
 /// with its outcome; a domain missing from it was not reached in time.
 /// `held` are the domains Postfix keeps off this address meanwhile
-/// (`mail_ip::held_domains`).
+/// (`mail_ip::held_domains`), `off` the zones on this panel with IPv6
+/// switched off, whose mail domains it keeps off it too.
 fn spf_sweep_item(
     domains: &[String],
     results: &[(String, Spf)],
     addr: &str,
     held: &[String],
+    off: &[String],
 ) -> MailCheckItem {
     const ID: &str = "spf";
     const LABEL: &str = "SPF covers the address";
@@ -895,17 +959,30 @@ fn spf_sweep_item(
         let those = if refused.len() == 1 { "that domain" } else { "those domains" };
         // Held to IPv4, their mail never leaves from this address: not a
         // reason to keep every other domain off it.
-        if refused.iter().all(|d| held.contains(d)) {
-            return item(
-                ID,
-                LABEL,
-                Status::Warn,
-                format!(
+        if refused.iter().all(|d| held.contains(d) || off.contains(d)) {
+            let (switched_off, spf_held): (Vec<String>, Vec<String>) =
+                refused.iter().cloned().partition(|d| off.contains(d));
+            let mut said: Vec<String> = Vec::new();
+            if !spf_held.is_empty() {
+                let those = if spf_held.len() == 1 { "that domain" } else { "those domains" };
+                said.push(format!(
                     "The SPF record of {} does not allow mail from {addr}. Until it does, Postfix sends mail from {those} over IPv4 only. \
                      Run the DNS check of {those} for the record to publish.",
-                    join_names(&refused),
-                ),
-            );
+                    join_names(&spf_held),
+                ));
+            }
+            if !switched_off.is_empty() {
+                let (its, record, does) = if switched_off.len() == 1 {
+                    ("its", "its SPF record", "does")
+                } else {
+                    ("their", "their SPF records", "do")
+                };
+                said.push(format!(
+                    "IPv6 is off for {} under Domains, so {record} {does} not allow mail from {addr} and Postfix sends {its} mail over IPv4 only.",
+                    join_names(&switched_off),
+                ));
+            }
+            return item(ID, LABEL, Status::Warn, said.join(" "));
         }
         return item(
             ID,
@@ -969,9 +1046,17 @@ pub(crate) async fn spf_sweep(r: &dyn Resolver, domains: &[String], ip: IpAddr) 
     results
 }
 
+/// What the IPv6 checks know besides the address: the domains Postfix holds
+/// to IPv4 (`spf_sweep_item`) and the zone of the HELO name on this panel.
+#[derive(Default)]
+pub(crate) struct FamilyCtx<'a> {
+    pub held: &'a [String],
+    pub off: &'a [String],
+    pub helo_zone: Option<&'a HeloZone>,
+}
+
 /// The checks for one protocol. `address_item` is the finding about the
-/// address itself; without an address nothing else can be checked. `held`:
-/// see `spf_sweep_item`.
+/// address itself; without an address nothing else can be checked.
 async fn family_check(
     r: &dyn Resolver,
     family: Family,
@@ -979,7 +1064,7 @@ async fn family_check(
     address_item: MailCheckItem,
     helo: &str,
     domains: &Result<Vec<String>, String>,
-    held: &[String],
+    ctx: &FamilyCtx<'_>,
 ) -> MailIpFamilyCheck {
     let mut checks = vec![address_item];
     if let Some(addr) = address.as_deref() {
@@ -991,12 +1076,12 @@ async fn family_check(
             }
         }
         checks.push(ptr_item(&ptr, addr, helo));
-        checks.push(fcrdns_item(&forward, addr, helo, family));
-        checks.push(helo_item(&r.lookup(helo, family.rtype()).await, helo, addr, family));
+        checks.push(fcrdns_item(&forward, addr, helo, family, ctx.helo_zone));
+        checks.push(helo_item(&r.lookup(helo, family.rtype()).await, helo, addr, family, ctx.helo_zone));
         checks.push(match (domains, addr.parse::<IpAddr>()) {
             (Ok(domains), Ok(ip)) => {
                 let results = spf_sweep(r, domains, ip).await;
-                spf_sweep_item(domains, &results, addr, held)
+                spf_sweep_item(domains, &results, addr, ctx.held, ctx.off)
             }
             (Err(why), _) => item(
                 "spf",
@@ -1020,9 +1105,9 @@ async fn bounded_family_check(
     address_item: MailCheckItem,
     helo: &str,
     domains: &Result<Vec<String>, String>,
-    held: &[String],
+    ctx: &FamilyCtx<'_>,
 ) -> MailIpFamilyCheck {
-    let run = family_check(r, family, address.clone(), address_item.clone(), helo, domains, held);
+    let run = family_check(r, family, address.clone(), address_item.clone(), helo, domains, ctx);
     match tokio::time::timeout(CHECK_TIMEOUT, run).await {
         Ok(check) => check,
         Err(_) => MailIpFamilyCheck {
@@ -1043,11 +1128,42 @@ async fn mail_domain_names(state: &AppState) -> Result<Vec<String>, String> {
         .map_err(|e| e.to_string())
 }
 
+/// The zone on this panel the HELO name is a name in, and whether it has
+/// IPv6 on. Never creates the pdns database (this runs at agent start).
+pub(crate) async fn helo_zone(state: &AppState, helo: &str) -> Option<HeloZone> {
+    let own_v6 = crate::handlers::dns::own_ipv6s_quick(&state.panel_db).await;
+    let zones = crate::handlers::dns::zone_ipv6_states(state, &own_v6).await.ok()?;
+    let mut name = helo.trim_end_matches('.').to_ascii_lowercase();
+    loop {
+        if let Some(z) = zones.get(&name) {
+            return Some((name, z.enabled));
+        }
+        let (_, parent) = name.split_once('.')?;
+        name = parent.to_string();
+    }
+}
+
+/// The zones with IPv6 off whose mail domains Postfix holds to IPv4: only
+/// on a server with IPv4 to hold them to (`mail_ip::settle`).
+fn off_held(addrs: &MailAddrs) -> &[String] {
+    if addrs.has_ipv4 {
+        &addrs.ipv6_off
+    } else {
+        &[]
+    }
+}
+
 /// Is IPv6 fit to send from? The settings endpoints ask this before they
 /// let IPv6 be chosen, and the agent before it switches IPv6 on by itself.
 /// `dig` keeps the answers for the caller's own lookups afterwards.
 pub(crate) async fn ipv6_check(state: &AppState, addrs: &MailAddrs, dig: &Dig) -> MailIpFamilyCheck {
     let domains = mail_domain_names(state).await;
+    let helo_zone = helo_zone(state, &addrs.helo).await;
+    let ctx = FamilyCtx {
+        held: &addrs.held,
+        off: off_held(addrs),
+        helo_zone: helo_zone.as_ref(),
+    };
     bounded_family_check(
         dig,
         Family::V6,
@@ -1055,7 +1171,7 @@ pub(crate) async fn ipv6_check(state: &AppState, addrs: &MailAddrs, dig: &Dig) -
         ipv6_address_item(addrs),
         &addrs.helo,
         &domains,
-        &addrs.held,
+        &ctx,
     )
     .await
 }
@@ -1066,8 +1182,15 @@ pub async fn ip_check(State(state): State<AppState>) -> AgentResult<Json<MailIpC
     let domains = mail_domain_names(&state).await;
     let v4_item = ipv4_address_item(&addrs);
     let dig = Dig::default();
+    let helo_zone = helo_zone(&state, &addrs.helo).await;
+    let v6_ctx = FamilyCtx {
+        held: &addrs.held,
+        off: off_held(&addrs),
+        helo_zone: helo_zone.as_ref(),
+    };
+    let v4_ctx = FamilyCtx::default();
     let (ipv4, ipv6) = tokio::join!(
-        bounded_family_check(&dig, Family::V4, addrs.ipv4.clone(), v4_item, &addrs.helo, &domains, &[]),
+        bounded_family_check(&dig, Family::V4, addrs.ipv4.clone(), v4_item, &addrs.helo, &domains, &v4_ctx),
         bounded_family_check(
             &dig,
             Family::V6,
@@ -1075,7 +1198,7 @@ pub async fn ip_check(State(state): State<AppState>) -> AgentResult<Json<MailIpC
             ipv6_address_item(&addrs),
             &addrs.helo,
             &domains,
-            &addrs.held,
+            &v6_ctx,
         ),
     );
     Ok(Json(MailIpCheck {
@@ -1112,6 +1235,9 @@ struct DomainCtx<'a> {
     /// How Postfix sends this domain's mail while it sends over IPv6; None
     /// while it does not.
     ipv6_route: Option<Ipv6Route>,
+    /// The domain is a zone on this panel with IPv6 switched off: its
+    /// records are checked for IPv4 only.
+    ipv6_off: bool,
 }
 
 /// What Postfix's per-domain table does with a domain (mail_ip.rs).
@@ -1128,6 +1254,12 @@ enum Ipv6Route {
 }
 
 impl DomainCtx<'_> {
+    /// The IPv6 address the domain's records should name: none for a zone
+    /// with IPv6 off.
+    fn records_v6(&self) -> Option<&str> {
+        self.ipv6.filter(|_| !self.ipv6_off)
+    }
+
     /// What to do about a wrong or missing record. `record` is the record
     /// as it should be.
     fn fix(&self, managed: bool, record: &str) -> String {
@@ -1227,7 +1359,7 @@ fn aaaa_item(aaaa: &Lookup, host: &str, c: &DomainCtx<'_>, managed: bool) -> Mai
                 return item(ID, LABEL, Status::Ok, format!("{host} resolves to {mine}, this server."));
             }
             let found = join_names(addrs);
-            match c.ipv6 {
+            match c.records_v6() {
                 Some(v6) => item(
                     ID,
                     LABEL,
@@ -1248,7 +1380,7 @@ fn aaaa_item(aaaa: &Lookup, host: &str, c: &DomainCtx<'_>, managed: bool) -> Mai
                 ),
             }
         }
-        Lookup::Empty => match c.ipv6 {
+        Lookup::Empty => match c.records_v6() {
             Some(v6) => item(
                 ID,
                 LABEL,
@@ -1256,6 +1388,15 @@ fn aaaa_item(aaaa: &Lookup, host: &str, c: &DomainCtx<'_>, managed: bool) -> Mai
                 format!(
                     "{host} has no AAAA record, so mail reaches this server over IPv4 only. {}",
                     c.fix(managed, &format!("{host} AAAA {v6}"))
+                ),
+            ),
+            None if c.ipv6_off => item(
+                ID,
+                LABEL,
+                Status::Ok,
+                format!(
+                    "No AAAA record: IPv6 is off for {} (Domains > {} > IPv6), so mail reaches this server over IPv4.",
+                    c.domain, c.domain
                 ),
             ),
             None => item(
@@ -1273,7 +1414,7 @@ fn spf_item(v4: Option<&SpfOutcome>, v6: Option<&SpfOutcome>, c: &DomainCtx<'_>,
     const ID: &str = "spf";
     const LABEL: &str = "SPF record";
     let d = c.domain;
-    let wanted = crate::handlers::dns::format_spf(c.ipv4, c.ipv6);
+    let wanted = crate::handlers::dns::format_spf(c.ipv4, c.records_v6());
     let record = format!("{d} TXT {wanted}");
     let Some(first) = v4.or(v6) else {
         return item(ID, LABEL, Status::Warn, "Not checked: this server's addresses are not known.");
@@ -1315,7 +1456,7 @@ fn spf_item(v4: Option<&SpfOutcome>, v6: Option<&SpfOutcome>, c: &DomainCtx<'_>,
         }
         _ => {}
     }
-    for (outcome, addr) in [(v4, c.ipv4), (v6, c.ipv6)] {
+    for (outcome, addr) in [(v4, c.ipv4), (v6, c.records_v6())] {
         let (Some(outcome), Some(addr)) = (outcome, addr) else { continue };
         match &outcome.result {
             Spf::Pass => {}
@@ -1345,7 +1486,7 @@ fn spf_item(v4: Option<&SpfOutcome>, v6: Option<&SpfOutcome>, c: &DomainCtx<'_>,
             }
         }
     }
-    let allowed: Vec<&str> = [c.ipv4, c.ipv6].into_iter().flatten().collect();
+    let allowed: Vec<&str> = [c.ipv4, c.records_v6()].into_iter().flatten().collect();
     item(ID, LABEL, Status::Ok, format!("\"{found}\" allows mail from {}.", allowed.join(" and ")))
 }
 
@@ -1360,7 +1501,20 @@ fn ipv6_route_item(spf6: Option<&SpfOutcome>, c: &DomainCtx<'_>) -> Option<MailC
     let result = spf6.map(|o| &o.result);
     let allowed = matches!(result, Some(Spf::Pass) | Some(Spf::NoRecord));
     let unknown = matches!(result, Some(Spf::Unknown(_)) | None);
+    let switch = format!("Domains > {d} > IPv6");
     let detail = match c.ipv6_route? {
+        Ipv6Route::Held if c.ipv6_off => format!(
+            "Mail from {d} goes out over IPv4 only: IPv6 is off for {d} ({switch}), so its SPF record does not allow mail from {v6}. \
+             Switch IPv6 on for {d} to send its mail over IPv6 too."
+        ),
+        Ipv6Route::Forced if c.ipv6_off && !allowed && !unknown => format!(
+            "{d} is set to IPv6 with \"Use IPv6 anyway\", so its mail goes out over IPv6 although IPv6 is off for {d} and its SPF record does not allow mail from {v6}. \
+             Switch IPv6 on for {d} ({switch}), or choose another protocol for the domain."
+        ),
+        Ipv6Route::Free if c.ipv6_off && !allowed && !unknown => format!(
+            "IPv6 is off for {d} ({switch}), so its SPF record does not allow mail from {v6}, and Postfix does not keep its mail on IPv4 yet: {SAVE}. \
+             Switch IPv6 on for {d} to send its mail over IPv6."
+        ),
         Ipv6Route::Held if allowed => format!(
             "Mail from {d} still goes out over IPv4 only: when Postfix was last set up, its SPF record did not allow mail from {v6}. \
              Nothing stands in the way now: {SAVE} and {d} can use IPv6 like the other domains."
@@ -1539,7 +1693,7 @@ async fn domain_checks(r: &dyn Resolver, c: &DomainCtx<'_>) -> (bool, Vec<MailCh
     checks.push(mx_item(&mx, c, managed));
     checks.push(a_item(&a, &host, c, managed));
     checks.push(aaaa_item(&aaaa, &host, c, managed));
-    checks.push(spf_item(spf4.as_ref(), spf6.as_ref(), c, managed));
+    checks.push(spf_item(spf4.as_ref(), spf6.as_ref().filter(|_| !c.ipv6_off), c, managed));
     checks.extend(ipv6_route_item(spf6.as_ref(), c));
     checks.push(dkim_item(&dkim, c, managed));
     checks.push(dmarc_item(&dmarc, c, managed));
@@ -1582,6 +1736,18 @@ pub async fn domain_dns_check(
             .map(|(zone, _)| zone),
     };
     let dkim_key = crate::handlers::dns::read_dkim_pubkey(&domain).await.ok();
+    // A zone on this panel with IPv6 off: its records name no IPv6 address.
+    let ipv6_off = match zone_ns {
+        Some(_) => {
+            let own_v6 = crate::handlers::dns::own_ipv6s_quick(&state.panel_db).await;
+            crate::handlers::dns::zone_ipv6_states(&state, &own_v6)
+                .await
+                .ok()
+                .and_then(|zones| zones.get(&domain).map(|z| !z.enabled))
+                .unwrap_or(false)
+        }
+        None => false,
+    };
     let ctx = DomainCtx {
         domain: &domain,
         ipv4: addrs.ipv4.as_deref(),
@@ -1592,6 +1758,7 @@ pub async fn domain_dns_check(
         dkim_key: dkim_key.as_deref(),
         foreign_v4: addrs.facts4.foreign(),
         ipv6_route,
+        ipv6_off,
     };
     let dig = Dig::default();
     let (managed, checks) = match tokio::time::timeout(CHECK_TIMEOUT, domain_checks(&dig, &ctx)).await {
@@ -1829,6 +1996,7 @@ mod tests {
             relayhost: String::new(),
             sends_ipv6: false,
             held: Vec::new(),
+            ipv6_off: Vec::new(),
         }
     }
 
@@ -1928,12 +2096,12 @@ mod tests {
     async fn a_family_is_ready_when_every_check_passes() {
         let dns = healthy_dns();
         let domains = Ok(vec!["example.com".to_string()]);
-        let check = family_check(&dns, Family::V6, Some(V6.into()), address_ok(), "panel.example.com", &domains, &[]).await;
+        let check = family_check(&dns, Family::V6, Some(V6.into()), address_ok(), "panel.example.com", &domains, &FamilyCtx::default()).await;
         assert!(check.ready, "{:?}", check.checks);
         let ids: Vec<&str> = check.checks.iter().map(|c| c.id.as_str()).collect();
         assert_eq!(ids, vec!["address", "ptr", "fcrdns", "helo", "spf"]);
         assert!(check.checks.iter().all(|c| c.status == Status::Ok));
-        let check = family_check(&dns, Family::V4, Some(V4.into()), address_ok(), "panel.example.com", &domains, &[]).await;
+        let check = family_check(&dns, Family::V4, Some(V4.into()), address_ok(), "panel.example.com", &domains, &FamilyCtx::default()).await;
         assert!(check.ready);
     }
 
@@ -1944,7 +2112,7 @@ mod tests {
             .with("panel.example.com", "AAAA", &[V6])
             .with("example.com", "TXT", &["v=spf1 mx ip4:198.51.100.127 ip6:2001:db8:1::1 -all"]);
         let domains = Ok(vec!["example.com".to_string()]);
-        let check = family_check(&dns, Family::V6, Some(V6.into()), address_ok(), "panel.example.com", &domains, &[]).await;
+        let check = family_check(&dns, Family::V6, Some(V6.into()), address_ok(), "panel.example.com", &domains, &FamilyCtx::default()).await;
         assert!(!check.ready);
         let (status, detail) = status_of(&check.checks, "ptr");
         assert_eq!(status, Status::Fail);
@@ -1962,7 +2130,7 @@ mod tests {
             .with(V6, "PTR", &["static.1.0.0.0.clients.example.net"])
             .with("static.1.0.0.0.clients.example.net", "AAAA", &["2001:db8:ffff::1"]);
         let domains = Ok(vec!["example.com".to_string()]);
-        let check = family_check(&dns, Family::V6, Some(V6.into()), address_ok(), "panel.example.com", &domains, &[]).await;
+        let check = family_check(&dns, Family::V6, Some(V6.into()), address_ok(), "panel.example.com", &domains, &FamilyCtx::default()).await;
         assert_eq!(status_of(&check.checks, "ptr").0, Status::Warn);
         assert_eq!(status_of(&check.checks, "fcrdns").0, Status::Fail);
         assert!(!check.ready);
@@ -1971,7 +2139,7 @@ mod tests {
         let dns = healthy_dns()
             .with(V6, "PTR", &["static.1.0.0.0.clients.example.net"])
             .with("static.1.0.0.0.clients.example.net", "AAAA", &[V6]);
-        let check = family_check(&dns, Family::V6, Some(V6.into()), address_ok(), "panel.example.com", &domains, &[]).await;
+        let check = family_check(&dns, Family::V6, Some(V6.into()), address_ok(), "panel.example.com", &domains, &FamilyCtx::default()).await;
         assert_eq!(status_of(&check.checks, "ptr").0, Status::Warn);
         assert_eq!(status_of(&check.checks, "fcrdns").0, Status::Ok);
         assert!(check.ready);
@@ -1983,14 +2151,14 @@ mod tests {
             .with("old.example", "TXT", &["v=spf1 mx ip4:198.51.100.127 -all"])
             .with("unset.example", "TXT", &["some-verification=1"]);
         let domains = Ok(vec!["example.com".to_string(), "old.example".to_string(), "unset.example".to_string()]);
-        let check = family_check(&dns, Family::V6, Some(V6.into()), address_ok(), "panel.example.com", &domains, &[]).await;
+        let check = family_check(&dns, Family::V6, Some(V6.into()), address_ok(), "panel.example.com", &domains, &FamilyCtx::default()).await;
         let (status, detail) = status_of(&check.checks, "spf");
         assert_eq!(status, Status::Fail);
         assert!(detail.contains("old.example") && !detail.contains("unset.example"), "{detail}");
         assert!(!check.ready);
         // A domain with no SPF record at all is a warning, not a block.
         let domains = Ok(vec!["example.com".to_string(), "unset.example".to_string()]);
-        let check = family_check(&dns, Family::V6, Some(V6.into()), address_ok(), "panel.example.com", &domains, &[]).await;
+        let check = family_check(&dns, Family::V6, Some(V6.into()), address_ok(), "panel.example.com", &domains, &FamilyCtx::default()).await;
         assert_eq!(status_of(&check.checks, "spf").0, Status::Warn);
         assert!(check.ready);
     }
@@ -1999,7 +2167,7 @@ mod tests {
     async fn without_an_address_or_without_dns_nothing_is_ready() {
         let missing = item("address", "Public IPv6 address", Status::Fail, "no address");
         let domains = Ok(Vec::new());
-        let check = family_check(&healthy_dns(), Family::V6, None, missing, "panel.example.com", &domains, &[]).await;
+        let check = family_check(&healthy_dns(), Family::V6, None, missing, "panel.example.com", &domains, &FamilyCtx::default()).await;
         assert!(!check.ready);
         assert_eq!(check.checks.len(), 1);
 
@@ -2007,7 +2175,7 @@ mod tests {
         let dns = Table::default()
             .failing(V6, "PTR")
             .failing("panel.example.com", "AAAA");
-        let check = family_check(&dns, Family::V6, Some(V6.into()), address_ok(), "panel.example.com", &domains, &[]).await;
+        let check = family_check(&dns, Family::V6, Some(V6.into()), address_ok(), "panel.example.com", &domains, &FamilyCtx::default()).await;
         assert!(!check.ready);
         let (status, detail) = status_of(&check.checks, "ptr");
         assert_eq!(status, Status::Fail);
@@ -2028,6 +2196,7 @@ mod tests {
             dkim_key: Some(KEY),
             foreign_v4: None,
             ipv6_route: None,
+            ipv6_off: false,
         }
     }
 
@@ -2233,14 +2402,14 @@ mod tests {
         ];
         // Both are held: a warning that names them.
         let held = vec!["new.example".to_string(), "old.example".to_string()];
-        let it = spf_sweep_item(&domains, &results, V6, &held);
+        let it = spf_sweep_item(&domains, &results, V6, &held, &[]);
         assert_eq!(it.status, Status::Warn);
         assert!(it.detail.contains("old.example, new.example"), "{}", it.detail);
         assert!(it.detail.contains("Postfix sends mail from those domains over IPv4 only"), "{}", it.detail);
         // One of them is not: its mail can leave from the address.
-        let it = spf_sweep_item(&domains, &results, V6, &held[1..]);
+        let it = spf_sweep_item(&domains, &results, V6, &held[1..], &[]);
         assert_eq!(it.status, Status::Fail);
-        assert_eq!(spf_sweep_item(&domains, &results, V6, &[]).status, Status::Fail);
+        assert_eq!(spf_sweep_item(&domains, &results, V6, &[], &[]).status, Status::Fail);
     }
 
     #[test]

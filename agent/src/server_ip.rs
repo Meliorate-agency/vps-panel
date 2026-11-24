@@ -219,6 +219,20 @@ pub async fn panel_host_now(config_host: &str) -> String {
     }
 }
 
+/// Where the server's IPv6 address in effect comes from (`Ipv6Facts::in_effect`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Ipv6Source {
+    /// The operator chose it (`ipv6.address`).
+    Setting,
+    /// The panel hostname's AAAA, which is on an interface here.
+    Hostname,
+    /// The only global address on the interfaces.
+    Interface,
+    /// There is none.
+    None,
+}
+
 /// What is known about this server's IPv6, for DNS records and outgoing mail.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct Ipv6Facts {
@@ -228,6 +242,8 @@ pub struct Ipv6Facts {
     pub published: Option<String>,
     /// The global IPv6 addresses configured on this server's interfaces.
     pub on_interfaces: Vec<String>,
+    /// `ipv6.address` as stored: empty for automatic.
+    pub setting: String,
 }
 
 impl Ipv6Facts {
@@ -238,9 +254,101 @@ impl Ipv6Facts {
             .filter(|p| self.on_interfaces.contains(p))
             .cloned()
     }
+
+    /// The address the operator chose, whether or not it is still on an
+    /// interface; None for automatic.
+    pub fn chosen(&self) -> Option<String> {
+        parse_ipv6(&self.setting)
+    }
+
+    /// The server's IPv6 address for the records the panel writes (AAAA, SPF
+    /// `ip6:`), and where it comes from:
+    ///   1. The address the operator chose, while it is on an interface. One
+    ///      that has left the server gives none: nothing is published for an
+    ///      address that is not here.
+    ///   2. Automatic: the panel hostname's AAAA when that is on an interface.
+    ///      The AAAA alone is not enough: a panel hostname behind a proxy, or
+    ///      one that still points at the server it is being moved from,
+    ///      resolves to an address that is not this server, and it was
+    ///      written into every zone's AAAA and SPF records all the same.
+    ///   3. Automatic: the only global address on the interfaces. Private
+    ///      ones (fc00::/7) do not count; with several, the operator picks.
+    pub fn in_effect(&self) -> (Option<String>, Ipv6Source) {
+        if let Some(chosen) = self.chosen() {
+            return if self.on_interfaces.contains(&chosen) {
+                (Some(chosen), Ipv6Source::Setting)
+            } else {
+                (None, Ipv6Source::None)
+            };
+        }
+        if let Some(named) = self.usable() {
+            return (Some(named), Ipv6Source::Hostname);
+        }
+        let mut public = self.on_interfaces.iter().filter(|a| !is_ula(a));
+        match (public.next(), public.next()) {
+            (Some(only), None) => (Some(only.clone()), Ipv6Source::Interface),
+            _ => (None, Ipv6Source::None),
+        }
+    }
+
+    pub fn address(&self) -> Option<String> {
+        self.in_effect().0
+    }
+
+    pub fn source(&self) -> Ipv6Source {
+        self.in_effect().1
+    }
+
+    /// Every IPv6 address an AAAA record or SPF `ip6:` term may name and be
+    /// this server's: the ones on the interfaces, and the one chosen also
+    /// after it left them, so that records still naming it can be moved.
+    pub fn own(&self) -> Vec<String> {
+        let mut own = self.on_interfaces.clone();
+        if let Some(chosen) = self.chosen() {
+            if !own.contains(&chosen) {
+                own.push(chosen);
+            }
+        }
+        own
+    }
 }
 
-pub async fn ipv6_facts(config_host: &str) -> Ipv6Facts {
+/// fc00::/7: unique local addresses, not reachable from the internet.
+pub fn is_ula(addr: &str) -> bool {
+    addr.parse::<Ipv6Addr>()
+        .is_ok_and(|ip| (ip.segments()[0] & 0xfe00) == 0xfc00)
+}
+
+/// `ipv6.address` from panel.db: the address the operator chose, empty for
+/// automatic (also when the panel has not created its settings yet).
+pub fn ipv6_setting(panel_db: &crate::db::PanelDb) -> String {
+    panel_db
+        .with(|conn| {
+            conn.query_row(
+                "SELECT value FROM settings WHERE key = 'ipv6.address'",
+                [],
+                |row| row.get::<_, String>(0),
+            )
+        })
+        .map(|v| v.trim().to_string())
+        .unwrap_or_default()
+}
+
+/// `ipv6.new_domains`: whether a new zone gets IPv6 when nobody says.
+/// Off unless stored as on.
+pub fn ipv6_new_domains(panel_db: &crate::db::PanelDb) -> bool {
+    panel_db
+        .with(|conn| {
+            conn.query_row(
+                "SELECT value FROM settings WHERE key = 'ipv6.new_domains'",
+                [],
+                |row| row.get::<_, String>(0),
+            )
+        })
+        .is_ok_and(|v| v.trim() == "on")
+}
+
+pub async fn ipv6_facts(panel_db: &crate::db::PanelDb, config_host: &str) -> Ipv6Facts {
     let host = panel_host_now(config_host).await;
     // The system resolver can take its full timeout when DNS is down.
     let published = tokio::time::timeout(
@@ -253,45 +361,50 @@ pub async fn ipv6_facts(config_host: &str) -> Ipv6Facts {
         host,
         published,
         on_interfaces: ipv6s_on_interfaces().await,
+        setting: ipv6_setting(panel_db),
     }
 }
 
-/// This server's IPv6 for the records the panel writes (AAAA, SPF `ip6:`) and
-/// for outgoing mail: a caller-supplied address, else the panel hostname's
-/// AAAA, and that one only when it is configured on an interface here. The
-/// AAAA alone is not enough: a panel hostname behind a proxy, or one that
-/// still points at the server it is being moved from, resolves to an address
-/// that is not this server, and it was written into every zone's AAAA and SPF
-/// records all the same.
-pub async fn published_ipv6(caller_supplied: Option<&str>, config_host: &str) -> Option<String> {
-    if let Some(ip) = caller_supplied
-        .and_then(|s| s.trim().trim_start_matches('[').trim_end_matches(']').parse::<Ipv6Addr>().ok())
-        .filter(usable_ipv6)
-    {
-        return Some(ip.to_string());
-    }
-    ipv6_facts(config_host).await.usable()
+/// This server's IPv6 for the records the panel writes (AAAA, SPF `ip6:`):
+/// `Ipv6Facts::in_effect` has the rule. Outgoing mail has a stricter one of
+/// its own (`mail_ip::mail_ipv6`).
+pub async fn server_ipv6(panel_db: &crate::db::PanelDb, config_host: &str) -> Option<String> {
+    ipv6_facts(panel_db, config_host).await.address()
 }
 
 /// The global IPv6 addresses on this server's interfaces.
 pub async fn ipv6s_on_interfaces() -> Vec<String> {
+    ipv6_devices().await.into_iter().map(|(_, ip)| ip).collect()
+}
+
+/// The global IPv6 addresses on this server's interfaces with the device
+/// each is on.
+pub async fn ipv6_devices() -> Vec<(String, String)> {
     match crate::exec::run("ip", ["-6", "-o", "addr", "show", "scope", "global"]).await {
-        Ok(out) => parse_interface_ipv6s(&out.stdout),
+        Ok(out) => parse_interface_ipv6_devices(&out.stdout),
         Err(_) => Vec::new(),
     }
+}
+
+#[cfg(test)]
+fn parse_interface_ipv6s(ip_output: &str) -> Vec<String> {
+    parse_interface_ipv6_devices(ip_output)
+        .into_iter()
+        .map(|(_, ip)| ip)
+        .collect()
 }
 
 /// `ip -6 -o addr show scope global` lines look like
 /// `2: eth0    inet6 2001:db8::1/64 scope global dynamic mngtmpaddr \  valid_lft ...`.
 /// Left out: addresses still in duplicate detection or that failed it, and
 /// temporary (privacy) or deprecated ones, which go away on their own.
-fn parse_interface_ipv6s(ip_output: &str) -> Vec<String> {
-    let mut out: Vec<String> = Vec::new();
+fn parse_interface_ipv6_devices(ip_output: &str) -> Vec<(String, String)> {
+    let mut out: Vec<(String, String)> = Vec::new();
     for line in ip_output.lines() {
         let mut it = line.split_whitespace();
-        if it.nth(1) == Some("lo") {
+        let Some(dev) = it.nth(1).filter(|dev| *dev != "lo") else {
             continue;
-        }
+        };
         let mut it = it.skip_while(|t| *t != "inet6");
         let Some(ip) = it
             .nth(1)
@@ -305,8 +418,8 @@ fn parse_interface_ipv6s(ip_output: &str) -> Vec<String> {
             .take_while(|t| !t.starts_with('\\'))
             .any(|flag| matches!(flag, "tentative" | "dadfailed" | "temporary" | "deprecated"));
         let ip = ip.to_string();
-        if !transient && !out.contains(&ip) {
-            out.push(ip);
+        if !transient && !out.iter().any(|(_, a)| *a == ip) {
+            out.push((dev.to_string(), ip));
         }
     }
     out
@@ -440,8 +553,9 @@ fn pick_interface_ipv4(ip_output: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::{
-        parse_interface_ipv4s, parse_interface_ipv6s, pick_interface_ipv4, public_ipv4s,
-        published_ipv6, resolve_ipv4, resolve_ipv6, route_field, Ipv4Facts, Ipv6Facts,
+        is_ula, parse_interface_ipv4s, parse_interface_ipv6_devices, parse_interface_ipv6s,
+        pick_interface_ipv4, public_ipv4s, resolve_ipv4, resolve_ipv6, route_field, Ipv4Facts,
+        Ipv6Facts,
     };
     use std::net::IpAddr;
 
@@ -581,6 +695,7 @@ mod tests {
             host: "panel.example.com".into(),
             published: Some("2001:db8:1::1".into()),
             on_interfaces: vec!["2001:db8:1::1".into(), "2001:db8:1::2".into()],
+            setting: String::new(),
         };
         assert_eq!(facts.usable().as_deref(), Some("2001:db8:1::1"));
         // The panel hostname behind a proxy, or still pointing at another server.
@@ -591,11 +706,61 @@ mod tests {
         assert_eq!(facts.usable(), None);
     }
 
-    #[tokio::test]
-    async fn a_caller_supplied_ipv6_is_used_as_given() {
+    fn v6(published: Option<&str>, on: &[&str], setting: &str) -> Ipv6Facts {
+        Ipv6Facts {
+            host: "panel.example.com".into(),
+            published: published.map(str::to_string),
+            on_interfaces: on.iter().map(|s| s.to_string()).collect(),
+            setting: setting.into(),
+        }
+    }
+
+    #[test]
+    fn the_address_in_effect_is_the_choice_else_the_hostnames_else_the_only_one() {
+        use super::Ipv6Source as S;
+        let two = ["2001:db8:1::1", "2001:db8:1::2"];
+        // The operator's choice wins, whatever the panel hostname says.
+        let f = v6(Some("2001:db8:1::1"), &two, "2001:DB8:1:0::2");
+        assert_eq!(f.in_effect(), (Some("2001:db8:1::2".into()), S::Setting));
+        // A choice that has left the interfaces gives none, and stays ours.
+        let f = v6(Some("2001:db8:1::1"), &two, "2001:db8:9::9");
+        assert_eq!(f.in_effect(), (None, S::None));
+        assert_eq!(f.own(), vec!["2001:db8:1::1", "2001:db8:1::2", "2001:db8:9::9"]);
+        // Automatic: today's rule first.
+        let f = v6(Some("2001:db8:1::2"), &two, "");
+        assert_eq!(f.in_effect(), (Some("2001:db8:1::2".into()), S::Hostname));
+        // The hostname's AAAA is another machine's: with two candidates, none.
+        let f = v6(Some("2606:4700::1"), &two, "");
+        assert_eq!(f.in_effect(), (None, S::None));
+        assert_eq!(f.own(), vec!["2001:db8:1::1", "2001:db8:1::2"]);
+        // With one global address that one, a private one next to it aside.
+        let f = v6(Some("2606:4700::1"), &["fd00::5", "2001:db8:1::1"], "");
+        assert_eq!(f.in_effect(), (Some("2001:db8:1::1".into()), S::Interface));
+        let f = v6(None, &["2001:db8:1::1"], "");
+        assert_eq!(f.address().as_deref(), Some("2001:db8:1::1"));
+        assert_eq!(f.source(), S::Interface);
+        // No address, or only private ones.
+        assert_eq!(v6(None, &[], "").in_effect(), (None, S::None));
+        assert_eq!(v6(None, &["fd00::5"], "").in_effect(), (None, S::None));
+        // A private address can still be chosen (a LAN setup).
+        assert_eq!(v6(None, &["fd00::5"], "fd00::5").in_effect(), (Some("fd00::5".into()), S::Setting));
+        // Something unreadable stored is automatic.
+        assert_eq!(v6(None, &["2001:db8:1::1"], "nonsense").source(), S::Interface);
+        assert!(is_ula("fd12::1") && is_ula("fc00::1") && !is_ula("2001:db8::1") && !is_ula("x"));
+    }
+
+    #[test]
+    fn interface_ipv6s_come_with_their_device() {
+        let out = "2: eth0    inet6 2001:db8:1::1/64 scope global \\       valid_lft forever preferred_lft forever\n\
+                   3: ens10    inet6 fd00::5/64 scope global \\       valid_lft forever preferred_lft forever\n\
+                   1: lo    inet6 2001:db8::99/128 scope global \\       valid_lft forever preferred_lft forever\n\
+                   2: eth0    inet6 2001:db8:1::9/64 scope global temporary dynamic \\       valid_lft 600sec preferred_lft 300sec\n";
         assert_eq!(
-            published_ipv6(Some("[2001:db8::7]"), "198.51.100.127").await.as_deref(),
-            Some("2001:db8::7")
+            parse_interface_ipv6_devices(out),
+            vec![
+                ("eth0".to_string(), "2001:db8:1::1".to_string()),
+                ("ens10".to_string(), "fd00::5".to_string()),
+            ]
         );
     }
 

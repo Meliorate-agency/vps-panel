@@ -8,6 +8,7 @@ use axum::{
 };
 use mysql_async::prelude::*;
 use serde::{Deserialize, Serialize};
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::atomic::{AtomicBool, Ordering};
 
 #[derive(Serialize)]
@@ -16,6 +17,11 @@ pub struct ZoneRow {
     pub name: String,
     pub r#type: String,
     pub records: u32,
+    /// IPv6 is on for the zone (`ipv6_enabled`).
+    pub ipv6: bool,
+    /// Why IPv6 is off although it was asked for.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -23,6 +29,9 @@ pub struct CreateZone {
     pub name: String,
     #[serde(default)]
     pub seed_ip: Option<String>,
+    /// IPv6 on or off for the new zone; None follows `ipv6.new_domains`.
+    #[serde(default)]
+    pub ipv6: Option<bool>,
 }
 
 #[derive(Serialize)]
@@ -205,6 +214,8 @@ pub async fn list_zones(State(state): State<AppState>) -> AgentResult<Json<Vec<Z
     let rows: Vec<(u32, String, String)> = conn
         .query("SELECT id, name, type FROM domains ORDER BY name")
         .await?;
+    let own_v6 = own_ipv6s_quick(&state.panel_db).await;
+    let ipv6 = ipv6_states_on(&mut conn, &own_v6).await?;
     let mut zones = Vec::with_capacity(rows.len());
     for (id, name, ty) in rows {
         let count: u32 = conn
@@ -213,9 +224,11 @@ pub async fn list_zones(State(state): State<AppState>) -> AgentResult<Json<Vec<Z
             .unwrap_or(0);
         zones.push(ZoneRow {
             id,
+            ipv6: ipv6.get(&name).is_some_and(|z| z.enabled),
             name,
             r#type: ty,
             records: count,
+            note: None,
         });
     }
     Ok(Json(zones))
@@ -262,13 +275,35 @@ pub(crate) async fn create_zone_inner(
     if !is_valid_zone(&name) {
         return Err(AgentError::Invalid("invalid zone name".into()));
     }
+    let server_ip = crate::server_ip::resolve_ipv4(
+        req.seed_ip.as_deref(),
+        &state.config.panel_host,
+    )
+    .await;
+    // IPv6 as asked, else the server-wide default for new domains; only
+    // with an address to publish.
+    let asked = req
+        .ipv6
+        .unwrap_or_else(|| crate::server_ip::ipv6_new_domains(&state.panel_db));
+    let server_ip_v6 = match asked {
+        true => crate::server_ip::server_ipv6(&state.panel_db, &state.config.panel_host).await,
+        false => None,
+    };
+    let ipv6 = server_ip_v6.is_some();
+    let note = (req.ipv6 == Some(true) && !ipv6).then(|| {
+        format!("IPv6 is off for {name}: this server has no IPv6 address to publish. {SET_ADDRESS}")
+    });
+
+    // One transaction: a zone that fails half-way is not left behind with
+    // some of its records.
     let mut conn = pdns_conn(state).await?;
-    conn.exec_drop(
+    let mut tx = conn.start_transaction(mysql_async::TxOpts::default()).await?;
+    tx.exec_drop(
         "INSERT INTO domains (name, type) VALUES (?, 'NATIVE')",
         (&name,),
     )
     .await?;
-    let id: u32 = conn
+    let id: u32 = tx
         .exec_first("SELECT id FROM domains WHERE name = ?", (&name,))
         .await?
         .ok_or_else(|| AgentError::Other(anyhow::anyhow!("zone not found after insert")))?;
@@ -278,41 +313,30 @@ pub(crate) async fn create_zone_inner(
         "{ns1} hostmaster.{name} {} 10800 3600 604800 3600",
         chrono::Utc::now().format("%Y%m%d%H")
     );
-    insert_record(&mut conn, id, &name, "SOA", &soa_content, 0).await?;
-    insert_record(&mut conn, id, &name, "NS", &ns1, 0).await?;
-    insert_record(&mut conn, id, &name, "NS", &ns2, 0).await?;
+    insert_record(&mut tx, id, &name, "SOA", &soa_content, 0).await?;
+    insert_record(&mut tx, id, &name, "NS", &ns1, 0).await?;
+    insert_record(&mut tx, id, &name, "NS", &ns2, 0).await?;
 
     let mut records = 3u32;
-    let server_ip = crate::server_ip::resolve_ipv4(
-        req.seed_ip.as_deref(),
-        &state.config.panel_host,
-    )
-    .await;
-    let server_ip_v6 = crate::server_ip::published_ipv6(
-        req.seed_ip.as_deref(),
-        &state.config.panel_host,
-    )
-    .await;
-
     if let Some(ip) = &server_ip {
-        insert_record(&mut conn, id, &name, "A", ip, 0).await?;
-        insert_record(&mut conn, id, &format!("www.{name}"), "A", ip, 0).await?;
-        insert_record(&mut conn, id, &format!("mail.{name}"), "A", ip, 0).await?;
+        insert_record(&mut tx, id, &name, "A", ip, 0).await?;
+        insert_record(&mut tx, id, &format!("www.{name}"), "A", ip, 0).await?;
+        insert_record(&mut tx, id, &format!("mail.{name}"), "A", ip, 0).await?;
         records += 3;
         // Only seed A records for the NS hostnames when they live inside
         // this zone (per-zone NS mode). With a shared NS pair (e.g.
         // ns1.example.net), the A records belong in that other
         // zone, not this one.
         if ns_in_zone(&ns1, &name) {
-            insert_record(&mut conn, id, &ns1, "A", ip, 0).await?;
+            insert_record(&mut tx, id, &ns1, "A", ip, 0).await?;
             records += 1;
         }
         if ns_in_zone(&ns2, &name) {
-            insert_record(&mut conn, id, &ns2, "A", ip, 0).await?;
+            insert_record(&mut tx, id, &ns2, "A", ip, 0).await?;
             records += 1;
         }
         insert_record(
-            &mut conn,
+            &mut tx,
             id,
             &name,
             "CAA",
@@ -329,31 +353,36 @@ pub(crate) async fn create_zone_inner(
     }
 
     if let Some(ip6) = &server_ip_v6 {
-        insert_record(&mut conn, id, &name, "AAAA", ip6, 0).await?;
-        insert_record(&mut conn, id, &format!("www.{name}"), "AAAA", ip6, 0).await?;
-        insert_record(&mut conn, id, &format!("mail.{name}"), "AAAA", ip6, 0).await?;
+        insert_record(&mut tx, id, &name, "AAAA", ip6, 0).await?;
+        insert_record(&mut tx, id, &format!("www.{name}"), "AAAA", ip6, 0).await?;
+        insert_record(&mut tx, id, &format!("mail.{name}"), "AAAA", ip6, 0).await?;
         records += 3;
         if ns_in_zone(&ns1, &name) {
-            insert_record(&mut conn, id, &ns1, "AAAA", ip6, 0).await?;
+            insert_record(&mut tx, id, &ns1, "AAAA", ip6, 0).await?;
             records += 1;
         }
         if ns_in_zone(&ns2, &name) {
-            insert_record(&mut conn, id, &ns2, "AAAA", ip6, 0).await?;
+            insert_record(&mut tx, id, &ns2, "AAAA", ip6, 0).await?;
             records += 1;
         }
     }
+    // Stored either way, so the zone keeps it whatever its records say later.
+    store_ipv6(&mut tx, id, ipv6).await?;
+    tx.commit().await?;
 
     Ok(ZoneRow {
         id,
         name,
         r#type: "NATIVE".into(),
         records,
+        ipv6,
+        note,
     })
 }
 
 /// Types of the records already at `name` in the zone, except `exclude_id`.
-async fn types_at(
-    conn: &mut mysql_async::Conn,
+async fn types_at<Q: Queryable>(
+    conn: &mut Q,
     domain_id: u32,
     name: &str,
     exclude_id: Option<u32>,
@@ -373,8 +402,8 @@ async fn types_at(
 
 /// Is `name` a CNAME? Automatic writers (SSL preflight A/AAAA, reconcile,
 /// mail records) skip such a name instead of adding a record next to it.
-pub(crate) async fn cname_at(
-    conn: &mut mysql_async::Conn,
+pub(crate) async fn cname_at<Q: Queryable>(
+    conn: &mut Q,
     domain_id: u32,
     name: &str,
 ) -> AgentResult<bool> {
@@ -420,8 +449,8 @@ async fn check_cname_rules(
     Ok(())
 }
 
-async fn insert_record(
-    conn: &mut mysql_async::Conn,
+async fn insert_record<Q: Queryable>(
+    conn: &mut Q,
     domain_id: u32,
     name: &str,
     rtype: &str,
@@ -443,17 +472,23 @@ pub struct ReconcileResp {
     pub updated: Vec<String>,
     pub unchanged: Vec<String>,
     pub non_standard_extras: Vec<String>,
+    /// AAAA records of this server taken out because IPv6 is off for the zone.
+    pub removed: Vec<String>,
 }
 
 /// Bring an existing PowerDNS zone up to the panel's standard shape.
 ///
-/// Additive only — never deletes user-added records. Records that don't fit
+/// Never deletes user-added records, with one exception: in a zone with
+/// IPv6 off, AAAA records that name this server go (`plan_ipv6`). An AAAA
+/// that points elsewhere is never touched. Records that don't fit
 /// the standard template are reported under `non_standard_extras` so the
 /// operator can clean them up by hand if they want.
 ///
 /// Targets the same record set `create_zone` seeds, plus the per-mail-domain
 /// DKIM/SPF/DMARC/MX rows if a row exists in `mail.virtual_domains` for the
-/// zone.
+/// zone. The AAAA records and the SPF `ip6:` term follow the zone's IPv6
+/// choice: on adds what on means, off removes it. Reconcile used to add
+/// them to every zone, and so put back AAAA records an operator had deleted.
 pub async fn reconcile_zone(
     State(state): State<AppState>,
     Path(zone): Path<String>,
@@ -469,8 +504,8 @@ pub async fn reconcile_zone(
         .ok_or(AgentError::NotFound)?;
 
     let (ns1, ns2) = ns_pair_for(&zone, &state.panel_db);
-    let server_ip = crate::server_ip::resolve_ipv4(None, &state.config.panel_host).await;
-    let server_ip_v6 = crate::server_ip::published_ipv6(None, &state.config.panel_host).await;
+    let own = own_addrs(&state).await;
+    let server_ip = own.v4.clone();
     let has_mail = mail_domain_exists(&mut conn, &zone).await;
     let dkim_pubkey = if has_mail {
         read_dkim_pubkey(&zone).await.ok()
@@ -542,8 +577,7 @@ pub async fn reconcile_zone(
         }
     }
 
-    // A / AAAA records — apex, www, mail, and ns1/ns2 if they're in-zone.
-    // Compute the target name list once; A and AAAA share it.
+    // A records — apex, www, mail, and ns1/ns2 if they're in-zone.
     let mut addr_targets: Vec<String> = vec![
         zone.clone(),
         format!("www.{zone}"),
@@ -560,11 +594,33 @@ pub async fn reconcile_zone(
             upsert_single(&mut conn, domain_id, name, "A", ip, 0, &mut report).await?;
         }
     }
-    if let Some(ip6) = &server_ip_v6 {
-        for name in &addr_targets {
-            upsert_single(&mut conn, domain_id, name, "AAAA", ip6, 0, &mut report).await?;
+
+    // AAAA records, and the SPF `ip6:` term of a zone without mail: what
+    // the zone's IPv6 choice means (a mail domain's SPF record is written
+    // whole below).
+    let stored = stored_ipv6(&mut conn, domain_id).await?;
+    let records = zone_records(&mut conn, domain_id).await?;
+    let ipv6_on = ipv6_enabled(stored, &zone, &records, &own.own_v6);
+    let plan = plan_ipv6(&zone, [&ns1, &ns2], has_mail, &records, ipv6_on, &own, !has_mail);
+    apply_ipv6(&mut conn, domain_id, &plan, own.v6.as_deref()).await?;
+    report.added.extend(plan.add.iter().map(|name| format!("AAAA {name}")));
+    report.updated.extend(plan.update.iter().map(|(_, name)| format!("AAAA {name}")));
+    report.unchanged.extend(plan.unchanged.iter().map(|name| format!("AAAA {name}")));
+    report
+        .removed
+        .extend(plan.remove.iter().map(|(_, name, content)| format!("AAAA {name} → {content}")));
+    if !plan.spf.is_empty() {
+        report.updated.push(format!("TXT {zone} (v=spf1, ip6)"));
+    }
+    if ipv6_on {
+        report.non_standard_extras.extend(plan.skipped.iter().cloned());
+        if own.v6.is_none() {
+            report.non_standard_extras.push(format!(
+                "IPv6 is on for {zone}, but this server has no IPv6 address to publish: its AAAA records and SPF record were left as they are"
+            ));
         }
     }
+    let server_ip_v6 = own.v6.clone().filter(|_| ipv6_on);
 
     // CAA at apex.
     upsert_single(
@@ -590,16 +646,19 @@ pub async fn reconcile_zone(
             &mut report,
         )
         .await?;
-        let spf_target = format_spf(server_ip.as_deref(), server_ip_v6.as_deref());
-        upsert_txt_by_prefix(
-            &mut conn,
-            domain_id,
-            &zone,
-            "\"v=spf1",
-            &spf_target,
-            &mut report,
-        )
-        .await?;
+        // With IPv6 on and no address to name, the `ip6:` term it has stays.
+        if !(ipv6_on && own.v6.is_none()) {
+            let spf_target = format_spf(server_ip.as_deref(), server_ip_v6.as_deref());
+            upsert_txt_by_prefix(
+                &mut conn,
+                domain_id,
+                &zone,
+                "\"v=spf1",
+                &spf_target,
+                &mut report,
+            )
+            .await?;
+        }
         let dmarc_target = format!(
             "\"v=DMARC1; p=none; rua=mailto:postmaster@{zone}\""
         );
@@ -652,7 +711,7 @@ pub async fn reconcile_zone(
     Ok(Json(report))
 }
 
-async fn mail_domain_exists(conn: &mut mysql_async::Conn, zone: &str) -> bool {
+async fn mail_domain_exists<Q: Queryable>(conn: &mut Q, zone: &str) -> bool {
     // The `mail` database may not exist yet on a fresh install — treat any
     // error (unknown DB, no row) as "no mail domain". We're still inside the
     // pdns DB context after pdns_conn(), so the cross-database query needs
@@ -838,6 +897,12 @@ pub async fn delete_zone(
     let zone = zone.trim_end_matches('.').to_lowercase();
     let mut conn = pdns_conn(&state).await?;
     conn.exec_drop("DELETE FROM records WHERE domain_id IN (SELECT id FROM domains WHERE name = ?)", (&zone,)).await?;
+    // The zone's IPv6 choice goes with it.
+    conn.exec_drop(
+        "DELETE FROM domainmetadata WHERE kind = ? AND domain_id IN (SELECT id FROM domains WHERE name = ?)",
+        (IPV6_META, &zone),
+    )
+    .await?;
     conn.exec_drop("DELETE FROM domains WHERE name = ?", (&zone,)).await?;
     Ok(Json(OkResponse::default()))
 }
@@ -1115,11 +1180,13 @@ pub(crate) async fn find_enclosing_zone(
 }
 
 /// Make `fqdn` (in `zone`) answer with this server only: one A record with
-/// `ipv4`, no CNAME, and no AAAA except this server's own `ipv6s`. For the
+/// `ipv4`, no CNAME, and the AAAA the zone's IPv6 choice gives it. For the
 /// panel's hostname, which the operator explicitly wants here. The old path
 /// only added an A, so an existing A to another server stayed next to it
 /// (two answers, part of the visits going elsewhere) and a CNAME or an old
-/// AAAA kept pointing away. Returns what changed, for the task log.
+/// AAAA kept pointing away. `ipv6s` are this server's own IPv6 addresses.
+/// With IPv6 on the name gets one AAAA, for the server's address in effect;
+/// with IPv6 off it keeps none. Returns what changed, for the task log.
 pub(crate) async fn point_name_here(
     state: &AppState,
     zone: &str,
@@ -1129,39 +1196,62 @@ pub(crate) async fn point_name_here(
 ) -> AgentResult<Vec<String>> {
     let zone = zone.trim_end_matches('.').to_lowercase();
     let fqdn = fqdn.trim_end_matches('.').to_lowercase();
+    let facts = crate::server_ip::ipv6_facts(&state.panel_db, &state.config.panel_host).await;
+    let mut own_v6 = facts.own();
+    own_v6.extend(ipv6s.iter().filter(|a| !own_v6.contains(a)).cloned().collect::<Vec<_>>());
     let mut conn = pdns_conn(state).await?;
     let zone_id: u32 = conn
         .exec_first("SELECT id FROM domains WHERE name = ?", (&zone,))
         .await?
         .ok_or(AgentError::NotFound)?;
-    let rows: Vec<(u32, String, String)> = conn
-        .exec(
-            "SELECT id, type, content FROM records \
-             WHERE domain_id = ? AND name = ? AND type IN ('A', 'AAAA', 'CNAME')",
-            (zone_id, &fqdn),
-        )
-        .await?;
+    let stored = stored_ipv6(&mut conn, zone_id).await?;
+    let records = zone_records(&mut conn, zone_id).await?;
+    let ipv6_on = ipv6_enabled(stored, &zone, &records, &own_v6);
+    let target = facts.address().filter(|_| ipv6_on);
     let mut log = Vec::new();
     let mut has_a = false;
-    for (id, rtype, content) in rows {
-        let keep = match rtype.as_str() {
-            "A" => content == ipv4,
-            "AAAA" => ipv6s.iter().any(|v| v == &content),
-            _ => false,
+    let mut has_aaaa = false;
+    let mut tx = conn.start_transaction(mysql_async::TxOpts::default()).await?;
+    for r in records.iter().filter(|r| r.name == fqdn) {
+        let keep = match r.rtype.as_str() {
+            "A" => r.content == ipv4,
+            // With IPv6 on and no address in effect, this server's own stay.
+            "AAAA" if ipv6_on && target.is_none() => is_own_ip(&r.content, &own_v6),
+            "AAAA" => !has_aaaa && target.as_deref().is_some_and(|t| same_ip(&r.content, t)),
+            "CNAME" => false,
+            _ => continue,
         };
         if keep {
-            has_a |= rtype == "A";
+            has_a |= r.rtype == "A";
+            has_aaaa |= r.rtype == "AAAA";
+            if r.disabled {
+                tx.exec_drop("UPDATE records SET disabled = 0 WHERE id = ?", (r.id,)).await?;
+            }
             continue;
         }
-        conn.exec_drop("DELETE FROM records WHERE id = ?", (id,)).await?;
-        log.push(format!("removed {rtype} {fqdn} -> {content}: the panel's name must point here"));
+        tx.exec_drop("DELETE FROM records WHERE id = ?", (r.id,)).await?;
+        let why = if r.rtype == "AAAA" && !ipv6_on && is_own_ip(&r.content, &own_v6) {
+            format!("IPv6 is off for {zone} (switch it on on the domain's page to keep it)")
+        } else {
+            "the panel's name must point here".to_string()
+        };
+        log.push(format!("removed {} {fqdn} -> {}: {why}", r.rtype, r.content));
     }
     if has_a {
         log.push(format!("A {fqdn} -> {ipv4} already present"));
     } else {
-        insert_record(&mut conn, zone_id, &fqdn, "A", ipv4, 0).await?;
+        insert_record(&mut tx, zone_id, &fqdn, "A", ipv4, 0).await?;
         log.push(format!("added A {fqdn} -> {ipv4}"));
     }
+    if let Some(v6) = target.as_deref() {
+        if has_aaaa {
+            log.push(format!("AAAA {fqdn} -> {v6} already present"));
+        } else {
+            insert_record(&mut tx, zone_id, &fqdn, "AAAA", v6, 0).await?;
+            log.push(format!("added AAAA {fqdn} -> {v6}: IPv6 is on for {zone}"));
+        }
+    }
+    tx.commit().await?;
     Ok(log)
 }
 
@@ -1226,8 +1316,9 @@ pub(crate) async fn ensure_subdomain_records(
     if domain_norm == zone_name {
         return Ok(SubdomainRecords::ZoneApex);
     }
-    let v4 = crate::server_ip::resolve_ipv4(None, &state.config.panel_host).await;
-    let v6 = crate::server_ip::published_ipv6(None, &state.config.panel_host).await;
+    let own = own_addrs(state).await;
+    let v4 = own.v4.clone();
+    let v6 = own.v6.clone();
     if v4.is_none() && v6.is_none() {
         return Ok(SubdomainRecords::NoServerIp);
     }
@@ -1249,8 +1340,18 @@ pub(crate) async fn ensure_subdomain_records(
     if let Some(ip) = &v4 {
         upsert_record_basic(&mut conn, zone_id, &domain_norm, "A", ip).await?;
     }
+    // The AAAA as the zone's IPv6 choice has it: with IPv6 on the name gets
+    // one for this server, unless an AAAA of the operator points elsewhere;
+    // with IPv6 off none is added. Nothing is removed here: certificate
+    // renewals run this too, and must not change a zone by themselves.
     if let Some(ip6) = &v6 {
-        upsert_record_basic(&mut conn, zone_id, &domain_norm, "AAAA", ip6).await?;
+        let stored = stored_ipv6(&mut conn, zone_id).await?;
+        let records = zone_records(&mut conn, zone_id).await?;
+        if ipv6_enabled(stored, &zone_name, &records, &own.own_v6) {
+            let mut plan = Ipv6Plan::default();
+            plan_name(&mut plan, &domain_norm, &records, ip6, &own);
+            apply_ipv6(&mut conn, zone_id, &plan, Some(ip6)).await?;
+        }
     }
     Ok(SubdomainRecords::Written)
 }
@@ -1523,6 +1624,819 @@ pub(crate) async fn preflight_acme_dns(
         task.log(format!("preflight: warning, {warning}"));
     }
     Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// IPv6 per zone
+//
+// Each zone has IPv6 on or off. On: the apex, www, the name servers in the
+// zone, mail.<zone> and every name an A record sends to this server have an
+// AAAA for the server's IPv6 address, and the zone's SPF record has its
+// `ip6:` term. Off: no AAAA of the zone names this server and the SPF record
+// has no `ip6:` term for it. An AAAA that points elsewhere is the operator's
+// and is never touched, and only this server's `ip6:` term comes and goes:
+// the rest of an SPF record stays as the operator wrote it.
+// ---------------------------------------------------------------------------
+
+/// The domainmetadata kind that holds a zone's IPv6 choice, `on` or `off`.
+/// PowerDNS leaves kinds that start with X- to whoever writes them. The
+/// choice lives with the zone: in the same database and transaction as its
+/// records, readable without the panel, and gone with the zone.
+const IPV6_META: &str = "X-VPS-PANEL-IPV6";
+
+/// What to do when there is no IPv6 address to publish.
+pub(crate) const SET_ADDRESS: &str =
+    "Choose this server's IPv6 address under Settings > DNS & SSL > IPv6.";
+
+/// One record of a zone, as the IPv6 planning reads it. Names lowercase,
+/// without the trailing dot.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct ZoneRec {
+    pub id: u64,
+    pub name: String,
+    pub rtype: String,
+    pub content: String,
+    pub disabled: bool,
+}
+
+/// This server's addresses, as the record writers need them.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub(crate) struct OwnAddrs {
+    /// The IPv4 address A records get (`server_ip::resolve_ipv4`).
+    pub v4: Option<String>,
+    /// The IPv6 address AAAA records and `ip6:` get
+    /// (`server_ip::Ipv6Facts::address`).
+    pub v6: Option<String>,
+    /// Every IPv6 address of this server (`Ipv6Facts::own`).
+    pub own_v6: Vec<String>,
+    /// Every IPv4 address of this server: an A record with one of these
+    /// points here.
+    pub own_v4: Vec<String>,
+}
+
+/// One record IPv6 on means for a zone, and whether it is there now.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub(crate) struct Ipv6Record {
+    pub name: String,
+    #[serde(rename = "type")]
+    pub rtype: &'static str,
+    pub content: String,
+    pub present: bool,
+}
+
+/// What switching a zone's IPv6 on or off changes (`plan_ipv6`).
+#[derive(Debug, Default, PartialEq)]
+pub(crate) struct Ipv6Plan {
+    /// Names that get an AAAA for the server's address.
+    pub add: Vec<String>,
+    /// AAAA records of this server set to the address and enabled: (id, name).
+    pub update: Vec<(u64, String)>,
+    /// AAAA records of this server taken out: (id, name, content).
+    pub remove: Vec<(u64, String, String)>,
+    /// SPF records rewritten: (id, new content).
+    pub spf: Vec<(u64, String)>,
+    /// Names whose AAAA is right already.
+    pub unchanged: Vec<String>,
+    /// Names IPv6 on leaves alone, and why, as sentences.
+    pub skipped: Vec<String>,
+    /// What IPv6 on means for the zone, and whether each record is there.
+    pub records: Vec<Ipv6Record>,
+}
+
+fn same_ip(a: &str, b: &str) -> bool {
+    match (a.trim().parse::<std::net::IpAddr>(), b.trim().parse::<std::net::IpAddr>()) {
+        (Ok(a), Ok(b)) => a == b,
+        _ => false,
+    }
+}
+
+fn is_own_ip(content: &str, own: &[String]) -> bool {
+    own.iter().any(|o| same_ip(content, o))
+}
+
+/// Does the zone have IPv6 on? A stored choice decides. A zone without one
+/// (every zone from before the choice existed) counts as on when an AAAA at
+/// its apex names this server, so that it keeps what it has.
+pub(crate) fn ipv6_enabled(
+    stored: Option<bool>,
+    zone: &str,
+    records: &[ZoneRec],
+    own_v6: &[String],
+) -> bool {
+    stored.unwrap_or_else(|| {
+        records.iter().any(|r| {
+            r.rtype == "AAAA" && r.name == zone && !r.disabled && is_own_ip(&r.content, own_v6)
+        })
+    })
+}
+
+/// The names IPv6 on gives an AAAA: the apex, www, the name servers that
+/// are in the zone, mail.<zone> of a mail domain, every name an A record
+/// sends to this server (sites, apps, the panel hostname, mail.<zone>), and
+/// every name with an AAAA for this server already.
+fn ipv6_names(
+    zone: &str,
+    ns: [&str; 2],
+    has_mail: bool,
+    records: &[ZoneRec],
+    own: &OwnAddrs,
+) -> Vec<String> {
+    let mut names = vec![zone.to_string(), format!("www.{zone}")];
+    for host in ns.into_iter().filter(|host| ns_in_zone(host, zone)) {
+        if !names.iter().any(|n| n == host) {
+            names.push(host.to_string());
+        }
+    }
+    if has_mail {
+        names.push(format!("mail.{zone}"));
+    }
+    for r in records {
+        let here = match r.rtype.as_str() {
+            "A" => !r.disabled && is_own_ip(&r.content, &own.own_v4),
+            "AAAA" => is_own_ip(&r.content, &own.own_v6),
+            _ => false,
+        };
+        if here && !names.contains(&r.name) {
+            names.push(r.name.clone());
+        }
+    }
+    names
+}
+
+/// What IPv6 on means for one name: one AAAA for `target`, enabled. Left
+/// alone: a CNAME, a name whose A records send it elsewhere, and a name
+/// with an AAAA that points elsewhere and none for this server (two answers
+/// would send part of the visits to the wrong machine).
+pub(crate) fn plan_name(
+    plan: &mut Ipv6Plan,
+    name: &str,
+    records: &[ZoneRec],
+    target: &str,
+    own: &OwnAddrs,
+) {
+    let at: Vec<&ZoneRec> = records.iter().filter(|r| r.name == name).collect();
+    if at.iter().any(|r| r.rtype == "CNAME") {
+        return;
+    }
+    let a: Vec<&str> = at
+        .iter()
+        .filter(|r| r.rtype == "A" && !r.disabled)
+        .map(|r| r.content.as_str())
+        .collect();
+    if !a.is_empty() && !a.iter().any(|c| is_own_ip(c, &own.own_v4)) {
+        plan.skipped.push(format!(
+            "{name} points at {} over IPv4, not at this server, so it gets no AAAA record.",
+            a.join(", ")
+        ));
+        return;
+    }
+    let (mine, foreign): (Vec<&ZoneRec>, Vec<&ZoneRec>) = at
+        .iter()
+        .filter(|r| r.rtype == "AAAA")
+        .partition(|r| is_own_ip(&r.content, &own.own_v6));
+    let keep = mine
+        .iter()
+        .find(|r| same_ip(&r.content, target) && !r.disabled)
+        .or_else(|| mine.iter().find(|r| same_ip(&r.content, target)))
+        .or_else(|| mine.first());
+    let present = match keep {
+        Some(k) => {
+            let right = same_ip(&k.content, target) && !k.disabled;
+            if right {
+                plan.unchanged.push(name.to_string());
+            } else {
+                plan.update.push((k.id, name.to_string()));
+            }
+            for other in mine.iter().filter(|r| r.id != k.id) {
+                plan.remove.push((other.id, name.to_string(), other.content.clone()));
+            }
+            right
+        }
+        None if !foreign.is_empty() => {
+            plan.skipped.push(format!(
+                "{name} has an AAAA record for {}, which is not this server: it is left as it is, and none for this server is added next to it.",
+                foreign.iter().map(|r| r.content.as_str()).collect::<Vec<_>>().join(", ")
+            ));
+            return;
+        }
+        None => {
+            plan.add.push(name.to_string());
+            false
+        }
+    };
+    plan.records.push(Ipv6Record {
+        name: name.to_string(),
+        rtype: "AAAA",
+        content: target.to_string(),
+        present,
+    });
+}
+
+/// What switching the zone's IPv6 `on` or off changes, from its records as
+/// they are. `records` of the plan always says what on means, for the
+/// panel. `spf`: also edit the `ip6:` term of the apex SPF record (reconcile
+/// writes a mail domain's SPF record whole instead).
+pub(crate) fn plan_ipv6(
+    zone: &str,
+    ns: [&str; 2],
+    has_mail: bool,
+    records: &[ZoneRec],
+    on: bool,
+    own: &OwnAddrs,
+    spf: bool,
+) -> Ipv6Plan {
+    let mut what_on = Ipv6Plan::default();
+    match own.v6.as_deref() {
+        Some(target) => {
+            for name in ipv6_names(zone, ns, has_mail, records, own) {
+                plan_name(&mut what_on, &name, records, target, own);
+            }
+        }
+        // No address to name: the records of this server there are.
+        None => {
+            what_on.records = records
+                .iter()
+                .filter(|r| r.rtype == "AAAA" && is_own_ip(&r.content, &own.own_v6))
+                .map(|r| Ipv6Record {
+                    name: r.name.clone(),
+                    rtype: "AAAA",
+                    content: r.content.clone(),
+                    present: !r.disabled,
+                })
+                .collect();
+        }
+    }
+
+    let mut plan = Ipv6Plan::default();
+    let spf_records = records
+        .iter()
+        .filter(|r| r.rtype == "TXT" && r.name == zone && txt_has_prefix(&r.content, "\"v=spf1"));
+    for r in spf_records {
+        let with = own.v6.as_deref().map(|t| spf_with_ip6(&r.content, t, &own.own_v6));
+        if let (Some(t), Some(with)) = (own.v6.as_deref(), &with) {
+            if !what_on.records.iter().any(|x| x.rtype == "TXT") {
+                what_on.records.push(Ipv6Record {
+                    name: zone.to_string(),
+                    rtype: "TXT",
+                    content: with.clone().unwrap_or_else(|| r.content.clone()),
+                    present: spf_names_ip6(&r.content, t),
+                });
+            }
+            if with.is_none() {
+                what_on.skipped.push(format!(
+                    "The SPF record of {zone} could not be read, so its ip6: term is not changed."
+                ));
+            }
+        }
+        let new = if on {
+            with.flatten()
+        } else {
+            spf_without_ip6(&r.content, &own.own_v6)
+        };
+        if let Some(new) = new.filter(|new| spf && *new != r.content) {
+            plan.spf.push((r.id, new));
+        }
+    }
+
+    if on {
+        plan.add = std::mem::take(&mut what_on.add);
+        plan.update = std::mem::take(&mut what_on.update);
+        plan.remove = std::mem::take(&mut what_on.remove);
+        plan.unchanged = std::mem::take(&mut what_on.unchanged);
+    } else {
+        plan.remove = records
+            .iter()
+            .filter(|r| r.rtype == "AAAA" && is_own_ip(&r.content, &own.own_v6))
+            .map(|r| (r.id, r.name.clone(), r.content.clone()))
+            .collect();
+    }
+    plan.skipped = what_on.skipped;
+    plan.records = what_on.records;
+    plan
+}
+
+/// A TXT record's text: its quoted strings put together (as receivers read
+/// a record longer than 255 bytes), or the content as it is when it is not
+/// quoted; and whether it was quoted. None for content with escapes, which
+/// is left alone.
+fn txt_text(content: &str) -> Option<(String, bool)> {
+    let c = content.trim();
+    if !c.starts_with('"') {
+        return (!c.contains(['"', '\\'])).then(|| (c.to_string(), false));
+    }
+    let mut text = String::new();
+    let mut rest = c;
+    while !rest.is_empty() {
+        let inner = rest.strip_prefix('"')?;
+        let end = inner.find('"')?;
+        let chunk = &inner[..end];
+        if chunk.contains('\\') {
+            return None;
+        }
+        text.push_str(chunk);
+        rest = inner[end + 1..].trim_start();
+    }
+    Some((text, true))
+}
+
+/// TXT content for `text`: quoted, in strings of at most 255 bytes, when the
+/// record was quoted; as it is otherwise.
+fn txt_content(text: &str, quoted: bool) -> String {
+    if !quoted {
+        return text.to_string();
+    }
+    let mut parts: Vec<String> = vec![String::new()];
+    for ch in text.chars() {
+        if parts.last().is_some_and(|p| p.len() + ch.len_utf8() > 255) {
+            parts.push(String::new());
+        }
+        if let Some(p) = parts.last_mut() {
+            p.push(ch);
+        }
+    }
+    parts
+        .iter()
+        .map(|p| format!("\"{p}\""))
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+/// The SPF qualifier and the rest of a term.
+fn spf_unqualified(term: &str) -> &str {
+    term.strip_prefix(['+', '-', '~', '?']).unwrap_or(term)
+}
+
+/// An `ip6:` term that names exactly one of `own` and lets it send:
+/// `ip6:a`, `+ip6:a`, `ip6:a/128`. A range, or a term that refuses the
+/// address, is the operator's.
+fn own_ip6_term(term: &str, own: &[String]) -> bool {
+    let t = term.strip_prefix('+').unwrap_or(term);
+    let Some(arg) = t.get(..4).filter(|p| p.eq_ignore_ascii_case("ip6:")).and_then(|_| t.get(4..)) else {
+        return false;
+    };
+    is_own_ip(arg.strip_suffix("/128").unwrap_or(arg), own)
+}
+
+fn spf_terms(content: &str) -> Option<(Vec<String>, bool)> {
+    let (text, quoted) = txt_text(content)?;
+    Some((text.split_whitespace().map(str::to_string).collect(), quoted))
+}
+
+/// The SPF record with `ip6:<target>` in it, and no other `ip6:` term for
+/// an address of this server (`own`). The term goes where the one it
+/// replaces was, else after the last ip4: or ip6: term, and before `all`.
+/// Everything else stays as it is. None when the record cannot be read.
+pub(crate) fn spf_with_ip6(content: &str, target: &str, own: &[String]) -> Option<String> {
+    let (terms, quoted) = spf_terms(content)?;
+    let mut out: Vec<String> = Vec::new();
+    let mut have = false;
+    let mut replaced_at: Option<usize> = None;
+    for t in &terms {
+        if own_ip6_term(t, own) || own_ip6_term(t, &[target.to_string()]) {
+            if !have && own_ip6_term(t, &[target.to_string()]) {
+                have = true;
+                out.push(t.clone());
+            } else {
+                replaced_at.get_or_insert(out.len());
+            }
+            continue;
+        }
+        out.push(t.clone());
+    }
+    if !have {
+        let after_ip = out
+            .iter()
+            .rposition(|t| {
+                let t = spf_unqualified(t).to_ascii_lowercase();
+                t.starts_with("ip4:") || t.starts_with("ip6:")
+            })
+            .map(|i| i + 1);
+        let all = out
+            .iter()
+            .position(|t| spf_unqualified(t).eq_ignore_ascii_case("all"));
+        let mut at = replaced_at.or(after_ip).unwrap_or(out.len());
+        if let Some(all) = all {
+            at = at.min(all);
+        }
+        out.insert(at.max(1).min(out.len()), format!("ip6:{target}"));
+    }
+    Some(if out == terms {
+        content.to_string()
+    } else {
+        txt_content(&out.join(" "), quoted)
+    })
+}
+
+/// The SPF record without an `ip6:` term for any address of this server.
+/// None when the record cannot be read.
+pub(crate) fn spf_without_ip6(content: &str, own: &[String]) -> Option<String> {
+    let (terms, quoted) = spf_terms(content)?;
+    let out: Vec<String> = terms.iter().filter(|t| !own_ip6_term(t, own)).cloned().collect();
+    Some(if out == terms {
+        content.to_string()
+    } else {
+        txt_content(&out.join(" "), quoted)
+    })
+}
+
+/// Does the SPF record let `addr` send by an `ip6:` term of its own?
+pub(crate) fn spf_names_ip6(content: &str, addr: &str) -> bool {
+    spf_terms(content).is_some_and(|(terms, _)| terms.iter().any(|t| own_ip6_term(t, &[addr.to_string()])))
+}
+
+pub(crate) async fn zone_records<Q: Queryable>(q: &mut Q, domain_id: u32) -> AgentResult<Vec<ZoneRec>> {
+    // NULL columns: see list_records.
+    #[allow(clippy::type_complexity)]
+    let rows: Vec<(u64, Option<String>, Option<String>, Option<String>, Option<i8>)> = q
+        .exec(
+            "SELECT id, name, type, content, disabled FROM records \
+             WHERE domain_id = ? AND type IN ('A', 'AAAA', 'CNAME', 'TXT') ORDER BY name, id",
+            (domain_id,),
+        )
+        .await?;
+    Ok(rows
+        .into_iter()
+        .filter_map(|(id, name, rtype, content, disabled)| {
+            Some(ZoneRec {
+                id,
+                name: name?.trim_end_matches('.').to_lowercase(),
+                rtype: rtype?.to_uppercase(),
+                content: content.unwrap_or_default(),
+                disabled: disabled.unwrap_or(0) != 0,
+            })
+        })
+        .collect())
+}
+
+fn parse_choice(content: &str) -> Option<bool> {
+    match content.trim() {
+        "on" => Some(true),
+        "off" => Some(false),
+        _ => None,
+    }
+}
+
+/// The zone's stored IPv6 choice; None when it has none.
+pub(crate) async fn stored_ipv6<Q: Queryable>(q: &mut Q, domain_id: u32) -> AgentResult<Option<bool>> {
+    let content: Option<Option<String>> = q
+        .exec_first(
+            "SELECT content FROM domainmetadata WHERE domain_id = ? AND kind = ? ORDER BY id DESC LIMIT 1",
+            (domain_id, IPV6_META),
+        )
+        .await?;
+    Ok(content.flatten().and_then(|c| parse_choice(&c)))
+}
+
+async fn store_ipv6<Q: Queryable>(q: &mut Q, domain_id: u32, on: bool) -> AgentResult<()> {
+    q.exec_drop(
+        "DELETE FROM domainmetadata WHERE domain_id = ? AND kind = ?",
+        (domain_id, IPV6_META),
+    )
+    .await?;
+    q.exec_drop(
+        "INSERT INTO domainmetadata (domain_id, kind, content) VALUES (?, ?, ?)",
+        (domain_id, IPV6_META, if on { "on" } else { "off" }),
+    )
+    .await?;
+    Ok(())
+}
+
+/// Is IPv6 on for this zone (`ipv6_enabled`)?
+pub(crate) async fn zone_ipv6_on<Q: Queryable>(
+    q: &mut Q,
+    domain_id: u32,
+    zone: &str,
+    own_v6: &[String],
+) -> AgentResult<bool> {
+    let stored = stored_ipv6(q, domain_id).await?;
+    let records = zone_records(q, domain_id).await?;
+    Ok(ipv6_enabled(stored, zone, &records, own_v6))
+}
+
+pub(crate) async fn apply_ipv6<Q: Queryable>(
+    q: &mut Q,
+    domain_id: u32,
+    plan: &Ipv6Plan,
+    target: Option<&str>,
+) -> AgentResult<()> {
+    for (id, _, _) in &plan.remove {
+        q.exec_drop("DELETE FROM records WHERE id = ?", (id,)).await?;
+    }
+    if let Some(target) = target {
+        for (id, _) in &plan.update {
+            q.exec_drop(
+                "UPDATE records SET content = ?, disabled = 0 WHERE id = ?",
+                (target, id),
+            )
+            .await?;
+        }
+        for name in &plan.add {
+            insert_record(q, domain_id, name, "AAAA", target, 0).await?;
+        }
+    }
+    for (id, content) in &plan.spf {
+        q.exec_drop("UPDATE records SET content = ? WHERE id = ?", (content, id))
+            .await?;
+    }
+    Ok(())
+}
+
+/// `mail.<zone>`'s AAAA as IPv6 `on` or off has it, for a mail domain's
+/// records (mail.rs): on gives it the one for this server, off takes this
+/// server's away.
+pub(crate) async fn mail_host_ipv6<Q: Queryable>(
+    q: &mut Q,
+    domain_id: u32,
+    zone: &str,
+    on: bool,
+    own: &OwnAddrs,
+) -> AgentResult<()> {
+    let records = zone_records(q, domain_id).await?;
+    let host = format!("mail.{zone}");
+    let mut plan = Ipv6Plan::default();
+    match (on, own.v6.as_deref()) {
+        (true, Some(target)) => plan_name(&mut plan, &host, &records, target, own),
+        (true, None) => {}
+        (false, _) => {
+            plan.remove = records
+                .iter()
+                .filter(|r| r.name == host && r.rtype == "AAAA" && is_own_ip(&r.content, &own.own_v6))
+                .map(|r| (r.id, r.name.clone(), r.content.clone()))
+                .collect();
+        }
+    }
+    apply_ipv6(q, domain_id, &plan, own.v6.as_deref()).await
+}
+
+/// This server's addresses, for the record writers.
+pub(crate) async fn own_addrs(state: &AppState) -> OwnAddrs {
+    let (facts6, facts4) = tokio::join!(
+        crate::server_ip::ipv6_facts(&state.panel_db, &state.config.panel_host),
+        crate::server_ip::ipv4_facts(&state.config.panel_host),
+    );
+    let v4 = facts4.address();
+    let mut own_v4: Vec<String> = facts4.interfaces.iter().map(|(_, a)| a.clone()).collect();
+    if let Some(a) = &v4 {
+        if !own_v4.contains(a) {
+            own_v4.push(a.clone());
+        }
+    }
+    OwnAddrs {
+        v4,
+        v6: facts6.address(),
+        own_v6: facts6.own(),
+        own_v4,
+    }
+}
+
+/// This server's IPv6 addresses without looking the panel hostname up:
+/// enough to tell which zones have IPv6 on.
+pub(crate) async fn own_ipv6s_quick(panel_db: &crate::db::PanelDb) -> Vec<String> {
+    crate::server_ip::Ipv6Facts {
+        on_interfaces: crate::server_ip::ipv6s_on_interfaces().await,
+        setting: crate::server_ip::ipv6_setting(panel_db),
+        ..Default::default()
+    }
+    .own()
+}
+
+/// One zone's IPv6, for lists and counts.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) struct ZoneIpv6 {
+    pub enabled: bool,
+    pub stored: Option<bool>,
+    /// It has an AAAA record that names this server.
+    pub own_aaaa: bool,
+}
+
+/// Every zone's IPv6 state, in three queries.
+async fn ipv6_states_on<Q: Queryable>(
+    q: &mut Q,
+    own_v6: &[String],
+) -> AgentResult<BTreeMap<String, ZoneIpv6>> {
+    let zones: Vec<(u32, String)> = q.query("SELECT id, name FROM domains").await?;
+    let meta: Vec<(u32, Option<String>)> = q
+        .exec(
+            "SELECT domain_id, content FROM domainmetadata WHERE kind = ? ORDER BY id",
+            (IPV6_META,),
+        )
+        .await?;
+    #[allow(clippy::type_complexity)]
+    let aaaa: Vec<(Option<u32>, Option<String>, Option<String>, Option<i8>)> = q
+        .query("SELECT domain_id, name, content, disabled FROM records WHERE type = 'AAAA'")
+        .await?;
+    let mut out = BTreeMap::new();
+    for (id, name) in zones {
+        let name = name.trim_end_matches('.').to_lowercase();
+        let stored = meta
+            .iter()
+            .filter(|(d, _)| *d == id)
+            .filter_map(|(_, c)| c.as_deref().and_then(parse_choice))
+            .last();
+        let records: Vec<ZoneRec> = aaaa
+            .iter()
+            .filter(|(d, _, _, _)| *d == Some(id))
+            .map(|(_, n, c, dis)| ZoneRec {
+                id: 0,
+                name: n.clone().unwrap_or_default().trim_end_matches('.').to_lowercase(),
+                rtype: "AAAA".into(),
+                content: c.clone().unwrap_or_default(),
+                disabled: dis.unwrap_or(0) != 0,
+            })
+            .collect();
+        let state = ZoneIpv6 {
+            enabled: ipv6_enabled(stored, &name, &records, own_v6),
+            stored,
+            own_aaaa: records.iter().any(|r| is_own_ip(&r.content, own_v6)),
+        };
+        out.insert(name, state);
+    }
+    Ok(out)
+}
+
+/// A connection to the pdns database that never creates it: None on a
+/// server where it does not exist yet.
+async fn pdns_existing(state: &AppState) -> AgentResult<Option<mysql_async::Conn>> {
+    let mut conn = state.mariadb.pool().get_conn().await?;
+    match conn.query_drop(format!("USE `{PDNS_DB}`")).await {
+        Ok(()) => Ok(Some(conn)),
+        Err(e) if is_unknown_database(&e) => Ok(None),
+        Err(e) => Err(e.into()),
+    }
+}
+
+/// Every zone's IPv6 state; empty without a pdns database.
+pub(crate) async fn zone_ipv6_states(
+    state: &AppState,
+    own_v6: &[String],
+) -> AgentResult<BTreeMap<String, ZoneIpv6>> {
+    match pdns_existing(state).await? {
+        Some(mut conn) => ipv6_states_on(&mut conn, own_v6).await,
+        None => Ok(BTreeMap::new()),
+    }
+}
+
+/// Is there an AAAA for `addr` in any zone? For the one-time step at start
+/// (ipv6.rs); None when that cannot be told (MariaDB is not reachable).
+pub(crate) async fn any_aaaa_for(state: &AppState, addrs: &[String]) -> Option<bool> {
+    let mut conn = match pdns_existing(state).await {
+        Ok(Some(conn)) => conn,
+        Ok(None) => return Some(false),
+        Err(_) => return None,
+    };
+    let rows: Vec<Option<String>> = match conn
+        .query("SELECT content FROM records WHERE type = 'AAAA' AND COALESCE(disabled, 0) = 0")
+        .await
+    {
+        Ok(rows) => rows,
+        // No records table: no zones.
+        Err(mysql_async::Error::Server(mysql_async::ServerError { code: 1146, .. })) => {
+            return Some(false)
+        }
+        Err(_) => return None,
+    };
+    Some(rows.iter().flatten().any(|c| is_own_ip(c, addrs)))
+}
+
+/// The zones whose stored choice is IPv6 off. Outgoing mail holds their
+/// mail domains to IPv4 at once (mail_ip.rs), without waiting for public
+/// DNS to show their SPF record without `ip6:`.
+pub(crate) async fn zones_stored_off(state: &AppState) -> AgentResult<BTreeSet<String>> {
+    let Some(mut conn) = pdns_existing(state).await? else {
+        return Ok(BTreeSet::new());
+    };
+    let rows: Vec<(String, Option<String>)> = conn
+        .exec(
+            "SELECT d.name, m.content FROM domainmetadata m JOIN domains d ON d.id = m.domain_id \
+             WHERE m.kind = ? ORDER BY m.id",
+            (IPV6_META,),
+        )
+        .await?;
+    let mut last: BTreeMap<String, Option<bool>> = BTreeMap::new();
+    for (name, content) in rows {
+        last.insert(
+            name.trim_end_matches('.').to_lowercase(),
+            content.as_deref().and_then(parse_choice),
+        );
+    }
+    Ok(last
+        .into_iter()
+        .filter(|(_, on)| *on == Some(false))
+        .map(|(name, _)| name)
+        .collect())
+}
+
+/// One zone's IPv6, for its page.
+pub(crate) struct ZoneIpv6View {
+    pub zone: String,
+    pub enabled: bool,
+    pub has_mail: bool,
+    /// The name servers of the zone that are in it.
+    pub in_zone_ns: Vec<String>,
+    /// What on means for the zone.
+    pub plan: Ipv6Plan,
+}
+
+async fn domain_id_of<Q: Queryable>(q: &mut Q, zone: &str) -> AgentResult<u32> {
+    q.exec_first("SELECT id FROM domains WHERE name = ?", (zone,))
+        .await?
+        .ok_or(AgentError::NotFound)
+}
+
+fn in_zone_ns(zone: &str, ns: &(String, String)) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for host in [&ns.0, &ns.1] {
+        if ns_in_zone(host, zone) && !out.contains(host) {
+            out.push(host.clone());
+        }
+    }
+    out
+}
+
+pub(crate) async fn zone_ipv6_view(
+    state: &AppState,
+    zone: &str,
+    own: &OwnAddrs,
+) -> AgentResult<ZoneIpv6View> {
+    let zone = zone.trim_end_matches('.').to_lowercase();
+    let mut conn = pdns_conn(state).await?;
+    let id = domain_id_of(&mut conn, &zone).await?;
+    let ns = ns_pair_for(&zone, &state.panel_db);
+    let has_mail = mail_domain_exists(&mut conn, &zone).await;
+    let stored = stored_ipv6(&mut conn, id).await?;
+    let records = zone_records(&mut conn, id).await?;
+    let enabled = ipv6_enabled(stored, &zone, &records, &own.own_v6);
+    let plan = plan_ipv6(&zone, [&ns.0, &ns.1], has_mail, &records, true, own, true);
+    Ok(ZoneIpv6View {
+        in_zone_ns: in_zone_ns(&zone, &ns),
+        zone,
+        enabled,
+        has_mail,
+        plan,
+    })
+}
+
+/// Switch the zone's IPv6 on or off: its records change and the choice is
+/// stored, in one transaction. Like every other record change here, nothing
+/// else happens to the zone (no SOA serial bump, no rectify).
+pub(crate) async fn set_zone_ipv6(
+    state: &AppState,
+    zone: &str,
+    on: bool,
+    own: &OwnAddrs,
+) -> AgentResult<Ipv6Plan> {
+    let zone = zone.trim_end_matches('.').to_lowercase();
+    let ns = ns_pair_for(&zone, &state.panel_db);
+    let mut conn = pdns_conn(state).await?;
+    let id = domain_id_of(&mut conn, &zone).await?;
+    let has_mail = mail_domain_exists(&mut conn, &zone).await;
+    let mut tx = conn.start_transaction(mysql_async::TxOpts::default()).await?;
+    let records = zone_records(&mut tx, id).await?;
+    let plan = plan_ipv6(&zone, [&ns.0, &ns.1], has_mail, &records, on, own, true);
+    apply_ipv6(&mut tx, id, &plan, own.v6.as_deref()).await?;
+    store_ipv6(&mut tx, id, on).await?;
+    tx.commit().await?;
+    Ok(plan)
+}
+
+/// Give the zones in `zones` (those with IPv6 on) what on means for
+/// `own.v6`, in one transaction: their AAAA records and `ip6:` terms for the
+/// old address (which `own.own_v6` holds) move to the new one. `write` runs
+/// before the commit, and nothing is changed when it fails; `unwrite` takes
+/// it back when the commit itself fails. Returns how many zones changed.
+pub(crate) async fn move_zones_ipv6(
+    state: &AppState,
+    zones: &[String],
+    own: &OwnAddrs,
+    write: impl FnOnce() -> AgentResult<()>,
+    unwrite: impl FnOnce(),
+) -> AgentResult<usize> {
+    let mut conn = pdns_conn(state).await?;
+    let mut tx = conn.start_transaction(mysql_async::TxOpts::default()).await?;
+    let mut changed = 0;
+    for zone in zones {
+        let Some(id) = tx
+            .exec_first::<u32, _, _>("SELECT id FROM domains WHERE name = ?", (zone,))
+            .await?
+        else {
+            continue;
+        };
+        let ns = ns_pair_for(zone, &state.panel_db);
+        let has_mail = mail_domain_exists(&mut tx, zone).await;
+        let records = zone_records(&mut tx, id).await?;
+        let plan = plan_ipv6(zone, [&ns.0, &ns.1], has_mail, &records, true, own, true);
+        if !plan.add.is_empty() || !plan.update.is_empty() || !plan.remove.is_empty() || !plan.spf.is_empty() {
+            changed += 1;
+        }
+        apply_ipv6(&mut tx, id, &plan, own.v6.as_deref()).await?;
+        store_ipv6(&mut tx, id, true).await?;
+    }
+    write()?;
+    if let Err(e) = tx.commit().await {
+        unwrite();
+        return Err(e.into());
+    }
+    Ok(changed)
 }
 
 #[cfg(test)]

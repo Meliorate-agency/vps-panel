@@ -444,6 +444,7 @@ async fn run_panel_host_task(
                 crate::handlers::dns::CreateZone {
                     name: parent_name.clone(),
                     seed_ip: None,
+                    ipv6: None,
                 },
             )
             .await
@@ -472,6 +473,7 @@ async fn run_panel_host_task(
                 crate::handlers::dns::CreateZone {
                     name: host.clone(),
                     seed_ip: None,
+                    ipv6: None,
                 },
             )
             .await

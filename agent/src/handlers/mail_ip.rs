@@ -6,8 +6,8 @@
 //!   - `smtp_address_preference` (main.cf): the protocol tried first. The
 //!     other one is the fallback.
 //!   - `smtp_bind_address6` (main.cf): set means Postfix may send over IPv6,
-//!     and only from this address: the one AAAA and SPF records publish
-//!     (`server_ip::published_ipv6`). With `smtp_bind_address_enforce` a
+//!     and only from this address: the one published for it (`mail_ipv6`).
+//!     With `smtp_bind_address_enforce` a
 //!     connection that cannot use it fails softly and Postfix goes on to
 //!     IPv4, instead of sending from an address nothing vouches for.
 //!   - `-o inet_protocols=ipv4` on the `smtp` and `relay` services
@@ -35,7 +35,9 @@
 //! (and its entry is harmless until then: the services it names stay).
 //!
 //! IPv6 is switched on for sending only when this server has an address to
-//! send from that the panel hostname publishes, and either the live check
+//! send from that is published for it (the one chosen under Settings > DNS &
+//! SSL > IPv6, else the panel hostname's AAAA; not one the panel merely
+//! picked from the interfaces), and either the live check
 //! (`mail_check::ipv6_check`: reverse DNS, HELO name, SPF) passes or the
 //! operator chose IPv6 with `force`. Without that, a destination that is slow
 //! or greylists over IPv4 made Postfix fall back to an IPv6 address with no
@@ -47,8 +49,10 @@
 //! and its mail then fails SPF whenever Postfix uses IPv6. So each time the
 //! table is built the SPF record of every domain is looked up, and a domain
 //! whose record does not allow the IPv6 address is held to IPv4
-//! (`held_domains`) until it does. A domain set to IPv6 with `force` is the
-//! operator's to decide (`virtual_domains.ip_forced`) and is never held.
+//! (`held_domains`) until it does. So is, at once, a domain whose zone on
+//! this panel has IPv6 switched off (dns.rs), whatever public DNS still
+//! shows. A domain set to IPv6 with `force` is the operator's to decide
+//! (`virtual_domains.ip_forced`) and is never held.
 
 use crate::error::{AgentError, AgentResult};
 use crate::exec;
@@ -613,11 +617,16 @@ fn routes(domains: &[DomainPref], held: &BTreeSet<String>) -> BTreeMap<String, R
 
 /// The domains whose SPF record has to be looked up before the table is
 /// built: all of them, or only `added`, a domain created just now. Not one
-/// set to IPv6 with force: that choice stands whatever the record says.
-fn domains_to_look_up(domains: &[DomainPref], added: Option<&str>) -> Vec<String> {
+/// set to IPv6 with force: that choice stands whatever the record says. Not
+/// one whose zone has IPv6 off (`off`): it is held anyway.
+fn domains_to_look_up(
+    domains: &[DomainPref],
+    added: Option<&str>,
+    off: &BTreeSet<String>,
+) -> Vec<String> {
     domains
         .iter()
-        .filter(|d| fit_for_main_cf(&d.name) && !d.forced_ipv6())
+        .filter(|d| fit_for_main_cf(&d.name) && !d.forced_ipv6() && !off.contains(&d.name))
         .filter(|d| added.is_none_or(|name| name == d.name))
         .map(|d| d.name.clone())
         .collect()
@@ -635,17 +644,25 @@ fn domains_to_look_up(domains: &[DomainPref], added: Option<&str>) -> Vec<String
 /// the table has it (`held_now`), but a domain created just now (`added`),
 /// and every domain when IPv6 is only now being switched on, is held until
 /// a lookup succeeds.
+///
+/// A domain whose zone on this panel has IPv6 off (`off`) is held whatever
+/// the lookup says: its SPF record there has no `ip6:` term for this server
+/// any more, and public DNS shows the old record until it expires.
 fn held_domains(
     domains: &[DomainPref],
     spf: &[(String, Spf)],
     established: bool,
     held_now: &BTreeSet<String>,
     added: Option<&str>,
+    off: &BTreeSet<String>,
 ) -> BTreeSet<String> {
     domains
         .iter()
         .filter(|d| fit_for_main_cf(&d.name) && !d.forced_ipv6())
         .filter(|d| {
+            if off.contains(&d.name) {
+                return true;
+            }
             match spf.iter().find(|(name, _)| *name == d.name).map(|(_, r)| r) {
                 Some(Spf::Pass) | Some(Spf::NoRecord) => false,
                 Some(Spf::Unknown(_)) | None => {
@@ -1056,14 +1073,22 @@ async fn converge(now: &Postfix, want: &Desired) -> AgentResult<bool> {
 // Deciding
 // ---------------------------------------------------------------------------
 
-/// The IPv6 address mail may leave from: the one the panel hostname
-/// publishes, when it is on an interface here. When the lookup gives nothing
-/// (resolver trouble, or the AAAA was taken away) the address Postfix is
-/// pinned to stays for as long as it is still on an interface: a failed
-/// lookup at boot must not switch IPv6 off.
+/// The IPv6 address mail may leave from: one published for it. That is the
+/// address chosen under Settings > DNS & SSL > IPv6 while it is on an
+/// interface, else the one the panel hostname publishes, when it is on an
+/// interface here. An address the panel took by itself because it is the
+/// only one on the interfaces does not count: DNS has it only for the
+/// domains with IPv6 on, and nothing says receivers accept mail from it.
+/// When the lookup gives nothing (resolver trouble, or the AAAA was taken
+/// away) the address Postfix is pinned to stays for as long as it is still
+/// on an interface: a failed lookup at boot must not switch IPv6 off.
+/// Whether Postfix then sends from the address is the live check's to say.
 fn mail_ipv6(postfix: Option<&Postfix>, facts: &Ipv6Facts) -> Option<String> {
     if postfix.is_some_and(|p| !allows_ipv6(&p.inet_protocols)) {
         return None;
+    }
+    if let Some(chosen) = facts.chosen() {
+        return facts.on_interfaces.contains(&chosen).then_some(chosen);
     }
     if facts.published.is_some() {
         return facts.usable();
@@ -1083,24 +1108,27 @@ fn ipv6_missing_reason(postfix: Option<&Postfix>, facts: &Ipv6Facts, helo: &str)
             p.inet_protocols
         );
     }
+    if let Some(chosen) = facts.chosen() {
+        return format!(
+            "The IPv6 address chosen under Settings > DNS & SSL > IPv6, {chosen}, is not an address of this server any more. Choose another one there."
+        );
+    }
     let host = facts.host.as_str();
     let named = host.contains('.') && host.parse::<std::net::IpAddr>().is_err();
     // The first address that is not a private (fc00::/7) one.
-    let own = facts
-        .on_interfaces
-        .iter()
-        .find(|a| !a.starts_with("fc") && !a.starts_with("fd"));
+    let own = facts.on_interfaces.iter().find(|a| !server_ip::is_ula(a));
     match (&facts.published, own) {
         (Some(p), _) => format!(
             "The panel hostname {host} has an AAAA record for {p}, which is not an address of this server."
         ),
         (None, Some(a)) if named => format!(
-            "This server has the IPv6 address {a}, but the panel hostname {host} has no AAAA record for it, so nothing is published for IPv6. \
-             To use IPv6: add the record {host} AAAA {a}, set the reverse DNS of {a} to {helo} at your hosting provider, then run Reconcile on each domain."
+            "This server has the IPv6 address {a}, but outgoing mail does not use it: it is not chosen under Settings > DNS & SSL > IPv6, and the panel hostname {host} has no AAAA record for it. \
+             To send mail over IPv6: choose {a} there, give {helo} an AAAA record for it (for a domain on this panel: switch IPv6 on for that domain under Domains), \
+             and set the reverse DNS of {a} to {helo} at your hosting provider."
         ),
         (None, Some(a)) => format!(
-            "This server has the IPv6 address {a}, but no panel hostname is set, so nothing is published for IPv6. \
-             Set a panel hostname that has an AAAA record for {a} (Settings > Panel hostname)."
+            "This server has the IPv6 address {a}, but outgoing mail does not use it: it is not chosen under Settings > DNS & SSL > IPv6, and no panel hostname is set. \
+             To send mail over IPv6: choose {a} there, and set a panel hostname that resolves to it (Settings > Panel hostname)."
         ),
         (None, None) => "This server has no public IPv6 address.".to_string(),
     }
@@ -1264,6 +1292,9 @@ pub(crate) struct MailAddrs {
     /// The domains it sends over IPv4 only all the same, because their SPF
     /// record did not allow `ipv6`.
     pub held: Vec<String>,
+    /// The zones on this panel whose IPv6 is switched off: their mail
+    /// domains are held to IPv4 whatever public DNS shows (`held_domains`).
+    pub ipv6_off: Vec<String>,
 }
 
 impl MailAddrs {
@@ -1327,11 +1358,12 @@ fn addrs_from(
         relayhost: postfix.map(|p| p.relayhost.clone()).unwrap_or_default(),
         sends_ipv6,
         held,
+        ipv6_off: Vec::new(),
     }
 }
 
 async fn gather_addrs(state: &AppState, postfix: Option<&Postfix>) -> MailAddrs {
-    let facts = server_ip::ipv6_facts(&state.config.panel_host).await;
+    let facts = server_ip::ipv6_facts(&state.panel_db, &state.config.panel_host).await;
     let facts4 = server_ip::ipv4_facts(&state.config.panel_host).await;
     // Which way its connections would go is only asked for an address that
     // would have to be pinned.
@@ -1340,7 +1372,12 @@ async fn gather_addrs(state: &AppState, postfix: Option<&Postfix>) -> MailAddrs 
         (Ipv4Source::CannotPin { .. }, Some(addr)) => server_ip::route_dev_from(addr).await,
         _ => None,
     };
-    addrs_from(postfix, facts, facts4, leaves_by.as_deref())
+    let mut addrs = addrs_from(postfix, facts, facts4, leaves_by.as_deref());
+    match crate::handlers::dns::zones_stored_off(state).await {
+        Ok(off) => addrs.ipv6_off = off.into_iter().collect(),
+        Err(e) => tracing::warn!(error = %e, "could not read which zones have IPv6 off"),
+    }
+    addrs
 }
 
 pub(crate) async fn mail_addrs(state: &AppState) -> MailAddrs {
@@ -1366,6 +1403,7 @@ async fn domain_prefs(state: &AppState) -> AgentResult<Vec<DomainPref>> {
 /// Look up the SPF records and decide which domains to hold to IPv4
 /// (`held_domains`). `ipv6` is the address mail would leave from, `kept`
 /// whether Postfix already sends over IPv6 from it.
+#[allow(clippy::too_many_arguments)]
 async fn holds(
     postfix: &Postfix,
     domains: &[DomainPref],
@@ -1373,17 +1411,18 @@ async fn holds(
     kept: bool,
     trigger: Trigger<'_>,
     dig: &Dig,
+    off: &BTreeSet<String>,
 ) -> BTreeSet<String> {
     let added = match trigger {
         Trigger::DomainAdded(name) => Some(name),
         _ => None,
     };
-    let names = domains_to_look_up(domains, added);
+    let names = domains_to_look_up(domains, added, off);
     let spf = match ipv6.parse::<std::net::IpAddr>() {
         Ok(ip) if !names.is_empty() => mail_check::spf_sweep(dig, &names, ip).await,
         _ => Vec::new(),
     };
-    held_domains(domains, &spf, kept, &applied_holds(&postfix.sender_maps), added)
+    held_domains(domains, &spf, kept, &applied_holds(&postfix.sender_maps), added, off)
 }
 
 /// Work out what Postfix should be set to and bring it there. `default` is
@@ -1429,7 +1468,8 @@ async fn settle(
         (None, _) => applied,
         // A server without IPv4 has nothing to hold a domain to.
         (Some(domains), Ipv6Use::From(addr)) if addrs.has_ipv4 => {
-            let held = holds(postfix, domains, addr, kept, trigger, dig).await;
+            let off: BTreeSet<String> = addrs.ipv6_off.iter().cloned().collect();
+            let held = holds(postfix, domains, addr, kept, trigger, dig, &off).await;
             routes(domains, &held)
         }
         (Some(domains), _) => routes(domains, &BTreeSet::new()),
@@ -1467,6 +1507,12 @@ async fn require_spf_allows(domain: &str, addrs: &MailAddrs, dig: &Dig) -> Agent
     };
     if !addrs.has_ipv4 || !fit_for_main_cf(domain) {
         return Ok(());
+    }
+    if addrs.ipv6_off.iter().any(|zone| zone == domain) {
+        return Err(AgentError::Conflict(format!(
+            "IPv6 is off for {domain} (Domains > {domain} > IPv6), so its SPF record does not allow mail from {v6}. \
+             Switch IPv6 on for {domain} first, or choose IPv6 with \"Use IPv6 anyway\"."
+        )));
     }
     match mail_check::spf_check(dig, domain, ip).await.result {
         Spf::Pass | Spf::NoRecord | Spf::Unknown(_) => Ok(()),
@@ -1545,7 +1591,7 @@ fn notes(postfix: &Postfix, addrs: &MailAddrs, domains: &[DomainPref]) -> Vec<St
                 "ipv4" => format!("Postfix tries IPv4 first, from {v4}, and falls back to IPv6 ({a})."),
                 _ => format!("Postfix sends over IPv4 ({v4}) and IPv6 ({a})."),
             });
-            if addrs.facts.published.is_none() {
+            if addrs.facts.published.is_none() && addrs.facts.chosen().is_none() {
                 notes.push(format!(
                     "The panel hostname {} no longer has an AAAA record for {a}. Run the check before receivers start refusing mail sent over IPv6.",
                     addrs.facts.host
@@ -1565,11 +1611,22 @@ fn notes(postfix: &Postfix, addrs: &MailAddrs, domains: &[DomainPref]) -> Vec<St
                     stale.join(", ")
                 ));
             }
-            let held: Vec<String> = domains
+            let (off, held): (Vec<String>, Vec<String>) = domains
                 .iter()
                 .filter(|d| applied.get(&d.name) == Some(&Route::Ipv4Only) && !d.forced_ipv6())
                 .map(|d| d.name.clone())
-                .collect();
+                .partition(|name| addrs.ipv6_off.contains(name));
+            if !off.is_empty() {
+                let (that, its) = if off.len() == 1 {
+                    ("that domain", "its")
+                } else {
+                    ("those domains", "their")
+                };
+                notes.push(format!(
+                    "Mail from {} goes out over IPv4 only, because IPv6 is off for {that} under Domains. Switch it on there to send {its} mail over IPv6 too.",
+                    mail_check::join_names(&off)
+                ));
+            }
             if !held.is_empty() {
                 let (its, that) = if held.len() == 1 {
                     ("its", "that domain")
@@ -1815,6 +1872,13 @@ pub(crate) async fn domain_added(state: &AppState, name: &str) -> Option<String>
         return None;
     }
     let after = read_postfix().await.ok()?;
+    if addrs.ipv6_off.iter().any(|zone| zone == name) {
+        return applied_holds(&after.sender_maps).contains(name).then(|| {
+            format!(
+                "Mail from {name} goes out over IPv4 only: IPv6 is off for {name} (Domains > {name} > IPv6). Switch it on there to send its mail over IPv6 too."
+            )
+        });
+    }
     applied_holds(&after.sender_maps).contains(name).then(|| {
         format!(
             "Mail from {name} goes out over IPv4 only for now: its SPF record does not allow mail from {v6} yet, or could not be looked up. \
@@ -2095,7 +2159,13 @@ submission inet  n       -       y       -       -       smtpd -o syslog_name=po
             host: "panel.example.com".into(),
             published: published.map(str::to_string),
             on_interfaces: on.iter().map(|s| s.to_string()).collect(),
+            setting: String::new(),
         }
+    }
+
+    /// `facts` with an address chosen under Settings > DNS & SSL > IPv6.
+    fn chosen(published: Option<&str>, on: &[&str], setting: &str) -> Ipv6Facts {
+        Ipv6Facts { setting: setting.to_string(), ..facts(published, on) }
     }
 
     /// The first interface address is the one connections leave from.
@@ -2287,7 +2357,7 @@ submission inet  n       -       y       -       -       smtpd -o syslog_name=po
             routes(&domains, &all_held),
             entries(&[("example.com", Route::Ipv4Only), ("follows.example", Route::Ipv4Only)])
         );
-        assert_eq!(domains_to_look_up(&domains, None), strs(&["example.com", "follows.example"]));
+        assert_eq!(domains_to_look_up(&domains, None, &BTreeSet::new()), strs(&["example.com", "follows.example"]));
         assert_eq!(Preference::from_db(" ipv6 "), Preference::Ipv6);
         assert_eq!(Preference::from_db("nonsense"), Preference::Default);
     }
@@ -2309,7 +2379,7 @@ submission inet  n       -       y       -       -       smtpd -o syslog_name=po
             ("none.example".to_string(), Spf::NoRecord),
             ("broken.example".to_string(), Spf::Broken("it needs more than 10 DNS lookups".into())),
         ];
-        let held = held_domains(&domains, &spf, true, &BTreeSet::new(), None);
+        let held = held_domains(&domains, &spf, true, &BTreeSet::new(), None, &BTreeSet::new());
         assert_eq!(held, names(&["lacks.example", "soft.example", "broken.example"]));
         // Held whatever was chosen for the domain; the others as chosen.
         assert_eq!(
@@ -2324,7 +2394,7 @@ submission inet  n       -       y       -       -       smtpd -o syslog_name=po
         // The record was fixed: the next build of the table lets the domain go.
         let fixed = vec![("lacks.example".to_string(), Spf::Pass)];
         let one = vec![pref("lacks.example", Preference::Default)];
-        assert!(held_domains(&one, &fixed, true, &names(&["lacks.example"]), None).is_empty());
+        assert!(held_domains(&one, &fixed, true, &names(&["lacks.example"]), None, &BTreeSet::new()).is_empty());
         assert!(routes(&one, &BTreeSet::new()).is_empty());
     }
 
@@ -2342,24 +2412,24 @@ submission inet  n       -       y       -       -       smtpd -o syslog_name=po
         ];
         let held_now = names(&["held.example"]);
         // Postfix already sends over IPv6: every domain stays as the table has it.
-        assert_eq!(held_domains(&domains, &spf, true, &held_now, None), held_now);
+        assert_eq!(held_domains(&domains, &spf, true, &held_now, None, &BTreeSet::new()), held_now);
         // IPv6 is only now being switched on: nothing is known, all are held.
         assert_eq!(
-            held_domains(&domains, &spf, false, &BTreeSet::new(), None),
+            held_domains(&domains, &spf, false, &BTreeSet::new(), None, &BTreeSet::new()),
             names(&["free.example", "held.example", "slow.example"])
         );
         // A domain created just now is held until its record was seen...
         assert_eq!(
-            held_domains(&domains, &[], true, &held_now, Some("slow.example")),
+            held_domains(&domains, &[], true, &held_now, Some("slow.example"), &BTreeSet::new()),
             names(&["held.example", "slow.example"])
         );
         // ...and only that one is looked up then; the others keep their state.
-        assert_eq!(domains_to_look_up(&domains, Some("slow.example")), strs(&["slow.example"]));
+        assert_eq!(domains_to_look_up(&domains, Some("slow.example"), &BTreeSet::new()), strs(&["slow.example"]));
         let seen = vec![("slow.example".to_string(), Spf::Pass)];
-        assert_eq!(held_domains(&domains, &seen, true, &held_now, Some("slow.example")), held_now);
+        assert_eq!(held_domains(&domains, &seen, true, &held_now, Some("slow.example"), &BTreeSet::new()), held_now);
         let seen = vec![("slow.example".to_string(), Spf::Fail)];
         assert_eq!(
-            held_domains(&domains, &seen, true, &BTreeSet::new(), Some("slow.example")),
+            held_domains(&domains, &seen, true, &BTreeSet::new(), Some("slow.example"), &BTreeSet::new()),
             names(&["slow.example"])
         );
     }
@@ -2372,9 +2442,9 @@ submission inet  n       -       y       -       -       smtpd -o syslog_name=po
             ("other.example".to_string(), Spf::Fail),
         ];
         // Its record is not even looked up.
-        assert_eq!(domains_to_look_up(&domains, None), strs(&["other.example"]));
-        assert_eq!(domains_to_look_up(&domains, Some("mine.example")), Vec::<String>::new());
-        let held = held_domains(&domains, &spf, false, &names(&["mine.example"]), Some("mine.example"));
+        assert_eq!(domains_to_look_up(&domains, None, &BTreeSet::new()), strs(&["other.example"]));
+        assert_eq!(domains_to_look_up(&domains, Some("mine.example"), &BTreeSet::new()), Vec::<String>::new());
+        let held = held_domains(&domains, &spf, false, &names(&["mine.example"]), Some("mine.example"), &BTreeSet::new());
         assert_eq!(held, names(&["other.example"]));
         assert_eq!(
             routes(&domains, &names(&["mine.example", "other.example"])),
@@ -2895,6 +2965,29 @@ submission inet  n       -       y       -       -       smtpd -o syslog_name=po
     }
 
     #[test]
+    fn the_address_chosen_counts_for_mail_and_one_the_panel_picked_does_not() {
+        let p = legacy();
+        let other = "2001:db8:1::2";
+        // Chosen: it, whatever the panel hostname says, while it is here.
+        assert_eq!(mail_ipv6(Some(&p), &chosen(Some(V6), &[V6, other], other)).as_deref(), Some(other));
+        assert_eq!(mail_ipv6(Some(&p), &chosen(None, &[V6], V6)).as_deref(), Some(V6));
+        assert_eq!(mail_ipv6(Some(&p), &chosen(Some(V6), &[V6], other)), None);
+        // Not even the address Postfix is pinned to stands in for it.
+        let mut pinned = legacy();
+        pinned.bind6 = Some(V6.into());
+        assert_eq!(mail_ipv6(Some(&pinned), &chosen(None, &[V6], other)), None);
+        // Automatic: the only address on the interfaces is what DNS records
+        // get (server_ip::Ipv6Facts::address), but mail does not use it
+        // without the panel hostname's AAAA.
+        let picked = facts(None, &[V6]);
+        assert_eq!(picked.address().as_deref(), Some(V6));
+        assert_eq!(mail_ipv6(Some(&p), &picked), None);
+        let a = addrs(&p, picked);
+        assert!(a.ipv6.is_none());
+        assert!(a.ipv6_missing.unwrap().contains("outgoing mail does not use it"));
+    }
+
+    #[test]
     fn the_ipv4_address_is_pinned_only_when_the_kernel_would_pick_another_and_it_is_safe() {
         // One public address: the kernel sends from it by itself.
         assert_eq!(ipv4_source(Some(V4), &one_v4(), None), Ipv4Source::AsPublished);
@@ -2995,8 +3088,13 @@ submission inet  n       -       y       -       -       smtpd -o syslog_name=po
     fn the_reason_for_no_ipv6_says_what_to_do() {
         let p = legacy();
         let r = ipv6_missing_reason(Some(&p), &facts(None, &["fd00::5", V6]), "panel.example.com");
-        assert!(r.contains(&format!("panel.example.com AAAA {V6}")), "{r}");
-        assert!(r.contains("reverse DNS") && r.contains("Reconcile"), "{r}");
+        assert!(r.contains(&format!("choose {V6} there")), "{r}");
+        assert!(r.contains("Settings > DNS & SSL > IPv6"), "{r}");
+        assert!(r.contains("switch IPv6 on for that domain under Domains"), "{r}");
+        assert!(r.contains("reverse DNS") && !r.contains("Reconcile"), "{r}");
+        // An address chosen that has left the server since.
+        let r = ipv6_missing_reason(Some(&p), &chosen(None, &[V6], "2001:db8:9::9"), "panel.example.com");
+        assert!(r.contains("2001:db8:9::9, is not an address of this server any more"), "{r}");
         let r = ipv6_missing_reason(Some(&p), &facts(Some("2606:4700::1"), &[V6]), "panel.example.com");
         assert!(r.contains("not an address of this server"), "{r}");
         assert_eq!(

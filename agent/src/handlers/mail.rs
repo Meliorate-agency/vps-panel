@@ -503,8 +503,14 @@ async fn publish_mail_records(
         return Ok(false);
     };
 
-    let server_ip = crate::server_ip::resolve_ipv4(None, &state.config.panel_host).await;
-    let server_ip_v6 = crate::server_ip::published_ipv6(None, &state.config.panel_host).await;
+    let own = crate::handlers::dns::own_addrs(state).await;
+    let server_ip = own.v4.clone();
+    // IPv6 as the zone has it (dns.rs): with IPv6 on, mail.<d> gets its
+    // AAAA and SPF its `ip6:` term; with IPv6 off neither, and this server's
+    // are taken away.
+    let ipv6_on =
+        crate::handlers::dns::zone_ipv6_on(&mut pconn, domain_id, domain, &own.own_v6).await?;
+    let server_ip_v6 = own.v6.clone().filter(|_| ipv6_on);
 
     let dkim_value = format!("\"v=DKIM1; k=rsa; p={dkim_pubkey}\"");
     let spf = crate::handlers::dns::format_spf(server_ip.as_deref(), server_ip_v6.as_deref());
@@ -516,15 +522,29 @@ async fn publish_mail_records(
     );
 
     upsert_txt_prefixed(&mut pconn, domain_id, &format!("{DKIM_SELECTOR}._domainkey.{domain}"), "v=DKIM1", &dkim_value).await?;
-    upsert_txt_prefixed(&mut pconn, domain_id, domain, "v=spf1", &spf).await?;
+    // IPv6 on without an address to name: an SPF record there is stays as
+    // it is, with its `ip6:` term (reconcile_zone does the same).
+    let keep_spf = ipv6_on
+        && own.v6.is_none()
+        && pconn
+            .exec_first::<u32, _, _>(
+                "SELECT id FROM records WHERE domain_id = ? AND name = ? AND type = 'TXT' \
+                 AND TRIM(LEADING '\"' FROM content) LIKE 'v=spf1%' LIMIT 1",
+                (domain_id, domain),
+            )
+            .await?
+            .is_some();
+    if !keep_spf {
+        upsert_txt_prefixed(&mut pconn, domain_id, domain, "v=spf1", &spf).await?;
+    }
     upsert_txt_prefixed(&mut pconn, domain_id, &format!("_dmarc.{domain}"), "v=DMARC1", &dmarc).await?;
     upsert_record(&mut pconn, domain_id, domain, "MX", &format!("mail.{domain}"), 10).await?;
 
     if let Some(ip) = &server_ip {
         upsert_record(&mut pconn, domain_id, &format!("mail.{domain}"), "A", ip, 0).await?;
     }
-    if let Some(ip6) = &server_ip_v6 {
-        upsert_record(&mut pconn, domain_id, &format!("mail.{domain}"), "AAAA", ip6, 0).await?;
+    if !crate::handlers::dns::cname_at(&mut pconn, domain_id, &format!("mail.{domain}")).await? {
+        crate::handlers::dns::mail_host_ipv6(&mut pconn, domain_id, domain, ipv6_on, &own).await?;
     }
 
     Ok(true)
