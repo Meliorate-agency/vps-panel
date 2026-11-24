@@ -86,6 +86,8 @@ async fn serve() -> Result<()> {
     if let Err(e) = handlers::panel_access::ensure_file().await {
         tracing::warn!(error = %e, "could not create the panel access file");
     }
+    // Settings > Privacy: log format and log retention, as stored.
+    tokio::spawn(handlers::privacy::ensure_at_startup(state.clone()));
     // Collects /files trash entries past their 30-day retention.
     tokio::spawn(handlers::files::purge_loop());
     // Failed units and a filling disk, for /notifications.

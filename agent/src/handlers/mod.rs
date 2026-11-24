@@ -19,6 +19,7 @@ pub mod mail_log;
 pub mod nginx;
 pub mod panel_access;
 pub mod postgres;
+pub mod privacy;
 pub mod quick_install;
 pub mod redirects;
 pub mod sites;
@@ -200,6 +201,9 @@ pub fn router(state: AppState) -> Router {
             "/fail2ban/jails/{jail}/failed-by-ip",
             get(firewall::failed_by_ip),
         )
+        // Privacy: what the logs hold and for how long (privacy.rs)
+        .route("/privacy/status", get(privacy::status))
+        .route("/privacy/apply", post(privacy::apply))
         // SSH keys + server config
         .route("/ssh/keys", get(ssh::list).post(ssh::add))
         .route("/ssh/keys/{fp}", delete(ssh::remove))
