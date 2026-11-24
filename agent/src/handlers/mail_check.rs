@@ -2429,6 +2429,90 @@ mod tests {
         assert_eq!(spf_sweep_item(&domains, &results, V6, &[], &[]).status, Status::Fail);
     }
 
+    #[tokio::test]
+    async fn a_domain_with_ipv6_off_is_checked_for_ipv4_and_told_where_the_switch_is() {
+        let ns = vec!["ns1.example.com".to_string(), "ns2.example.com".to_string()];
+        let own = vec![V6.to_string()];
+        // What a zone with IPv6 off publishes.
+        let dns = Table::default()
+            .with("example.com", "NS", &["ns1.example.com", "ns2.example.com"])
+            .with("example.com", "MX", &["mail.example.com"])
+            .with("mail.example.com", "A", &[V4])
+            .with("example.com", "TXT", &["v=spf1 mx ip4:198.51.100.127 -all"])
+            .with("default._domainkey.example.com", "TXT", &[&format!("v=DKIM1; k=rsa; p={KEY}")])
+            .with("_dmarc.example.com", "TXT", &["v=DMARC1; p=none"]);
+        let mut c = ctx(Some(&ns), Some(V6), &own);
+        c.ipv6_off = true;
+        let (_, checks) = domain_checks(&dns, &c).await;
+        // Nothing fails: no AAAA and no ip6 is what off means.
+        assert!(checks.iter().all(|i| i.status == Status::Ok), "{checks:?}");
+        assert!(status_of(&checks, "aaaa").1.contains("IPv6 is off for example.com (Domains > example.com > IPv6)"));
+        assert!(!status_of(&checks, "spf").1.contains("Reconcile"));
+        // Held to IPv4 for it: the switch is named, not Reconcile.
+        c.ipv6_route = Some(Ipv6Route::Held);
+        let (_, checks) = domain_checks(&dns, &c).await;
+        let (status, detail) = status_of(&checks, "ipv6");
+        assert_eq!(status, Status::Warn);
+        assert!(detail.contains("IPv6 is off for example.com (Domains > example.com > IPv6)"), "{detail}");
+        assert!(detail.contains("Switch IPv6 on for example.com"), "{detail}");
+        // With IPv6 on, the same records still ask for Reconcile.
+        c.ipv6_off = false;
+        let (_, checks) = domain_checks(&dns, &c).await;
+        assert!(status_of(&checks, "spf").1.contains("Run Reconcile on example.com"));
+    }
+
+    #[test]
+    fn a_helo_name_in_a_zone_here_is_published_by_the_switch() {
+        let zone_off = ("example.com".to_string(), false);
+        let zone_on = ("example.com".to_string(), true);
+        let it = helo_item(&Lookup::Empty, "panel.example.com", V6, Family::V6, Some(&zone_off));
+        assert_eq!(it.status, Status::Fail);
+        assert!(it.detail.contains("has no AAAA record"), "{}", it.detail);
+        assert!(it.detail.contains("switch IPv6 on for it (Domains > example.com > IPv6) to publish panel.example.com AAAA 2001:db8:1::1"), "{}", it.detail);
+        let it = helo_item(&Lookup::Records(vec!["2001:db8:ffff::1".into()]), "panel.example.com", V6, Family::V6, Some(&zone_on));
+        assert!(it.detail.contains("resolves to 2001:db8:ffff::1, not 2001:db8:1::1"), "{}", it.detail);
+        assert!(it.detail.contains("run Reconcile on example.com"), "{}", it.detail);
+        // Right already, or a name hosted elsewhere, or IPv4: as before.
+        assert_eq!(helo_item(&Lookup::Records(vec![V6.into()]), "panel.example.com", V6, Family::V6, Some(&zone_off)).status, Status::Ok);
+        assert!(helo_item(&Lookup::Empty, "panel.example.com", V6, Family::V6, None).detail.contains("Add the record panel.example.com AAAA"));
+        assert!(helo_item(&Lookup::Empty, "panel.example.com", V4, Family::V4, Some(&zone_off)).detail.contains("Add the record panel.example.com A"));
+        // The reverse name that does not resolve back is the HELO name.
+        let forward = vec![("panel.example.com".to_string(), Lookup::Empty)];
+        let it = fcrdns_item(&forward, V6, "panel.example.com", Family::V6, Some(&zone_off));
+        assert!(it.detail.contains("at your hosting provider. Its zone example.com is on this panel"), "{}", it.detail);
+        let it = fcrdns_item(&forward, V6, "panel.example.com", Family::V6, None);
+        assert!(it.detail.ends_with("at your hosting provider, or add the record panel.example.com AAAA 2001:db8:1::1."), "{}", it.detail);
+    }
+
+    #[test]
+    fn the_ipv6_address_item_says_the_address_was_chosen() {
+        let mut a = v4_addrs(V4, &[("eth0", V4)], Some(V4), Ipv4Source::AsPublished, Bind4::Unset);
+        a.ipv6 = Some(V6.into());
+        a.facts = Ipv6Facts { host: "panel.example.com".into(), published: None, on_interfaces: vec![V6.into()], setting: V6.into() };
+        let it = ipv6_address_item(&a);
+        assert_eq!(it.status, Status::Ok);
+        assert!(it.detail.contains("chosen under Settings > DNS & SSL > IPv6"), "{}", it.detail);
+        // Automatic, kept because Postfix is pinned to it: as before.
+        a.facts.setting.clear();
+        assert_eq!(ipv6_address_item(&a).status, Status::Warn);
+    }
+
+    #[test]
+    fn domains_with_ipv6_off_do_not_keep_ipv6_from_being_ready() {
+        let domains = vec!["example.com".to_string(), "off.example".to_string(), "old.example".to_string()];
+        let results = vec![
+            ("example.com".to_string(), Spf::Pass),
+            ("off.example".to_string(), Spf::Fail),
+            ("old.example".to_string(), Spf::Fail),
+        ];
+        let it = spf_sweep_item(&domains, &results, V6, &["old.example".to_string()], &["off.example".to_string()]);
+        assert_eq!(it.status, Status::Warn);
+        assert!(it.detail.contains("The SPF record of old.example does not allow mail from 2001:db8:1::1"), "{}", it.detail);
+        assert!(it.detail.contains("IPv6 is off for off.example under Domains, so its SPF record does not allow"), "{}", it.detail);
+        // Not held and not off: it blocks, as before.
+        assert_eq!(spf_sweep_item(&domains, &results, V6, &[], &["off.example".to_string()]).status, Status::Fail);
+    }
+
     #[test]
     fn the_dkim_key_is_compared_without_whitespace() {
         assert_eq!(dkim_public_key("v=DKIM1; k=rsa; p=AB CD\tEF").as_deref(), Some("ABCDEF"));

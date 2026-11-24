@@ -2435,6 +2435,41 @@ submission inet  n       -       y       -       -       smtpd -o syslog_name=po
     }
 
     #[test]
+    fn a_domain_whose_zone_has_ipv6_off_is_held_at_once() {
+        let domains = vec![
+            pref("off.example", Preference::Default),
+            pref("on.example", Preference::Ipv6),
+            forced("forced.example"),
+        ];
+        let off = names(&["off.example", "forced.example"]);
+        // Public DNS still shows the record with ip6: held all the same, and
+        // not even looked up. A forced choice stands.
+        let spf = vec![("on.example".to_string(), Spf::Pass)];
+        assert_eq!(domains_to_look_up(&domains, None, &off), strs(&["on.example"]));
+        assert_eq!(held_domains(&domains, &spf, true, &BTreeSet::new(), None, &off), names(&["off.example"]));
+        assert_eq!(
+            routes(&domains, &names(&["off.example"])),
+            entries(&[("off.example", Route::Ipv4Only), ("on.example", Route::Ipv6), ("forced.example", Route::Ipv6)])
+        );
+        // Switched on again: the lookup decides, as for any domain.
+        let spf = vec![("off.example".to_string(), Spf::Pass), ("on.example".to_string(), Spf::Pass)];
+        assert!(held_domains(&domains, &spf, true, &names(&["off.example"]), None, &BTreeSet::new()).is_empty());
+
+        // The settings say why, and what to do.
+        let on = sending_v6("ipv4", "inline:{@lacks.example=smtp-ipv4only:,@off.example=smtp-ipv4only:}");
+        let mut a = addrs(&on, facts(Some(V6), &[V6]));
+        a.ipv6_off = strs(&["off.example"]);
+        let prefs = vec![pref("lacks.example", Preference::Default), pref("off.example", Preference::Default)];
+        let s = build_settings(&on, &a, &prefs);
+        assert!(
+            s.notes.iter().any(|n| n.starts_with("Mail from off.example goes out over IPv4 only, because IPv6 is off for that domain under Domains")),
+            "{:?}",
+            s.notes
+        );
+        assert!(s.notes.iter().any(|n| n.starts_with("Mail from lacks.example goes out over IPv4 only: when Postfix was last set up")), "{:?}", s.notes);
+    }
+
+    #[test]
     fn a_domain_set_to_ipv6_with_force_is_never_held() {
         let domains = vec![forced("mine.example"), pref("other.example", Preference::Ipv6)];
         let spf = vec![

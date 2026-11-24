@@ -2448,7 +2448,11 @@ pub(crate) async fn move_zones_ipv6(
 
 #[cfg(test)]
 mod tests {
-    use super::{format_spf, is_own_address, judge_public_dns, txt_has_prefix};
+    use super::{
+        format_spf, ipv6_enabled, is_own_address, judge_public_dns, plan_ipv6, spf_names_ip6,
+        spf_with_ip6, spf_without_ip6, txt_content, txt_has_prefix, txt_text, Ipv6Plan, OwnAddrs,
+        ZoneRec,
+    };
 
     fn list(items: &[&str]) -> Vec<String> {
         items.iter().map(|s| s.to_string()).collect()
@@ -2540,5 +2544,299 @@ mod tests {
         assert!(txt_has_prefix("v=spf1 include:_spf.example.net ~all", "\"v=spf1"));
         assert!(!txt_has_prefix("\"google-site-verification=abc\"", "\"v=spf1"));
         assert!(!txt_has_prefix("\"v=DMARC1; p=none\"", "\"v=DKIM1"));
+    }
+
+    const V4: &str = "198.51.100.127";
+    const V6: &str = "2001:db8:1::1";
+    /// Another address of this server.
+    const V6B: &str = "2001:db8:1::2";
+    const FOREIGN6: &str = "2001:db8:ffff::1";
+
+    fn own() -> OwnAddrs {
+        OwnAddrs {
+            v4: Some(V4.into()),
+            v6: Some(V6.into()),
+            own_v6: vec![V6.into(), V6B.into()],
+            own_v4: vec![V4.into()],
+        }
+    }
+
+    /// A zone as create_zone writes it, with `extra` (name, type, content).
+    fn zone(extra: &[(&str, &str, &str)], with_v6: bool, spf: Option<&str>) -> Vec<ZoneRec> {
+        let mut rows: Vec<(String, String, String)> = vec![];
+        for name in ["example.com", "www.example.com", "mail.example.com", "ns1.example.com", "ns2.example.com"] {
+            rows.push((name.into(), "A".into(), V4.into()));
+            if with_v6 {
+                rows.push((name.into(), "AAAA".into(), V6.into()));
+            }
+        }
+        if let Some(spf) = spf {
+            rows.push(("example.com".into(), "TXT".into(), spf.into()));
+        }
+        rows.push(("example.com".into(), "TXT".into(), "\"google-site-verification=abc\"".into()));
+        for (n, t, c) in extra {
+            rows.push((n.to_string(), t.to_string(), c.to_string()));
+        }
+        rows.into_iter()
+            .enumerate()
+            .map(|(i, (name, rtype, content))| ZoneRec { id: i as u64 + 1, name, rtype, content, disabled: false })
+            .collect()
+    }
+
+    const NS: [&str; 2] = ["ns1.example.com", "ns2.example.com"];
+
+    fn names(plan: &Ipv6Plan) -> Vec<&str> {
+        plan.add.iter().map(String::as_str).collect()
+    }
+
+    #[test]
+    fn a_zone_without_a_stored_choice_keeps_what_its_apex_has() {
+        let own = own().own_v6;
+        // From before the choice existed, written while IPv6 was published.
+        assert!(ipv6_enabled(None, "example.com", &zone(&[], true, None), &own));
+        // Without IPv6 records, or with an AAAA for another machine at the apex.
+        assert!(!ipv6_enabled(None, "example.com", &zone(&[], false, None), &own));
+        let foreign = zone(&[("example.com", "AAAA", FOREIGN6)], false, None);
+        assert!(!ipv6_enabled(None, "example.com", &foreign, &own));
+        // Another address of this server counts, in any spelling.
+        let other = zone(&[("example.com", "AAAA", "2001:DB8:1:0::2")], false, None);
+        assert!(ipv6_enabled(None, "example.com", &other, &own));
+        // Only the apex decides; a disabled record does not count.
+        let sub = zone(&[("shop.example.com", "AAAA", V6)], false, None);
+        assert!(!ipv6_enabled(None, "example.com", &sub, &own));
+        let mut disabled = zone(&[("example.com", "AAAA", V6)], false, None);
+        disabled.last_mut().unwrap().disabled = true;
+        assert!(!ipv6_enabled(None, "example.com", &disabled, &own));
+        // A stored choice wins either way.
+        assert!(!ipv6_enabled(Some(false), "example.com", &zone(&[], true, None), &own));
+        assert!(ipv6_enabled(Some(true), "example.com", &zone(&[], false, None), &own));
+        // Interfaces that could not be read: off, and then nothing is ours to remove.
+        assert!(!ipv6_enabled(None, "example.com", &zone(&[], true, None), &[]));
+    }
+
+    #[test]
+    fn on_gives_the_standard_names_the_name_servers_and_every_site_here_an_aaaa() {
+        let recs = zone(
+            &[
+                ("shop.example.com", "A", V4),
+                ("panel.example.com", "A", V4),
+                ("blog.example.com", "A", "203.0.113.50"),
+                ("docs.example.com", "CNAME", "example.github.io"),
+                ("old.example.com", "A", "203.0.113.50"),
+            ],
+            false,
+            None,
+        );
+        let plan = plan_ipv6("example.com", NS, false, &recs, true, &own(), true);
+        assert_eq!(
+            names(&plan),
+            vec![
+                "example.com",
+                "www.example.com",
+                "ns1.example.com",
+                "ns2.example.com",
+                "mail.example.com",
+                "shop.example.com",
+                "panel.example.com",
+            ]
+        );
+        assert!(plan.remove.is_empty() && plan.update.is_empty() && plan.spf.is_empty());
+        // What on means, for the panel: the same names, none there yet.
+        assert_eq!(plan.records.len(), 7);
+        assert!(plan.records.iter().all(|r| r.rtype == "AAAA" && r.content == V6 && !r.present));
+        // A name pointing elsewhere over IPv4 is not even a candidate; a
+        // CNAME is left alone silently.
+        assert!(!names(&plan).contains(&"blog.example.com"));
+        assert!(!plan.skipped.iter().any(|s| s.contains("docs.example.com")));
+
+        // Name servers in another zone get nothing here.
+        let shared = plan_ipv6("example.com", ["ns1.example.net", "ns2.example.net"], false, &recs, true, &own(), true);
+        assert!(!names(&shared).contains(&"ns1.example.net"));
+        // Still listed: ns1.example.com has its A here.
+        assert!(names(&shared).contains(&"ns1.example.com"));
+
+        // www pointing at another host over IPv4 gets no AAAA, and that is said.
+        let mut moved = zone(&[], false, None);
+        moved.iter_mut().find(|r| r.name == "www.example.com" && r.rtype == "A").unwrap().content = "203.0.113.50".into();
+        let plan = plan_ipv6("example.com", NS, false, &moved, true, &own(), true);
+        assert!(!names(&plan).contains(&"www.example.com"));
+        assert!(plan.skipped.iter().any(|s| s.starts_with("www.example.com points at 203.0.113.50 over IPv4")), "{:?}", plan.skipped);
+
+        // A zone that has it all already changes nothing.
+        let done = plan_ipv6("example.com", NS, false, &zone(&[], true, None), true, &own(), true);
+        assert!(done.add.is_empty() && done.update.is_empty() && done.remove.is_empty());
+        assert_eq!(done.unchanged.len(), 5);
+        assert!(done.records.iter().all(|r| r.present));
+    }
+
+    #[test]
+    fn mail_host_follows_the_mail_records() {
+        // No A for mail.<zone> and no mail domain: no AAAA either.
+        let mut recs = zone(&[], false, None);
+        recs.retain(|r| r.name != "mail.example.com");
+        let plan = plan_ipv6("example.com", NS, false, &recs, true, &own(), true);
+        assert!(!names(&plan).contains(&"mail.example.com"));
+        // A mail domain: mail.<zone> gets its AAAA.
+        let plan = plan_ipv6("example.com", NS, true, &recs, true, &own(), true);
+        assert!(names(&plan).contains(&"mail.example.com"));
+    }
+
+    #[test]
+    fn an_aaaa_that_points_elsewhere_is_never_touched() {
+        let recs = zone(
+            &[
+                ("www.example.com", "AAAA", FOREIGN6),
+                ("api.example.com", "A", V4),
+                ("api.example.com", "AAAA", FOREIGN6),
+                ("api.example.com", "AAAA", V6B),
+            ],
+            false,
+            None,
+        );
+        let on = plan_ipv6("example.com", NS, false, &recs, true, &own(), true);
+        // www keeps the operator's AAAA, and gets none of ours next to it.
+        assert!(!names(&on).contains(&"www.example.com"));
+        assert!(on.skipped.iter().any(|s| s.starts_with(&format!("www.example.com has an AAAA record for {FOREIGN6}"))));
+        assert!(!on.records.iter().any(|r| r.name == "www.example.com"));
+        // api has ours next to theirs: ours is moved to the address, theirs stays.
+        let api_ours = recs.iter().find(|r| r.name == "api.example.com" && r.content == V6B).unwrap().id;
+        assert_eq!(on.update, vec![(api_ours, "api.example.com".to_string())]);
+        assert!(on.remove.is_empty());
+
+        let off = plan_ipv6("example.com", NS, false, &recs, false, &own(), true);
+        assert_eq!(off.remove.len(), 1);
+        assert_eq!(off.remove[0].2, V6B);
+        assert!(off.add.is_empty() && off.update.is_empty());
+    }
+
+    #[test]
+    fn off_removes_every_aaaa_of_this_server_and_nothing_else() {
+        let recs = zone(&[("shop.example.com", "AAAA", V6), ("ext.example.com", "AAAA", FOREIGN6)], true, None);
+        let plan = plan_ipv6("example.com", NS, true, &recs, false, &own(), true);
+        let removed: Vec<&str> = plan.remove.iter().map(|(_, n, _)| n.as_str()).collect();
+        assert_eq!(
+            removed,
+            vec!["example.com", "www.example.com", "mail.example.com", "ns1.example.com", "ns2.example.com", "shop.example.com"]
+        );
+        assert!(plan.add.is_empty() && plan.update.is_empty() && plan.unchanged.is_empty());
+        // The panel is still told what on would mean.
+        assert!(plan.records.iter().any(|r| r.name == "shop.example.com" && r.present));
+        // Off with no address in effect still knows this server's addresses.
+        let no_v6 = OwnAddrs { v6: None, ..own() };
+        let plan = plan_ipv6("example.com", NS, true, &recs, false, &no_v6, true);
+        assert_eq!(plan.remove.len(), 6);
+        // On with no address: nothing to do, and what is there is listed.
+        let plan = plan_ipv6("example.com", NS, true, &zone(&[], false, None), true, &no_v6, true);
+        assert_eq!(plan, Ipv6Plan::default());
+    }
+
+    #[test]
+    fn duplicates_and_disabled_records_of_this_server_end_up_as_one() {
+        let mut recs = zone(&[("example.com", "AAAA", V6B)], true, None);
+        let www = recs.iter_mut().find(|r| r.name == "www.example.com" && r.rtype == "AAAA").unwrap();
+        www.disabled = true;
+        let www_id = www.id;
+        let plan = plan_ipv6("example.com", NS, false, &recs, true, &own(), true);
+        // Apex: V6 is there, V6B goes.
+        assert!(plan.remove.iter().any(|(_, n, c)| n == "example.com" && c == V6B));
+        // www: switched on again.
+        assert!(plan.update.contains(&(www_id, "www.example.com".to_string())));
+        assert!(plan.records.iter().any(|r| r.name == "www.example.com" && !r.present));
+    }
+
+    #[test]
+    fn only_this_servers_ip6_term_comes_and_goes_in_a_hand_edited_spf_record() {
+        let own6 = vec![V6.to_string(), V6B.to_string()];
+        // The panel's own record.
+        let panel = format_spf(Some(V4), None);
+        let with = spf_with_ip6(&panel, V6, &own6).unwrap();
+        assert_eq!(with, format_spf(Some(V4), Some(V6)));
+        assert_eq!(spf_without_ip6(&with, &own6).unwrap(), panel);
+        // Edited by hand: softfail, an include, another IPv6 range, a modifier.
+        let hand = "\"v=spf1 mx include:_spf.google.com ip4:198.51.100.127 ip6:2001:db8:aaaa::/48 ~all exp=explain.example.com\"";
+        let on = spf_with_ip6(hand, V6, &own6).unwrap();
+        assert_eq!(
+            on,
+            "\"v=spf1 mx include:_spf.google.com ip4:198.51.100.127 ip6:2001:db8:aaaa::/48 ip6:2001:db8:1::1 ~all exp=explain.example.com\""
+        );
+        assert_eq!(spf_without_ip6(&on, &own6).unwrap(), hand);
+        // Twice on, twice off: nothing more happens.
+        assert_eq!(spf_with_ip6(&on, V6, &own6).unwrap(), on);
+        assert_eq!(spf_without_ip6(hand, &own6).unwrap(), hand);
+        // Without quotes, and without any ip term: before `all`.
+        assert_eq!(spf_with_ip6("v=spf1 mx -all", V6, &own6).unwrap(), "v=spf1 mx ip6:2001:db8:1::1 -all");
+        // Without `all`: at the end.
+        assert_eq!(spf_with_ip6("\"v=spf1 mx\"", V6, &own6).unwrap(), "\"v=spf1 mx ip6:2001:db8:1::1\"");
+        // The other address of this server is replaced in place; a /128 counts as it.
+        let old = "\"v=spf1 ip6:2001:db8:1::2/128 mx -all\"";
+        assert_eq!(spf_with_ip6(old, V6, &own6).unwrap(), "\"v=spf1 ip6:2001:db8:1::1 mx -all\"");
+        assert_eq!(spf_without_ip6(old, &own6).unwrap(), "\"v=spf1 mx -all\"");
+        // A term that refuses the address, or names a range, is the operator's.
+        let refuses = "\"v=spf1 -ip6:2001:db8:1::1 ip6:2001:db8:1::/64 -all\"";
+        assert_eq!(spf_without_ip6(refuses, &own6).unwrap(), refuses);
+        assert!(!spf_names_ip6(refuses, V6));
+        assert!(spf_names_ip6(&with, V6) && spf_names_ip6("v=spf1 +ip6:2001:DB8:1:0::1 -all", V6));
+        // A record split into strings is read whole and written back in strings of at most 255 bytes.
+        let split = "\"v=spf1 mx include:a.example \" \"include:b.example -all\"";
+        assert_eq!(
+            spf_with_ip6(split, V6, &own6).unwrap(),
+            "\"v=spf1 mx include:a.example include:b.example ip6:2001:db8:1::1 -all\""
+        );
+        let long = format!("v=spf1 {} -all", (0..30).map(|i| format!("include:s{i}.example.com")).collect::<Vec<_>>().join(" "));
+        let long_on = spf_with_ip6(&format!("\"{long}\""), V6, &own6).unwrap();
+        let (text, quoted) = txt_text(&long_on).unwrap();
+        assert!(quoted && text.contains("ip6:2001:db8:1::1 -all"), "{text}");
+        assert!(long_on.split("\" \"").all(|part| part.trim_matches('"').len() <= 255), "{long_on}");
+        assert_eq!(txt_content("a", true), "\"a\"");
+        // Escapes are not guessed at: left alone.
+        assert_eq!(spf_with_ip6("\"v=spf1 \\\"x\\\" -all\"", V6, &own6), None);
+    }
+
+    #[test]
+    fn the_spf_record_follows_on_and_off_and_reconcile_can_leave_it_alone() {
+        let hand = "\"v=spf1 mx include:_spf.google.com ~all\"";
+        let recs = zone(&[], false, Some(hand));
+        let spf_id = recs.iter().find(|r| r.content == hand).unwrap().id;
+        let on = plan_ipv6("example.com", NS, true, &recs, true, &own(), true);
+        assert_eq!(on.spf, vec![(spf_id, "\"v=spf1 mx include:_spf.google.com ip6:2001:db8:1::1 ~all\"".to_string())]);
+        let txt = on.records.iter().find(|r| r.rtype == "TXT").unwrap();
+        assert_eq!((txt.name.as_str(), txt.present), ("example.com", false));
+        assert_eq!(txt.content, on.spf[0].1);
+        // The verification TXT next to it is not touched.
+        assert_eq!(on.spf.len(), 1);
+        // Reconcile writes a mail domain's record whole: no edit planned.
+        assert!(plan_ipv6("example.com", NS, true, &recs, true, &own(), false).spf.is_empty());
+
+        let with = "\"v=spf1 mx include:_spf.google.com ip6:2001:db8:1::1 ~all\"";
+        let recs = zone(&[], true, Some(with));
+        let off = plan_ipv6("example.com", NS, true, &recs, false, &own(), true);
+        assert_eq!(off.spf.len(), 1);
+        assert_eq!(off.spf[0].1, hand);
+        assert!(plan_ipv6("example.com", NS, true, &recs, true, &own(), true).spf.is_empty());
+        // No SPF record: none is made.
+        let plan = plan_ipv6("example.com", NS, true, &zone(&[], false, None), true, &own(), true);
+        assert!(plan.spf.is_empty() && !plan.records.iter().any(|r| r.rtype == "TXT"));
+    }
+
+    #[test]
+    fn a_new_address_moves_the_records_of_a_zone_that_has_ipv6_on() {
+        // The zone names V6B, the old address; V6 is the new one.
+        let mut recs = zone(
+            &[("shop.example.com", "A", V4)],
+            false,
+            Some("\"v=spf1 mx ip4:198.51.100.127 ip6:2001:db8:1::2 -all\""),
+        );
+        let mut next = 1000;
+        for name in ["example.com", "www.example.com", "shop.example.com"] {
+            next += 1;
+            recs.push(ZoneRec { id: next, name: name.into(), rtype: "AAAA".into(), content: V6B.into(), disabled: false });
+        }
+        assert!(ipv6_enabled(None, "example.com", &recs, &own().own_v6));
+        let plan = plan_ipv6("example.com", NS, true, &recs, true, &own(), true);
+        let updated: Vec<&str> = plan.update.iter().map(|(_, n)| n.as_str()).collect();
+        assert_eq!(updated, vec!["example.com", "www.example.com", "shop.example.com"]);
+        assert_eq!(plan.spf[0].1, "\"v=spf1 mx ip4:198.51.100.127 ip6:2001:db8:1::1 -all\"");
+        // What had no AAAA yet gets one.
+        assert!(names(&plan).contains(&"mail.example.com") && names(&plan).contains(&"ns1.example.com"));
     }
 }
