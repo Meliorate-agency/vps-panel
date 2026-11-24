@@ -1451,15 +1451,18 @@ const DF_ARGS: &[&str] = &[
 /// Every disk (the root one, /var, a mail volume) at 90% of its space or
 /// of its inodes, and back under 85%.
 async fn check_disks(db: &PanelDb) {
-    let out = match exec::run("df", DF_ARGS).await {
-        Ok(o) => o.stdout,
-        // One unreadable mount fails the whole listing: the root disk alone.
-        Err(_) => match exec::run("df", ["--output=source,fstype,pcent,ipcent,target", "/"]).await {
-            Ok(o) => o.stdout,
-            Err(_) => return,
-        },
+    // df exits 1 when one mount cannot be read but lists the others: its
+    // output is used either way.
+    let script = format!("df {} 2>/dev/null; exit 0", DF_ARGS.join(" "));
+    let Ok(out) = exec::run("sh", ["-c", script.as_str()]).await else {
+        return;
     };
-    let disks = parse_df(&out);
+    let disks = parse_df(&out.stdout);
+    // Without the root disk the listing is not to be trusted: comparing it
+    // would report every other disk as fine again.
+    if !disks.iter().any(|d| d.mount == "/") {
+        return;
+    }
     let mut seen = Vec::new();
     let mut now_pct: HashMap<String, u32> = HashMap::new();
     for fs in &disks {
