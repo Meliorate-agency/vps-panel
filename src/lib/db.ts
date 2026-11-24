@@ -250,6 +250,24 @@ function migrateNotificationsSchema(handle: Database.Database) {
     // the audit log only ever show the user ID. The agent adds it too.
     handle.exec("ALTER TABLE notifications ADD COLUMN secret TEXT");
   }
+  // Whether a webhook or Telegram channel gets the log lines of a failure
+  // (they can hold email and IP addresses). The channels that existed got
+  // them, so they keep them; a new channel is added with its own choice.
+  if (!cols.some((c) => c.name === "log_lines")) {
+    handle.exec("ALTER TABLE notifications ADD COLUMN log_lines INTEGER NOT NULL DEFAULT 1");
+  }
+  // The last delivery to the channel, written by the agent: when, which
+  // event, whether it went out, and the error or a note.
+  for (const [name, type] of [
+    ["last_at", "TEXT"],
+    ["last_event", "TEXT"],
+    ["last_ok", "INTEGER"],
+    ["last_detail", "TEXT"],
+  ] as const) {
+    if (!cols.some((c) => c.name === name)) {
+      handle.exec(`ALTER TABLE notifications ADD COLUMN ${name} ${type}`);
+    }
+  }
 }
 
 function migrateUsersSchema(handle: Database.Database) {

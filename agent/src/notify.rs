@@ -2184,6 +2184,22 @@ mod tests {
         assert!(!email_text(&msg(), None, "ops@example.com").contains("From:"));
     }
 
+    /// The email as it is sent, through the real sendmail into a scratch
+    /// Postfix (MAIL_CONFIG names its config; never the server's own).
+    /// Postfix not running, the message waits in its maildrop and the
+    /// delivery says so. `postcat` shows what was queued.
+    #[tokio::test]
+    #[ignore = "needs a scratch Postfix: MAIL_CONFIG=<copy of /etc/postfix> cargo test -- --ignored"]
+    async fn email_through_a_scratch_postfix() {
+        let conf = std::env::var("MAIL_CONFIG").expect("MAIL_CONFIG");
+        assert_ne!(conf.trim_end_matches('/'), "/etc/postfix", "never the real one");
+        let m = Message::new("service.fail", "Сервер: nginx is stopped", "nginx (nginx.service) is stopped.")
+            .look("Services", "/services")
+            .detail("Last journal lines", "x".repeat(3000) + "\n.\nlast line");
+        let note = send_email("ops@example.com", Some("alerts@example.com"), &m).await.unwrap();
+        assert!(note.unwrap().contains("not running"));
+    }
+
     #[test]
     fn delivery_answers() {
         assert_eq!(webhook_answer("ok\n200 "), Ok(None));

@@ -8,6 +8,7 @@ import {
   addNotificationAction,
   deleteNotificationAction,
   setEmailFromAction,
+  setLogLinesAction,
   testNotificationAction,
 } from "@/server-actions/notifications";
 import { NOTIFICATION_EVENTS } from "@/lib/notificationEvents";
@@ -25,7 +26,38 @@ type Row = {
   target: string;
   events: string;
   secret: string | null;
+  log_lines: number;
+  last_at: string | null;
+  last_event: string | null;
+  last_ok: number | null;
+  last_detail: string | null;
 };
+
+/** An agent timestamp (RFC 3339) the way the messages show it. */
+function shortTime(iso: string): string {
+  const d = new Date(iso);
+  return Number.isNaN(d.getTime()) ? iso : `${d.toISOString().slice(0, 16).replace("T", " ")} UTC`;
+}
+
+/** The last delivery to a channel, as the agent recorded it. */
+function LastDelivery({ r }: { r: Row }) {
+  if (!r.last_at) return <span className={styles.muted}>Nothing sent yet</span>;
+  const what = r.last_event === "test" ? "test" : (r.last_event ?? "");
+  return (
+    <span style={{ fontSize: 12 }}>
+      <span className={styles.muted}>
+        {shortTime(r.last_at)}, {what}:
+      </span>{" "}
+      {r.last_ok ? (
+        <span>{r.last_detail ? `sent, but ${r.last_detail}` : "sent"}</span>
+      ) : (
+        <span className={styles.error} style={{ display: "inline" }}>
+          not delivered: {r.last_detail}
+        </span>
+      )}
+    </span>
+  );
+}
 
 export default async function NotificationsPage() {
   // A webhook URL is a credential (whoever has it can post to the channel),
@@ -42,7 +74,10 @@ export default async function NotificationsPage() {
     );
   }
   const rows = db()
-    .prepare(`SELECT id, channel, target, events, secret FROM notifications ORDER BY id DESC`)
+    .prepare(
+      `SELECT id, channel, target, events, secret, log_lines, last_at, last_event, last_ok, last_detail
+         FROM notifications ORDER BY id DESC`,
+    )
     .all() as Row[];
   const mailboxList = await agent.mail.listMailboxes().catch(() => null);
   return (
@@ -51,11 +86,18 @@ export default async function NotificationsPage() {
         <div>
           <h1 className={styles.title}>Notifications</h1>
           <div className={styles.subtitle}>
-            Where the agent reports failed SSL orders and renewals, backups, deploys and other
-            tasks, services that stop in the failed state, and a root disk at 90%. Email goes
-            out through this server&apos;s Postfix; webhooks get JSON (Slack and Discord
-            webhook URLs work as is); Telegram messages come from your own bot. Use Send test
-            after adding a channel.
+            Where the server reports what fails: tasks (SSL, backups, deploys, updates),
+            services that fail or stop, full disks, mail stuck in the queue, running out of
+            memory, certificates close to expiry. Each problem is reported once when it starts
+            and, for services, disks and the mail queue, once when it is fine again. Every
+            message says what failed, on which server, since when and where to look in the
+            panel. Webhooks get JSON (Slack and Discord webhook URLs work as is); Telegram
+            messages come from your own bot. Send test goes out the way a real message does.
+          </div>
+          <div className={styles.subtitle}>
+            Email goes out through this server&apos;s Postfix: when Postfix itself is down, or
+            the server cannot send mail, the message waits until it can. Add a webhook or
+            Telegram channel as well to hear about mail problems.
           </div>
         </div>
       </div>
@@ -80,6 +122,8 @@ export default async function NotificationsPage() {
           { key: "channel", label: "Channel", width: "120px" },
           { key: "target", label: "Target" },
           { key: "events", label: "Events" },
+          { key: "logs", label: "Log lines", width: "130px" },
+          { key: "last", label: "Last delivery" },
           { key: "actions", label: "", width: "260px" },
         ]}
         // Each row's Send test keeps its answer: keyed by channel so the
@@ -103,10 +147,35 @@ export default async function NotificationsPage() {
                 ? r.events
                     .split(",")
                     .map((e) => EVENT_LABEL.get(e.trim()) ?? e.trim())
-                    .join(", ")
-                : "(all)"}
+                    .join("; ")
+                : "All, including events later updates add"}
             </span>
           ),
+          logs:
+            r.channel === "email" ? (
+              <span className={styles.muted} style={{ fontSize: 12 }}>
+                Always (sent from this server)
+              </span>
+            ) : (
+              <form
+                action={setLogLinesAction.bind(null, r.id, !r.log_lines)}
+                style={{ display: "flex", gap: 8, alignItems: "center", fontSize: 12 }}
+              >
+                <span>{r.log_lines ? "On" : "Off"}</span>
+                <button
+                  type="submit"
+                  className={styles.btnGhost}
+                  title={
+                    r.log_lines
+                      ? "Stop sending log lines: they can contain email and IP addresses"
+                      : "Send the last log lines too: they can contain email and IP addresses"
+                  }
+                >
+                  {r.log_lines ? "Turn off" : "Turn on"}
+                </button>
+              </form>
+            ),
+          last: <LastDelivery r={r} />,
           actions: (
             <TestButton
               action={testNotificationAction.bind(null, r.id)}

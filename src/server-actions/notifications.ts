@@ -1,7 +1,7 @@
 "use server";
 
 import { revalidatePath } from "next/cache";
-import { agent } from "@/lib/agent";
+import { agent, agentRequest } from "@/lib/agent";
 import { db } from "@/lib/db";
 import { requireAdmin } from "@/lib/auth";
 import { writeAudit } from "@/lib/audit";
@@ -56,9 +56,13 @@ export async function addNotificationAction(
       return { ok: false, error: "the bot token looks like 123456789:AAH... (from @BotFather)" };
     }
   }
+  // Email is sent from this server, which keeps the logs anyway, and always
+  // has them. A webhook or a Telegram chat is somewhere else: log lines (they
+  // can hold email and IP addresses) go there only when asked for.
+  const logLines = channel === "email" || fd.get("log_lines") === "on" ? 1 : 0;
   db()
-    .prepare(`INSERT INTO notifications (channel, target, events, secret) VALUES (?, ?, ?, ?)`)
-    .run(channel, target, events, secret);
+    .prepare(`INSERT INTO notifications (channel, target, events, secret, log_lines) VALUES (?, ?, ?, ?, ?)`)
+    .run(channel, target, events, secret, logLines);
   writeAudit({ actorId: s.userId, action: "notifications.add", target: `${channel}:${target}`, result: "ok" });
   revalidatePath("/notifications");
   return { ok: true };
@@ -78,7 +82,13 @@ export async function testNotificationAction(id: number): Promise<ActionResult> 
     .get(id) as { channel: string; target: string; secret: string | null } | undefined;
   if (!row) return { ok: false, error: "channel not found" };
   try {
-    await agent.notifications.test(row.channel, row.target, row.secret);
+    // With the id the agent reads the channel from panel.db as a real event
+    // does (its log line choice included) and records the result on it.
+    await agentRequest({
+      method: "POST",
+      path: "/notifications/test",
+      body: { id, channel: row.channel, target: row.target, secret: row.secret },
+    });
     writeAudit({ actorId: s.userId, action: "notifications.test", target: `${row.channel}:${row.target}`, result: "ok" });
     return { ok: true };
   } catch (e: unknown) {
@@ -93,7 +103,28 @@ export async function testNotificationAction(id: number): Promise<ActionResult> 
     // A bot can only message someone who has started a chat with it.
     const hint = /chat not found/i.test(msg) ? ". Open the bot in Telegram, press Start, then test again." : "";
     return { ok: false, error: msg + hint };
+  } finally {
+    // The agent wrote the result on the row: the page shows it.
+    revalidatePath("/notifications");
   }
+}
+
+/** Whether a webhook or Telegram channel gets the log lines of a failure. */
+export async function setLogLinesAction(id: number, on: boolean): Promise<void> {
+  const s = await requireAdmin();
+  const row = db().prepare(`SELECT channel, target FROM notifications WHERE id = ?`).get(id) as
+    | { channel: string; target: string }
+    | undefined;
+  if (!row || row.channel === "email") return;
+  db().prepare(`UPDATE notifications SET log_lines = ? WHERE id = ?`).run(on ? 1 : 0, id);
+  writeAudit({
+    actorId: s.userId,
+    action: "notifications.log_lines",
+    target: `${row.channel}:${row.target}`,
+    result: "ok",
+    message: on ? "on" : "off",
+  });
+  revalidatePath("/notifications");
 }
 
 /**

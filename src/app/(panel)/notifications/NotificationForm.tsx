@@ -80,14 +80,25 @@ export default function NotificationForm({
           that ID gets the messages.
         </div>
       )}
+      {channel !== "email" && (
+        <label style={{ display: "flex", gap: 6, alignItems: "flex-start", fontSize: 13, margin: "0 0 12px" }}>
+          {/* Keyed on the channel: switching it starts from off again. */}
+          <input key={channel} type="checkbox" name="log_lines" style={{ marginTop: 3 }} />
+          <span>
+            Include log lines: the last lines of a failed task or a service&apos;s journal. They
+            can contain email and IP addresses, which then leave this server. Without them the
+            message says what failed and where to look in the panel. Email always has them.
+          </span>
+        </label>
+      )}
       <fieldset style={{ border: "none", padding: 0, margin: "0 0 12px" }}>
         <legend className={styles.muted} style={{ fontSize: 12, marginBottom: 6 }}>
-          Events (none selected = all)
+          Events. None selected = all of them, including events later updates add.
         </legend>
-        <div style={{ display: "flex", flexWrap: "wrap", gap: "6px 16px" }}>
+        <div style={{ display: "grid", gap: 6 }}>
           {NOTIFICATION_EVENTS.map((e) => (
-            <label key={e.id} style={{ display: "flex", gap: 6, alignItems: "center", fontSize: 13 }}>
-              <input type="checkbox" name="events" value={e.id} />
+            <label key={e.id} style={{ display: "flex", gap: 6, alignItems: "flex-start", fontSize: 13 }}>
+              <input type="checkbox" name="events" value={e.id} style={{ marginTop: 3 }} />
               {e.label}
             </label>
           ))}
