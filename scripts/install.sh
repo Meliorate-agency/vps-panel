@@ -1010,7 +1010,9 @@ cd "$APP_DIR"
 
 log "installing Node deps and building Next.js"
 sudo -u vps-panel HOME="$VAR_DIR" npm ci --no-audit --no-fund
-sudo -u vps-panel HOME="$VAR_DIR" npm run build
+# NEXT_TELEMETRY_DISABLED: the Next.js build tool otherwise reports each build
+# (versions, machine size, page counts) to telemetry.nextjs.org.
+sudo -u vps-panel HOME="$VAR_DIR" NEXT_TELEMETRY_DISABLED=1 npm run build
 
 # standalone output: copy the static and public assets into .next/standalone
 # alongside server.js. Run as vps-panel so the copied files inherit the same

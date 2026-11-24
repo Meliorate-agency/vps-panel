@@ -26,7 +26,7 @@ Whose personal data is on the server:
 - **Anyone who tries to sign in**, to the panel, to SSH or to a mailbox: IP address and the name or email they typed.
 - **Whatever your own apps and databases hold.** The panel does not look inside them.
 
-The panel has no analytics and no crash reporting, and sends nothing to its authors. What does leave the server is listed under [What leaves the server](#what-leaves-the-server); one item there, the build tool's telemetry, is on until you switch it off.
+The panel has no analytics, no telemetry and no crash reporting, and sends nothing to its authors. What does leave the server is listed under [What leaves the server](#what-leaves-the-server).
 
 Every privacy setting starts at the behaviour the panel had before the settings existed: full IP addresses and query strings in the web logs, no time limit on logs, and the server-location lookups on. Nothing changes until you change it under Settings > Privacy.
 
@@ -126,7 +126,7 @@ Three things follow from how this works:
 | Let's Encrypt (`acme-v02.api.letsencrypt.org`) | The account's contact email: Settings > DNS & SSL > SSL contact email, or else `ACME_EMAIL` in `/etc/vps-panel/.env`, which the installer sets to the admin email. The domain names on each certificate. Let's Encrypt then connects to the server over HTTP to check them. Every certificate, with its names, is published in the public Certificate Transparency logs. | When a certificate is ordered or renewed; renewal runs by itself. | Only by not using certificates. Set a role address (such as `hostmaster@`) as the contact email. |
 | GitHub, or wherever the panel's source clone points (`git -C /root/vps-panel-src remote get-url origin`) | A `git fetch`: the server's IP address and nothing about your data | Each time the panel is opened in a browser (the update check in the top bar) and on every update | Point the clone at another remote. |
 | Package sources: Ubuntu's mirrors, `deb.nodesource.com`, `rspamd.com`, `sh.rustup.rs`, crates.io and the npm registry | Download requests (the server's IP address) | At install and on every update; Ubuntu's mirrors also daily for security updates | No |
-| Next.js telemetry (`telemetry.nextjs.org`, run by Vercel) | Anonymous build information from the Next.js build tool: its version, the operating system, CPU and memory size, page counts, build duration and features used, with a random ID and a hashed project ID. Nothing from your data. | Each time the panel is built: at install and on every update | Yes: as root, `cd /opt/vps-panel/app && sudo -u vps-panel HOME=/var/lib/vps-panel npx next telemetry disable`. The choice is saved under `/var/lib/vps-panel` and holds for later updates. |
+| Next.js telemetry (`telemetry.nextjs.org`, run by Vercel) | Nothing since this version: the panel is built and run with `NEXT_TELEMETRY_DISABLED=1`. Before, each build at install and on every update sent anonymous build information (tool version, operating system, CPU and memory size, page counts, build duration, with a random ID). Apps you deploy that use Next.js make their own choice. | Never | Already off |
 | Public DNS resolvers 1.1.1.1 (Cloudflare), 8.8.8.8 (Google), 9.9.9.9 (Quad9) | The names being checked: your domains, their mail and DKIM/DMARC names, the reverse name of the server's addresses | Before a certificate is ordered, and on the mail DNS and mail IP checks | No |
 | ipinfo.io, and GeoJS (`get.geojs.io`) when ipinfo.io does not answer | The IP address of each server in your My Networks networks, this one included, in the request URL. Nothing about visitors or users. | When the My Networks page is shown. A found location is cached for 24 hours, a failed lookup for 10 minutes, in memory. | Yes: Settings > Privacy, outside lookups. |
 | api.ipify.org | An empty request; it answers with the server's public IPv4 address | Only when the panel's hostname does not resolve to a public IPv4 address: on the Dashboard, Apps, Databases and MCP pages and when a domain is added; cached 5 minutes | No (not covered by the outside-lookups switch). Make the panel hostname's A record point at the server. |
@@ -209,11 +209,10 @@ These are recommendations from how the panel works. They are not legal advice.
 1. **Mask IP addresses and strip query strings** in Settings > Privacy. Full visitor addresses are rarely needed in web logs, and nothing on the server depends on them: bans come from the journal.
 2. **Set a log retention** you can justify, for example 30 days. It also limits the audit log, so pick a number that leaves you the audit trail you need.
 3. **Switch outside lookups off** unless you use the server locations on My Networks. They send your servers' addresses (not your visitors') to ipinfo.io or GeoJS.
-4. **Switch off the Next.js build telemetry** with the command in [What leaves the server](#what-leaves-the-server).
-5. **Use a role address as the SSL contact email** (Settings > DNS & SSL), not a person's.
-6. **Keep personal data out of notifications** to outside services. Telegram and webhook messages carry log lines; email to a mailbox on your own server keeps them here.
-7. **Keep personal data out of terminal commands.** They are kept word for word in the audit log and the terminal history.
-8. **Write the backup window into your policy**: data deleted on the server stays in snapshots for up to about six months. If you copy the repository elsewhere, record where.
-9. **Have a data processing agreement with your hosting provider**: it runs the machine all of this is on.
-10. **Use the tables on this page for your record of processing**, and add what your own apps and sites hold. Their visitors' web logs are covered by the settings above; their own data and cookies are not.
-11. **For a request about one person**, use the request tool, then the places listed under [Requests about one person](#requests-about-one-person) that it cannot reach.
+4. **Use a role address as the SSL contact email** (Settings > DNS & SSL), not a person's.
+5. **Keep personal data out of notifications** to outside services. Telegram and webhook messages carry log lines; email to a mailbox on your own server keeps them here.
+6. **Keep personal data out of terminal commands.** They are kept word for word in the audit log and the terminal history.
+7. **Write the backup window into your policy**: data deleted on the server stays in snapshots for up to about six months. If you copy the repository elsewhere, record where.
+8. **Have a data processing agreement with your hosting provider**: it runs the machine all of this is on.
+9. **Use the tables on this page for your record of processing**, and add what your own apps and sites hold. Their visitors' web logs are covered by the settings above; their own data and cookies are not.
+10. **For a request about one person**, use the request tool, then the places listed under [Requests about one person](#requests-about-one-person) that it cannot reach.

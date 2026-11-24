@@ -15,6 +15,7 @@ Restart=on-failure
 RestartSec=2s
 LimitNOFILE=65536
 Environment=PORT=10000
+Environment=NEXT_TELEMETRY_DISABLED=1
 # Only nginx talks to the panel. `next start` ignores HOSTNAME, so the bind
 # address is the -H flag in package.json's start script; without it the
 # panel listened on every interface, where a direct request skips nginx

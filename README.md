@@ -12,7 +12,7 @@
 
 ## Why Bolt Panel
 
-- **Free and open source.** AGPL-3.0, no per-account licence, no telemetry of its own ([what does leave the server](docs/PRIVACY.md#what-leaves-the-server)).
+- **Free and open source.** AGPL-3.0, no per-account licence, no telemetry ([what does leave the server](docs/PRIVACY.md#what-leaves-the-server)).
 - **Light.** nginx, a Rust agent and a Next.js UI. No Apache/PHP stack to babysit; a 2 GB VPS is enough.
 - **Git or Docker image to running app in one form.** Each app gets its own systemd service, an nginx vhost and a Let's Encrypt cert, with "update available" badges and one-click updates that roll back if the new version does not come up.
 - **Your own mail server, done right.** Postfix, Dovecot and Rspamd with DKIM, SPF and DMARC published for you, Roundcube webmail, forwarders, catch-alls and delivery tracking.

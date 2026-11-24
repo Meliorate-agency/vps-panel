@@ -113,7 +113,8 @@ build_panel() {
   # fails with EACCES on node_modules.
   chown -R vps-panel:vps-panel "$APP_DIR" &&
   (cd "$APP_DIR" && sudo -u vps-panel HOME=/var/lib/vps-panel npm ci --no-audit --no-fund) &&
-  (cd "$APP_DIR" && sudo -u vps-panel HOME=/var/lib/vps-panel npm run build) &&
+  # NEXT_TELEMETRY_DISABLED: no build report to telemetry.nextjs.org.
+  (cd "$APP_DIR" && sudo -u vps-panel HOME=/var/lib/vps-panel NEXT_TELEMETRY_DISABLED=1 npm run build) &&
   (
     cd "$APP_DIR" &&
     if [[ -d .next/standalone ]]; then
