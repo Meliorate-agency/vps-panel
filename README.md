@@ -12,7 +12,7 @@
 
 ## Why Bolt Panel
 
-- **Free and open source.** AGPL-3.0, no per-account licence, no telemetry.
+- **Free and open source.** AGPL-3.0, no per-account licence, no telemetry of its own ([what does leave the server](docs/PRIVACY.md#what-leaves-the-server)).
 - **Light.** nginx, a Rust agent and a Next.js UI. No Apache/PHP stack to babysit; a 2 GB VPS is enough.
 - **Git or Docker image to running app in one form.** Each app gets its own systemd service, an nginx vhost and a Let's Encrypt cert, with "update available" badges and one-click updates that roll back if the new version does not come up.
 - **Your own mail server, done right.** Postfix, Dovecot and Rspamd with DKIM, SPF and DMARC published for you, Roundcube webmail, forwarders, catch-alls and delivery tracking.
@@ -70,7 +70,7 @@ git clone https://github.com/Meliorate-agency/vps-panel.git /root/vps-panel-src
 bash /root/vps-panel-src/scripts/install.sh --domain panel.example.com --email you@example.com
 ```
 
-The script installs everything, generates secrets, creates system users, brings up the agent and the panel, and prints the bootstrap admin credentials. Leave out `--domain` / `--email` to be asked, or to install in IP-only mode. Step by step: [FIRST_INSTALL.md](FIRST_INSTALL.md). Updates, uninstall and recovery: [docs/DEPLOY.md](docs/DEPLOY.md). Threat model and hardening: [docs/SECURITY.md](docs/SECURITY.md).
+The script installs everything, generates secrets, creates system users, brings up the agent and the panel, and prints the bootstrap admin credentials. Leave out `--domain` / `--email` to be asked, or to install in IP-only mode. Step by step: [FIRST_INSTALL.md](FIRST_INSTALL.md). Updates, uninstall and recovery: [docs/DEPLOY.md](docs/DEPLOY.md). Threat model and hardening: [docs/SECURITY.md](docs/SECURITY.md). What personal data the server stores, for how long, and what leaves it: [docs/PRIVACY.md](docs/PRIVACY.md).
 
 ## Develop
 
