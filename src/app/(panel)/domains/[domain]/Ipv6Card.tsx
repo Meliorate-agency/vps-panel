@@ -269,12 +269,15 @@ export default function Ipv6Card({
       <ConfirmDialog
         open={confirm === "on"}
         title={`Switch on IPv6 for ${domain}?`}
-        confirmLabel="Switch on anyway"
+        confirmLabel={data && problems.length === 0 ? "Switch on" : "Switch on anyway"}
         pending={switching}
         onConfirm={() => run(true)}
         onCancel={() => setConfirm(null)}
       >
-        {data ? (
+        {/* The checks came back while the question was open, all ok. */}
+        {data && problems.length === 0 ? (
+          <p className={local.dialogText}>Every check passed.</p>
+        ) : data ? (
           <>
             <p className={local.dialogText}>
               {problems.length === 1 ? "This check found a problem:" : "These checks found problems:"}
