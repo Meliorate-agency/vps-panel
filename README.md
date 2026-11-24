@@ -22,7 +22,7 @@
 ## Features
 
 - **Apps:** deploy Node.js apps from Git or a folder, or any public Docker image (Uptime Kuma, Gitea, Metabase...), or build your own repository's Dockerfile in any language, with env, kept folders and memory/CPU limits. Start/stop/restart, update checks with automatic rollback, folders to group them.
-- **Domains and DNS:** nginx sites (reverse proxy to a port, static folder, redirects), authoritative DNS with PowerDNS, one-click DNSSEC.
+- **Domains and DNS:** nginx sites (reverse proxy to a port, static folder, redirects), authoritative DNS with PowerDNS, one-click DNSSEC, IPv6 switched on or off per domain.
 - **SSL:** in-process ACME (Let's Encrypt), automatic renewal.
 - **Mail:** virtual mailboxes with quotas, DKIM signing, forwarders and catch-alls, delivery tracking, Roundcube webmail where each person sets their own filters and Out of Office.
 - **Databases:** MariaDB and PostgreSQL users, databases and grants, SQL dump import, phpMyAdmin and pgAdmin.

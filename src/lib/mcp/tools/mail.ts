@@ -52,7 +52,7 @@ export const TOOLS: Tool[] = [
     page: "Mailboxes",
     name: "mail.create_domain",
     description:
-      "Register a mail domain. Generates a DKIM keypair, publishes MX/SPF/DMARC + A/AAAA for mail.<domain>, writes an ACME helper vhost, and orders a cert covering mail.<domain> (ssl_task_id in the response) so IMAP/SMTP clients connecting to mail.<domain> get a matching certificate.",
+      "Register a mail domain. Generates a DKIM keypair, publishes MX/SPF/DMARC + A for mail.<domain> (and AAAA when IPv6 is on for the domain's zone, see domains.ipv6), writes an ACME helper vhost, and orders a cert covering mail.<domain> (ssl_task_id in the response) so IMAP/SMTP clients connecting to mail.<domain> get a matching certificate.",
     inputSchema: {
       type: "object",
       properties: { name: { type: "string", description: "Apex domain to enable mail for (e.g. example.com)." } },
@@ -194,7 +194,7 @@ export const TOOLS: Tool[] = [
     page: "Mailboxes",
     name: "mail.domain_dns_check",
     description:
-      "Live check of one mail domain's DNS records for both protocols (MX, A / AAAA, SPF, DKIM, DMARC and so on), each ok / warn / fail with a plain explanation. managed = the zone is hosted in this panel's DNS, so Reconcile zone on the domain's page can repair the records. Slow: live DNS lookups.",
+      "Live check of one mail domain's DNS records for both protocols (MX, A / AAAA, SPF, DKIM, DMARC and so on), each ok / warn / fail with a plain explanation. managed = the zone is hosted in this panel's DNS, so Reconcile zone on the domain's page can repair the records; the IPv6 ones (AAAA, ip6: in SPF) come and go with the domain's IPv6 switch (domains.set_ipv6). Slow: live DNS lookups.",
     inputSchema: {
       type: "object",
       properties: { name: { type: "string", description: "Mail domain (apex, e.g. example.com)." } },
