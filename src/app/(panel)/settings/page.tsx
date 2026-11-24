@@ -66,6 +66,7 @@ import { isIP } from "node:net";
 import SettingsTabs from "./SettingsTabs";
 import MailIpSection, { loadMailIpSettings } from "./MailIpSection";
 import PrivacySection, { loadPrivacy } from "./PrivacySection";
+import Ipv6Section, { loadIpv6Status } from "./Ipv6Section";
 
 export const dynamic = "force-dynamic";
 
@@ -103,6 +104,7 @@ export default async function SettingsPage() {
   const panelHostName = config.panelHost && !isIP(config.panelHost) ? config.panelHost : null;
   const mailIp = await loadMailIpSettings();
   const privacy = await loadPrivacy();
+  const ipv6 = await loadIpv6Status();
   const pdnsZones = await agent.dns.listZones().catch(() => []);
   // Cert status for the panel host so PanelHostForm can show "SSL · Nd"
   // instead of just an "Issue cert" button when a cert already exists.
@@ -439,6 +441,7 @@ export default async function SettingsPage() {
         {
           id: "dns",
           label: "DNS & SSL",
+          anchors: ["ipv6"],
           content: (
             <>
             <div className={styles.section}>
@@ -457,6 +460,8 @@ export default async function SettingsPage() {
                       action={setSettingAction.bind(null, "dns.ns_pair")}
                     />
                   </div>
+
+            <Ipv6Section status={ipv6} />
 
             <div className={styles.section}>
                     <h2 className={styles.sectionTitle}>SSL contact email</h2>

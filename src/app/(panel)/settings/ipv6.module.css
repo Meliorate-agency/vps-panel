@@ -1,0 +1,38 @@
+/* Settings > DNS & SSL > IPv6. The choice cards, rows and notes are the Mail
+ * tab's (mailIp.module.css); this file only adds what that one does not
+ * have. Colours come from the theme variables only. */
+
+/* The address in effect, or what to do without one. */
+.state {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin: 0 0 14px;
+  padding: 10px 12px;
+  background: var(--bg-elev-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  font-size: 13px;
+  overflow-wrap: anywhere;
+}
+
+.stateWarn {
+  background: color-mix(in srgb, var(--warn) 8%, transparent);
+  border-color: color-mix(in srgb, var(--warn) 35%, transparent);
+}
+
+/* An address as a choice card's title: it must break anywhere on a phone. */
+.address {
+  font-family: var(--mono);
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+
+/* The sentence next to Save about records that move. */
+.saveNote {
+  font-size: 12px;
+  color: var(--text-dim);
+  flex: 1 1 260px;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
