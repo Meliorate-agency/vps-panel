@@ -142,6 +142,9 @@ export default function Ipv6Form({ status, action }: { status: Ipv6Status; actio
                   <span className={mail.sub}>Not on this server&apos;s network interfaces now.</span>
                 )}
                 {savedAddress === c.address && <span className={mail.sub}>Chosen now</span>}
+                {savedAddress === "" && status.address === c.address && (
+                  <span className={mail.sub}>In effect now, found by Automatic</span>
+                )}
               </span>
             </label>
           ))}

@@ -664,36 +664,40 @@ function buildGroupedRows({
 }
 
 function renderManagedDns(ipv6: boolean) {
-  return (
-    <span style={{ display: "inline-flex", alignItems: "center", flexWrap: "wrap", gap: "4px 0" }}>
+  return withIpv6Badge(
+    <span style={{ display: "inline-flex", alignItems: "center" }}>
       <StatusBadge text="managed" tone="ok" />
       <InfoTooltip
         label="What does Managed mean?"
         text="The PowerDNS zone for this domain lives on this VPS and is tracked by the panel. The DNS records you see on the domain detail page are what's actually served — provided the registrar's nameservers point here."
       />
-      {ipv6 && renderIpv6Badge()}
-    </span>
+    </span>,
+    ipv6,
   );
 }
 
 function renderUntrackedDns(ipv6: boolean) {
-  return (
-    <span style={{ display: "inline-flex", alignItems: "center", flexWrap: "wrap", gap: "4px 0" }}>
+  return withIpv6Badge(
+    <span style={{ display: "inline-flex", alignItems: "center" }}>
       <StatusBadge text="untracked" tone="warn" />
       <InfoTooltip
         label="What does Untracked DNS mean?"
         text="A PowerDNS zone exists for this domain on the VPS, but the panel's database has no record of it. Click Adopt to start tracking it via the panel. Until you do, you can't edit records here."
       />
-      {ipv6 && renderIpv6Badge()}
-    </span>
+    </span>,
+    ipv6,
   );
 }
 
-/** IPv6 is on for the zone: it publishes this server's IPv6 address. */
-function renderIpv6Badge() {
+/** A zone with IPv6 on: an IPv6 badge under its DNS badge. */
+function withIpv6Badge(cell: React.ReactNode, ipv6: boolean) {
+  if (!ipv6) return cell;
   return (
-    <span title="IPv6 is on: the zone publishes this server's IPv6 address. It is switched on the domain's page.">
-      <StatusBadge text="IPv6" tone="ok" />
+    <span style={{ display: "inline-flex", flexDirection: "column", alignItems: "flex-start", gap: 4 }}>
+      {cell}
+      <span title="IPv6 is on: the zone publishes this server's IPv6 address. It is switched on the domain's page.">
+        <StatusBadge text="IPv6" tone="ok" />
+      </span>
     </span>
   );
 }

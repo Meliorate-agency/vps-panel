@@ -79,7 +79,8 @@
 
 .record {
   display: grid;
-  grid-template-columns: 112px 1fr;
+  /* The badge column of the check list below, so the two line up. */
+  grid-template-columns: 92px 1fr;
   gap: 2px 10px;
   align-items: start;
   min-width: 0;

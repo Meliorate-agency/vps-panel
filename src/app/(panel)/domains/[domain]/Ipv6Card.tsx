@@ -47,10 +47,14 @@ export default function Ipv6Card({
   const [outcome, setOutcome] = useState<SwitchOutcome | null>(null);
   const [confirm, setConfirm] = useState<"on" | "off" | null>(null);
   const switchSeq = useRef(0);
+  // Counts switches that succeeded: a read that started before one holds
+  // the old state and must not replace the switch's result.
+  const switched = useRef(0);
 
   // Not a transition: the switch must not wait for a slow read.
   const read = async () => {
     const id = ++readSeq.current;
+    const before = switched.current;
     setReading(true);
     let next: Details;
     try {
@@ -62,7 +66,7 @@ export default function Ipv6Card({
       next = { kind: "error", error: `The check did not finish: ${errorText(e)}`, unsupported: false };
     }
     if (id !== readSeq.current) return;
-    setDetails(next);
+    if (switched.current === before) setDetails(next);
     setReading(false);
   };
 
@@ -81,9 +85,6 @@ export default function Ipv6Card({
   const run = (target: boolean) => {
     if (switching) return;
     const id = ++switchSeq.current;
-    // A newer state is coming: an older read must not overwrite it.
-    readSeq.current++;
-    setReading(false);
     startSwitch(async () => {
       let r: Ipv6Result<DomainIpv6>;
       try {
@@ -97,6 +98,7 @@ export default function Ipv6Card({
       startSwitch(() => {
         setConfirm(null);
         if (r.ok) {
+          switched.current++;
           setDetails({ kind: "ok", data: r.data, at: new Date().toLocaleTimeString() });
           setOutcome({ ok: true, enabled: r.data.enabled });
         } else {
@@ -320,7 +322,7 @@ function RecordList({ records, enabled }: { records: DomainIpv6Record[]; enabled
             ) : enabled ? (
               <StatusBadge text="missing" tone="warn" />
             ) : (
-              <StatusBadge text="not published" tone="muted" />
+              <StatusBadge text="absent" tone="muted" />
             )}
           </span>
           <span className={local.recordName}>
