@@ -37,8 +37,43 @@ pub fn init(panel_host: &str) {
     let _ = HOST.set(panel_host.to_string());
 }
 
-fn host() -> &'static str {
-    HOST.get().map(String::as_str).unwrap_or("vps-panel")
+/// The panel's .env. PANEL_HOST and COOKIE_SECURE are read from it for each
+/// message: the agent's own config is read once at start and names the old
+/// host after a hostname change until the agent restarts.
+const ENV_PATH: &str = "/etc/vps-panel/.env";
+
+fn env_value(env: &str, key: &str) -> Option<String> {
+    env.lines()
+        .find_map(|l| l.strip_prefix(key).and_then(|v| v.strip_prefix('=')))
+        .map(|v| v.trim().trim_matches('"').to_string())
+        .filter(|v| !v.is_empty())
+}
+
+/// The name messages give this server, and the address of the panel: the
+/// hostname from .env (an IP address before one is set), else the one the
+/// agent started with. https once the panel has its certificate
+/// (COOKIE_SECURE=1), http before that.
+fn host_and_base(env: &str, started_with: Option<&str>) -> (String, String) {
+    let host = env_value(env, "PANEL_HOST")
+        .map(|h| h.to_lowercase())
+        .or_else(|| started_with.map(str::trim).filter(|h| !h.is_empty()).map(str::to_string))
+        .unwrap_or_else(|| "vps-panel".to_string());
+    let scheme = if env_value(env, "COOKIE_SECURE").as_deref() == Some("1") || env.is_empty() {
+        "https"
+    } else {
+        "http"
+    };
+    let base = format!("{scheme}://{host}");
+    (host, base)
+}
+
+fn host_now() -> (String, String) {
+    let env = std::fs::read_to_string(ENV_PATH).unwrap_or_default();
+    host_and_base(&env, HOST.get().map(String::as_str))
+}
+
+fn host() -> String {
+    host_now().0
 }
 
 /// Every event that can be sent. src/lib/notificationEvents.ts offers the
@@ -166,7 +201,7 @@ fn fmt_time(t: DateTime<Utc>) -> String {
 }
 
 fn panel_url(path: &str) -> String {
-    format!("https://{}{path}", host())
+    format!("{}{path}", host_now().1)
 }
 
 /// `[host] subject`, on one line.
@@ -1847,6 +1882,24 @@ pub async fn test(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn messages_name_the_host_and_scheme_the_panel_has_now() {
+        // A hostname change rewrites .env; the agent still holds the old one.
+        let env = "JWT_SECRET=x\nPANEL_HOST=Panel.Example.com\nCOOKIE_SECURE=1\n";
+        assert_eq!(
+            host_and_base(env, Some("old.example.com")),
+            ("panel.example.com".to_string(), "https://panel.example.com".to_string())
+        );
+        // Before a certificate the panel answers on plain HTTP, by address.
+        let env = "PANEL_HOST=203.0.113.7\nCOOKIE_SECURE=0\n";
+        assert_eq!(host_and_base(env, None).1, "http://203.0.113.7");
+        // No PANEL_HOST line, or an empty one: what the agent started with.
+        assert_eq!(host_and_base("PANEL_HOST=\nCOOKIE_SECURE=1\n", Some("a.example")).0, "a.example");
+        assert_eq!(host_and_base("", Some(" ")).0, "vps-panel");
+        // PANEL_HOSTNAME is another key.
+        assert_eq!(host_and_base("PANEL_HOSTNAME=x.example\n", Some("a.example")).0, "a.example");
+    }
 
     fn conn() -> Connection {
         let c = Connection::open_in_memory().unwrap();
