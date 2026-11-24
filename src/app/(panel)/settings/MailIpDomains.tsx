@@ -269,7 +269,8 @@ function DnsResult({
           {problems ? (
             <>
               This panel hosts the zone: open {domainLink} and use Reconcile zone to put the mail
-              records right.
+              records right. Its IPv6 records (AAAA, and ip6 in SPF) come with the IPv6 switch on
+              that page.
             </>
           ) : (
             <>This panel hosts the zone. Its records are on the page for {domainLink}.</>

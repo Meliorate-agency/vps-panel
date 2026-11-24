@@ -27,7 +27,7 @@
 - **Mail:** virtual mailboxes with quotas, DKIM signing, forwarders and catch-alls, delivery tracking, Roundcube webmail where each person sets their own filters and Out of Office.
 - **Databases:** MariaDB and PostgreSQL users, databases and grants, SQL dump import, phpMyAdmin and pgAdmin.
 - **One-click installs:** Docker, Redis, Qdrant, n8n, phpMyAdmin, pgAdmin, Roundcube, Tailscale.
-- **Operations:** encrypted, deduplicated backups with restic, cron jobs, live logs, a web terminal, task progress, audit log, health charts, email and webhook notifications.
+- **Operations:** encrypted, deduplicated backups with restic, cron jobs, live logs, a web terminal, task progress, audit log, health charts, and notifications by email, webhook or Telegram when something fails: tasks, services, disks, the mail queue, certificates, memory.
 - **Security:** firewall and fail2ban bans from the UI, SSH keys and sshd settings, TOTP two-factor login, panel IP allowlist, admin and user roles.
 - **My Networks:** link several servers and see their status in one panel.
 - **Themes:** nine built-in colour themes or your own, and the panel updates itself from GitHub.

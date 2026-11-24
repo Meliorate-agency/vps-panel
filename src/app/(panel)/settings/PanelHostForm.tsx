@@ -323,7 +323,7 @@ export default function PanelHostForm({
                   <li>
                     Create new PowerDNS zone for the apex{" "}
                     <span className={styles.code}>{apexThatWouldBeCreated}</span> (SOA,
-                    NS×2, A @/www/mail, AAAA, CAA)
+                    NS×2, A @/www/mail, CAA; AAAA when IPv6 is on for new domains)
                   </li>
                   <li>
                     Add <span className={styles.code}>A</span> record{" "}
@@ -340,7 +340,7 @@ export default function PanelHostForm({
                 <li>
                   Create a new PowerDNS zone{" "}
                   <span className={styles.code}>{trimmed}</span> (SOA, NS×2, A
-                  @/www/mail, AAAA, CAA)
+                  @/www/mail, CAA; AAAA when IPv6 is on for new domains)
                 </li>
               )}
               <li>
