@@ -23,6 +23,20 @@ rm -f /usr/local/bin/vps-panel-agent /usr/local/bin/vps-panel-agent.prev
 rm -rf /var/backups/vps-panel-config/units.prev
 rm -rf /opt/vps-panel
 rm -rf /run/vps-panel
+# Settings > Privacy: the masked access log and the log retention are kept up
+# by the agent. Without it they go back to the system's own settings, so the
+# server is not left with a log format and limits nothing shows any more.
+if grep -q '#vps-panel-privacy: ' /etc/nginx/nginx.conf 2>/dev/null || [[ -f /etc/nginx/conf.d/vps-panel-privacy.conf ]]; then
+  sed -i 's/#vps-panel-privacy: //' /etc/nginx/nginx.conf
+  rm -f /etc/nginx/conf.d/vps-panel-privacy.conf
+  if nginx -t >/dev/null 2>&1; then systemctl reload nginx || true; fi
+fi
+rm -f /etc/logrotate.d/0-vps-panel-*
+if [[ -f /etc/systemd/journald.conf.d/90-vps-panel-retention.conf ]]; then
+  rm -f /etc/systemd/journald.conf.d/90-vps-panel-retention.conf
+  systemctl restart systemd-journald || true
+fi
+
 # The agent orders MariaDB after Docker while phpMyAdmin has it listen on the
 # Docker bridge. Without the agent nothing maintains that drop-in.
 if [[ -f /etc/systemd/system/mariadb.service.d/10-vps-panel-docker.conf ]]; then
