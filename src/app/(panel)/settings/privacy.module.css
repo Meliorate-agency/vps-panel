@@ -1,0 +1,259 @@
+/* Settings > Privacy. The choice cards, rows, notes and warning box are the
+ * Mail tab's (mailIp.module.css); this file only adds what that one does not
+ * have. Colours come from the theme variables only. */
+
+.intro {
+  font-size: 13px;
+  color: var(--text-dim);
+  margin-bottom: 16px;
+  overflow-wrap: anywhere;
+}
+
+/* What the server does now: one row per part the agent reports. */
+.parts {
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  font-size: 13px;
+}
+
+.part {
+  display: grid;
+  grid-template-columns: 124px 1fr;
+  gap: 2px 10px;
+  align-items: start;
+  min-width: 0;
+}
+
+.partBadge {
+  grid-row: 1 / span 4;
+}
+
+.partLabel {
+  grid-column: 2;
+  font-weight: 600;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.partLine {
+  grid-column: 2;
+  font-size: 12px;
+  color: var(--text-dim);
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.partDetail {
+  grid-column: 2;
+  font-size: 12px;
+  color: var(--text);
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.holdsHead {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 10px;
+}
+
+.holdsHead h3 {
+  margin: 0;
+}
+
+/* A fieldset only there to disable what is in it. */
+.plain {
+  border: none;
+  padding: 0;
+  margin: 0;
+  min-width: 0;
+}
+
+/* "Keep logs for" and its Save button on one line, wrapping on a phone. */
+.inline {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  gap: 8px;
+}
+
+.inlineField {
+  min-width: 220px;
+}
+
+/* Personal data request. */
+.kinds {
+  border: none;
+  padding: 0;
+  margin: 0 0 10px;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 18px;
+  min-width: 0;
+}
+
+.kind {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 13px;
+  cursor: pointer;
+}
+
+.kind input {
+  accent-color: var(--accent);
+}
+
+.searchField {
+  flex: 1 1 260px;
+  min-width: 0;
+  max-width: 460px;
+}
+
+.result {
+  margin-top: 18px;
+  padding-top: 16px;
+  border-top: 1px solid var(--border);
+}
+
+.resultHead {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 10px;
+}
+
+.resultTitle {
+  font-size: 13px;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.sources {
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.source {
+  background: var(--bg-elev-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 10px 12px;
+  min-width: 0;
+}
+
+.sourceHead {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px 8px;
+}
+
+.sourceName {
+  font-weight: 600;
+  font-size: 13px;
+  overflow-wrap: anywhere;
+}
+
+.sourceNothing .sourceName {
+  color: var(--text-dim);
+  font-weight: 400;
+}
+
+.sourceNote {
+  font-size: 12px;
+  color: var(--text-dim);
+  margin-top: 4px;
+  overflow-wrap: anywhere;
+}
+
+.samples {
+  margin-top: 6px;
+}
+
+.samples summary {
+  cursor: pointer;
+  font-size: 12px;
+  color: var(--accent);
+  width: fit-content;
+}
+
+.samples summary:hover {
+  color: var(--accent-hover);
+}
+
+.sampleLines {
+  font-family: var(--mono);
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--text);
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 8px 10px;
+  margin: 6px 0 0;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  max-height: 320px;
+  overflow-y: auto;
+}
+
+/* In the erase confirmation: a tick box per source that will be changed. */
+.pickList {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin: 0 0 12px;
+}
+
+.pick {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  cursor: pointer;
+  color: var(--text-dim);
+  overflow-wrap: anywhere;
+}
+
+.pick input {
+  margin-top: 3px;
+  accent-color: var(--accent);
+  flex-shrink: 0;
+}
+
+.strong {
+  color: var(--text);
+  font-weight: 600;
+}
+
+@media (max-width: 640px) {
+  .part {
+    grid-template-columns: 1fr;
+  }
+
+  .partBadge {
+    grid-row: auto;
+  }
+
+  .partLabel,
+  .partLine,
+  .partDetail {
+    grid-column: 1;
+  }
+
+  .inlineField,
+  .searchField {
+    min-width: 0;
+    flex: 1 1 100%;
+    max-width: none;
+  }
+}
