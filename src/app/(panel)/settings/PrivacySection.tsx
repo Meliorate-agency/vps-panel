@@ -61,8 +61,8 @@ export default function PrivacySection({ data, isAdmin }: { data: PrivacyData; i
         <h2 className={styles.sectionTitle}>Log retention</h2>
         <p className={styles.muted} style={{ marginBottom: 10 }}>
           How long logs that hold personal data are kept before they are deleted: the web server&apos;s logs,
-          the system journal with the mail and SSH logs, the panel&apos;s audit log, its sign-in records and the
-          task history. Sign-in records and task history never stay longer than 30 days, whatever is chosen
+          the system journal with the mail and SSH logs, the other system logs in /var/log (mail, sign-in,
+          firewall and ban logs), the panel&apos;s audit log, its sign-in records and the task history. Sign-in records and task history never stay longer than 30 days, whatever is chosen
           here.
         </p>
         <PrivacyRetentionForm days={settings.retention_days} action={savePrivacyRetentionAction} />

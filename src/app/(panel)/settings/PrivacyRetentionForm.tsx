@@ -184,6 +184,7 @@ export default function PrivacyRetentionForm({ days, action }: { days: number | 
         <ul>
           <li>the web server&apos;s log files</li>
           <li>the system journal, which holds the mail, SSH and service logs</li>
+          <li>the other system logs in /var/log: mail, sign-in, firewall and ban logs</li>
           <li>the panel&apos;s audit log</li>
           <li>the panel&apos;s sign-in records</li>
           <li>the task history with its logs</li>

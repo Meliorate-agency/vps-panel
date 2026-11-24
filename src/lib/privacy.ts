@@ -375,7 +375,8 @@ function usersSource(s: Subject): SubjectSource {
 
 function loginsWhere(s: Subject): { where: string; params: string[] } {
   return s.kind === "email"
-    ? { where: "lower(email) = ?", params: [s.value] }
+    ? // Two-factor code attempts are stored as `totp:<email>` (server-actions/auth.ts).
+      { where: "lower(email) IN (?, ?)", params: [s.value, `totp:${s.value}`] }
     : { where: `lower(ip) IN (${marks(s.forms.length)})`, params: s.forms };
 }
 
