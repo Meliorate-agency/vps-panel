@@ -1377,6 +1377,18 @@ fn aaaa_item(aaaa: &Lookup, host: &str, c: &DomainCtx<'_>, managed: bool) -> Mai
             }
             let found = join_names(addrs);
             match c.records_v6() {
+                // Reconcile never touches an AAAA that points elsewhere.
+                Some(v6) if managed => item(
+                    ID,
+                    LABEL,
+                    Status::Fail,
+                    format!(
+                        "{host} has an AAAA record for {found}, which is not this server ({v6}): senders that try IPv6 first cannot deliver. \
+                         Remove it {}, then run Reconcile on {}: with IPv6 on it adds {host} AAAA {v6}.",
+                        c.remove_at(managed),
+                        c.domain
+                    ),
+                ),
                 Some(v6) => item(
                     ID,
                     LABEL,
@@ -2305,6 +2317,12 @@ mod tests {
             assert_eq!(status_of(&checks, id).0, Status::Fail, "{id}");
         }
         assert!(status_of(&checks, "spf").1.contains("more than one SPF record"));
+        // Reconcile leaves an AAAA that points elsewhere alone: it has to go first.
+        let detail = status_of(&checks, "aaaa").1;
+        assert!(
+            detail.contains("Remove it under Domains > example.com > DNS records, then run Reconcile on example.com: with IPv6 on it adds mail.example.com AAAA 2001:db8:1::1."),
+            "{detail}"
+        );
 
         // An AAAA left behind on a server that has no IPv6 (any more).
         let (_, checks) = domain_checks(&dns, &ctx(Some(&ns), None, &[])).await;

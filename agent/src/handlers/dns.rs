@@ -1014,6 +1014,16 @@ pub(crate) async fn create_record_inner(
         .exec_first("SELECT LAST_INSERT_ID()", ())
         .await?
         .unwrap_or(0);
+    // An A record that sends the name to this server, in a zone with IPv6
+    // on, brings the AAAA that on means. The panel creates a new site's A
+    // record here: the site gets its AAAA whether or not a certificate is
+    // ordered (the certificate preflight adds it too). Never fails the
+    // record itself.
+    if rtype == "A" {
+        if let Err(e) = follow_ipv6(state, &mut conn, domain_id, &zone, &name, &req.content).await {
+            tracing::warn!(zone = %zone, name = %name, error = %e, "AAAA not added next to the new A record");
+        }
+    }
     Ok(RecordRow {
         id,
         name,
@@ -1418,8 +1428,9 @@ pub(crate) async fn verify_public_dns(
 async fn check_public_dns(state: &AppState, domain: &str) -> Result<Option<String>, String> {
     let facts_v4 = crate::server_ip::ipv4_facts(&state.config.panel_host).await;
     let expected_v4 = facts_v4.address();
-    let expected_v6 = crate::server_ip::resolve_ipv6(None, &state.config.panel_host).await;
-    let own_v6 = own_ipv6s(expected_v6.as_deref()).await;
+    let facts_v6 = crate::server_ip::ipv6_facts(&state.panel_db, &state.config.panel_host).await;
+    let expected_v6 = facts_v6.address().or_else(|| facts_v6.published.clone());
+    let own_v6 = ipv6_reaching(&facts_v6);
     let v4_resolved = dig_public(domain, "A").await;
     let v6_resolved = dig_public(domain, "AAAA").await;
     judge_public_dns(
@@ -1435,13 +1446,19 @@ async fn check_public_dns(state: &AppState, domain: &str) -> Result<Option<Strin
 }
 
 /// Every IPv6 address a name may carry and still reach this server: the
-/// ones on its interfaces (nginx listens on all of them) and the panel
+/// one records get first (the preflight suggests it), the ones on its
+/// interfaces (nginx listens on all of them), the one chosen, and the panel
 /// hostname's AAAA.
-async fn own_ipv6s(expected_v6: Option<&str>) -> Vec<String> {
-    let mut own = crate::server_ip::ipv6s_on_interfaces().await;
-    if let Some(v6) = expected_v6 {
-        if !own.iter().any(|a| a == v6) {
-            own.push(v6.to_string());
+fn ipv6_reaching(facts: &crate::server_ip::Ipv6Facts) -> Vec<String> {
+    let mut own: Vec<String> = Vec::new();
+    let all = facts
+        .address()
+        .into_iter()
+        .chain(facts.own())
+        .chain(facts.published.clone());
+    for ip in all {
+        if !own.contains(&ip) {
+            own.push(ip);
         }
     }
     own
@@ -1570,8 +1587,9 @@ pub(crate) async fn cleanup_subdomain_records(
     let own_v4 = crate::server_ip::ipv4_facts(&state.config.panel_host)
         .await
         .reaching();
-    let expected_v6 = crate::server_ip::resolve_ipv6(None, &state.config.panel_host).await;
-    let own_v6 = own_ipv6s(expected_v6.as_deref()).await;
+    let own_v6 = ipv6_reaching(
+        &crate::server_ip::ipv6_facts(&state.panel_db, &state.config.panel_host).await,
+    );
     let rows: Vec<(u64, Option<String>)> = conn
         .exec(
             "SELECT id, content FROM records \
@@ -2173,6 +2191,33 @@ pub(crate) async fn mail_host_ipv6<Q: Queryable>(
         }
     }
     apply_ipv6(q, domain_id, &plan, own.v6.as_deref()).await
+}
+
+/// After an A record for `name` was created: when it points at this server
+/// and the zone has IPv6 on, the name gets its AAAA (`plan_name`).
+async fn follow_ipv6(
+    state: &AppState,
+    conn: &mut mysql_async::Conn,
+    domain_id: u32,
+    zone: &str,
+    name: &str,
+    content: &str,
+) -> AgentResult<()> {
+    let own = own_addrs(state).await;
+    let Some(target) = own.v6.as_deref() else {
+        return Ok(());
+    };
+    if !is_own_ip(content, &own.own_v4) {
+        return Ok(());
+    }
+    let stored = stored_ipv6(conn, domain_id).await?;
+    let records = zone_records(conn, domain_id).await?;
+    if !ipv6_enabled(stored, zone, &records, &own.own_v6) {
+        return Ok(());
+    }
+    let mut plan = Ipv6Plan::default();
+    plan_name(&mut plan, name, &records, target, &own);
+    apply_ipv6(conn, domain_id, &plan, Some(target)).await
 }
 
 /// This server's addresses, for the record writers.

@@ -1463,6 +1463,23 @@ server {
         assert!(rows(&state, "off.test", "A").await.contains(&("news.off.test".to_string(), V4.to_string())));
         assert!(!rows(&state, "off.test", "AAAA").await.iter().any(|(n, _)| n == "news.off.test"));
 
+        // A site's A record, as the panel creates it: with IPv6 on the AAAA
+        // comes with it, with IPv6 off it does not; an A elsewhere brings none.
+        let a = |name: &str, content: &str| dns::CreateRecord {
+            name: name.into(),
+            r#type: "A".into(),
+            content: content.into(),
+            ttl: 3600,
+            prio: 0,
+        };
+        dns::create_record_inner(&state, "on.test".into(), a("app", V4)).await.unwrap();
+        dns::create_record_inner(&state, "on.test".into(), a("ext", "203.0.113.50")).await.unwrap();
+        dns::create_record_inner(&state, "off.test".into(), a("app", V4)).await.unwrap();
+        let on_aaaa = rows(&state, "on.test", "AAAA").await;
+        assert!(on_aaaa.contains(&("app.on.test".to_string(), A6.to_string())), "{on_aaaa:?}");
+        assert!(!on_aaaa.iter().any(|(n, _)| n == "ext.on.test"));
+        assert!(!rows(&state, "off.test", "AAAA").await.iter().any(|(n, _)| n == "app.off.test"));
+
         // The panel hostname task.
         let own = vec![A6.to_string(), B6.to_string()];
         let log = dns::point_name_here(&state, "on.test", "panel.on.test", V4, &own).await.unwrap();
