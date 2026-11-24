@@ -1,6 +1,7 @@
 import "server-only";
 import { lookup } from "node:dns/promises";
 import { isIP } from "node:net";
+import { serverGeoEnabled } from "../privacy";
 
 /** Where a server is, from the IP its address resolves to. */
 export type ServerLocation = {
@@ -29,10 +30,15 @@ const countryNames = new Intl.DisplayNames(["en"], { type: "region" });
  * private address). Unknown and stale hosts are looked up in the background
  * so the page never waits on DNS or the geolocation service; the networks
  * page re-renders every 10 s and picks them up.
+ *
+ * With the lookups switched off (Settings > Privacy > Outside lookups)
+ * nothing is looked up and nothing is shown, a location found earlier
+ * included: the map is empty.
  */
 export function serverLocations(urls: string[]): Map<string, ServerLocation | null> {
   const now = Date.now();
   const out = new Map<string, ServerLocation | null>();
+  if (!serverGeoEnabled()) return out;
   for (const url of urls) {
     const host = hostOf(url);
     if (!host) continue;
@@ -96,6 +102,8 @@ function isPrivate(ip: string): boolean {
 }
 
 async function getJson(url: string): Promise<Record<string, unknown> | null> {
+  // Switched off while a lookup was under way: its next request stays here.
+  if (!serverGeoEnabled()) return null;
   const res = await fetch(url, {
     headers: { Accept: "application/json" },
     signal: AbortSignal.timeout(TIMEOUT_MS),
