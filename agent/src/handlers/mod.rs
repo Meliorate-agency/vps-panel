@@ -10,6 +10,7 @@ pub mod files;
 pub mod firewall;
 pub mod health;
 pub mod hostname;
+pub mod ipv6;
 pub mod logs;
 pub mod mail;
 pub mod mail_aliases;
@@ -110,6 +111,8 @@ pub fn router(state: AppState) -> Router {
         .route("/dns/zones/{zone}", delete(dns::delete_zone))
         .route("/dns/zones/{zone}/sign", post(dns::sign_zone))
         .route("/dns/zones/{zone}/reconcile", post(dns::reconcile_zone))
+        // IPv6 per domain (ipv6.rs): the switch, the records it means, the checks.
+        .route("/dns/zones/{zone}/ipv6", get(ipv6::get_zone).put(ipv6::put_zone))
         .route(
             "/dns/zones/{zone}/records",
             get(dns::list_records).post(dns::create_record),
@@ -118,6 +121,9 @@ pub fn router(state: AppState) -> Router {
             "/dns/records/{id}",
             patch(dns::update_record).delete(dns::delete_record),
         )
+        // The server's IPv6 address and the default for new domains (ipv6.rs)
+        .route("/ipv6/status", get(ipv6::status))
+        .route("/ipv6/settings", put(ipv6::put_settings))
         // Mail
         .route("/mail/domains", post(mail::create_domain).get(mail::list_domains))
         .route("/mail/mailboxes", post(mail::create_mailbox).get(mail::list_mailboxes))

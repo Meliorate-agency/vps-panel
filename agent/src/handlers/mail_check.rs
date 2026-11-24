@@ -929,6 +929,23 @@ fn helo_item(
     }
 }
 
+/// Reverse DNS of an IPv6 address as the outgoing mail check sees it: its
+/// PTR record, and whether that name resolves back. For the IPv6 checks of
+/// a mail domain (ipv6.rs).
+pub(crate) async fn reverse_dns_items(r: &dyn Resolver, addr: &str, helo: &str) -> Vec<MailCheckItem> {
+    let ptr = r.lookup(addr, "PTR").await;
+    let mut forward: Vec<(String, Lookup)> = Vec::new();
+    if let Lookup::Records(names) = &ptr {
+        for name in names.iter().take(3) {
+            forward.push((name.clone(), r.lookup(name, "AAAA").await));
+        }
+    }
+    vec![
+        ptr_item(&ptr, addr, helo),
+        fcrdns_item(&forward, addr, helo, Family::V6, None),
+    ]
+}
+
 /// SPF of every mail domain against one address. `results` pairs each domain
 /// with its outcome; a domain missing from it was not reached in time.
 /// `held` are the domains Postfix keeps off this address meanwhile

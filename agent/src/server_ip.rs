@@ -295,10 +295,6 @@ impl Ipv6Facts {
         self.in_effect().0
     }
 
-    pub fn source(&self) -> Ipv6Source {
-        self.in_effect().1
-    }
-
     /// Every IPv6 address an AAAA record or SPF `ip6:` term may name and be
     /// this server's: the ones on the interfaces, and the one chosen also
     /// after it left them, so that records still naming it can be moved.
@@ -738,14 +734,14 @@ mod tests {
         assert_eq!(f.in_effect(), (Some("2001:db8:1::1".into()), S::Interface));
         let f = v6(None, &["2001:db8:1::1"], "");
         assert_eq!(f.address().as_deref(), Some("2001:db8:1::1"));
-        assert_eq!(f.source(), S::Interface);
+        assert_eq!(f.in_effect().1, S::Interface);
         // No address, or only private ones.
         assert_eq!(v6(None, &[], "").in_effect(), (None, S::None));
         assert_eq!(v6(None, &["fd00::5"], "").in_effect(), (None, S::None));
         // A private address can still be chosen (a LAN setup).
         assert_eq!(v6(None, &["fd00::5"], "fd00::5").in_effect(), (Some("fd00::5".into()), S::Setting));
         // Something unreadable stored is automatic.
-        assert_eq!(v6(None, &["2001:db8:1::1"], "nonsense").source(), S::Interface);
+        assert_eq!(v6(None, &["2001:db8:1::1"], "nonsense").in_effect().1, S::Interface);
         assert!(is_ula("fd12::1") && is_ula("fc00::1") && !is_ula("2001:db8::1") && !is_ula("x"));
     }
 

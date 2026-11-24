@@ -2174,6 +2174,13 @@ pub(crate) async fn own_addrs(state: &AppState) -> OwnAddrs {
         crate::server_ip::ipv6_facts(&state.panel_db, &state.config.panel_host),
         crate::server_ip::ipv4_facts(&state.config.panel_host),
     );
+    own_addrs_from(&facts6, &facts4)
+}
+
+pub(crate) fn own_addrs_from(
+    facts6: &crate::server_ip::Ipv6Facts,
+    facts4: &crate::server_ip::Ipv4Facts,
+) -> OwnAddrs {
     let v4 = facts4.address();
     let mut own_v4: Vec<String> = facts4.interfaces.iter().map(|(_, a)| a.clone()).collect();
     if let Some(a) = &v4 {
