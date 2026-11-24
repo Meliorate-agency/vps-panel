@@ -90,8 +90,9 @@ export default function PrivacySection({ data, isAdmin }: { data: PrivacyData; i
           <h2 className={styles.sectionTitle}>Personal data request</h2>
           <p className={styles.muted} style={{ marginBottom: 10 }}>
             For when someone asks what this server holds about them, or asks for it to be erased. Search by
-            their email address or IP address: the web server&apos;s logs, the mail and SSH logs, mailboxes and
-            forwarders, and the panel&apos;s own accounts, sign-in records and audit log. Not searched: what
+            their email address or IP address: the web server&apos;s logs, the system journal and the other
+            logs in /var/log, fail2ban&apos;s bans, mailboxes, forwarders, stored mail and the mail queue, the
+            task logs, and the panel&apos;s own accounts, sign-in records and audit log. Not searched: what
             your apps keep in their own files and databases, and backups.
           </p>
           <PrivacyRequest searchAction={subjectSearchAction} eraseAction={subjectEraseAction} />

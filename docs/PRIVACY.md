@@ -40,10 +40,10 @@ Every privacy setting starts at the behaviour the panel had before the settings 
 |---|---|---|
 | Panel accounts: email address, argon2id password hash, the two-factor (TOTP) secret, role, creation time | `users` | Until the account is deleted on the Users page. |
 | Sessions: a random token ID, the account, the expiry time. No IP address and no browser details. | `sessions` | Deleted by housekeeping one day after they expire. |
-| Sign-in attempts: the IP address, the email address typed (also one that has no account), the time, and whether it succeeded. Two-factor code attempts are recorded the same way, under `totp:<email>`. | `login_attempts` | Failed attempts 7 days, successful ones 30 days (housekeeping). |
+| Sign-in attempts: the IP address, the email address typed (also one that has no account), the time, and whether it succeeded. Two-factor code attempts are recorded the same way, under `totp:<email>`. | `login_attempts` | Failed attempts 7 days, successful ones 30 days (housekeeping). With a shorter log retention: that many days. |
 | Audit log: time, account, action, target, result and a message. Targets include email addresses typed at a failed sign-in (also ones with no account), mailbox and forwarder addresses, and an old address when an account's email is changed. Calls from AI clients (MCP) record the client's IP address. **Every command run in the web terminal is recorded word for word** (up to 2,000 characters) with the folder it ran in, before it runs. | `audit_log` | No limit. With a log retention set: that many days. |
 | Terminal history: per account and per folder, the last 100 commands, word for word | `terminal_history` | Until 100 newer commands in that folder push it out, or the account is deleted. No time limit. |
-| Task history: the kind of task, its status, times, and its whole log (build output, backup output, certificate orders) | `tasks` | 30 days from the start of the task. The agent deletes older finished tasks when it starts and every 24 hours. With a shorter log retention: that many days. |
+| Task history: the kind of task, its status, times, and its whole log (build output, backup output, certificate orders) | `tasks` | 30 days from the start of the task. The agent deletes older finished tasks when it starts and every 24 hours. With a shorter log retention, housekeeping deletes finished tasks after that many days; a task that is still running keeps its row. |
 | Notification channels: email addresses, webhook URLs, Telegram user IDs and bot tokens | `notifications` | Until the channel is removed. |
 | Settings that name people: the SSL contact email (`panel.acme_email`), the sender of notification email (`notifications.email_from`), trusted IP addresses (`panel.ip_allowlist`), the panel access list | `settings` | Until changed. |
 | My Networks: the name, URL and public key of every server in your networks, when each was last heard from, and its uptime, load, memory and disk use | `networks`, `network_members`, `network_invites` | Until the network is deleted or the server leaves it. The final member list of a network this server deleted (`networks_dissolved`): 90 days. |
@@ -69,14 +69,16 @@ Mail logs are under [Logs](#logs).
 | Log | What it holds | Where | Kept by default |
 |---|---|---|---|
 | Web server access log | One line per request to every site, app and the panel itself: the client's IP address, time, the request line with its query string, status, size, referrer (with its query string) and user agent. One file for all sites: the panel writes no per-site logs. | `/var/log/nginx/access.log`, older days in `access.log.1`, `access.log.2.gz` ... | Ubuntu's rotation (`/etc/logrotate.d/nginx`): daily, 14 old files kept, so about 15 days. The panel does not change this unless you set a log retention. |
-| Web server error log | Errors with the client's IP address, the request line and the site name | `/var/log/nginx/error.log` and its rotated files | Same rotation as the access log. |
-| System journal | Postfix: sender and recipient addresses, the name and IP address of every server or client that connects, mailbox login names. Dovecot: every mailbox login with its IP address, and the address tried with a wrong password. sshd: user names and IP addresses of logins and failed attempts. The output of your Node apps. The panel and the agent (the agent records the address of a mailbox it deletes). | `/var/log/journal/` (`journalctl`) | No time limit. The installer sets persistent storage and a 1 GB cap (`SystemMaxUse=1G` in `/etc/systemd/journald.conf`); the oldest entries go when it is full. On a quiet server that is many months. |
-| fail2ban | Banned IP addresses, the jail and the time; its database also keeps the log lines that led to each ban | `/var/log/fail2ban.log` and rotated files; `/var/lib/fail2ban/fail2ban.sqlite3` | Ubuntu's rotation for the log file and fail2ban's own purge age for the database (`dbpurgeage` in `/etc/fail2ban/fail2ban.conf`); the panel changes neither. |
+| Web server error log | Errors with the client's IP address, the request line and the site name. Always the full address and the full request: the privacy settings cannot change this log's format. | `/var/log/nginx/error.log` and its rotated files | Same rotation as the access log. |
+| System journal | Postfix: sender and recipient addresses, the name and IP address of every server or client that connects, mailbox login names. Dovecot: every mailbox login with its IP address, and the address tried with a wrong password. sshd: user names and IP addresses of logins and failed attempts. The output of your Node apps. The panel and the agent (the agent records the address of a mailbox it deletes). | `/var/log/journal/` (`journalctl`) | No time limit unless you set a log retention. The installer sets persistent storage and a 1 GB cap (`SystemMaxUse=1G` in `/etc/systemd/journald.conf`); the oldest entries go when it is full. On a quiet server that is many months. |
+| fail2ban | Banned IP addresses, the jail and the time; its database also keeps the log lines that led to each ban | `/var/log/fail2ban.log` and rotated files; `/var/lib/fail2ban/fail2ban.sqlite3` | Ubuntu's rotation for the log file (weekly, 4 old files) and fail2ban's own purge age for the database (`dbpurgeage` in `/etc/fail2ban/fail2ban.conf`). A log retention applies to the log file, not to the database. |
 | Rspamd (spam filter) | The sending IP address and the sender and recipient addresses of each message it checks | `/var/log/rspamd/` (set by Rspamd's package, not by the panel) | The package's own rotation. |
 | Container logs | What each Docker app and one-click install writes to its output | `/var/lib/docker/containers/<id>/<id>-json.log` | 10 MB per file, 3 files per container, for every container the panel starts. |
 | Task logs | See `tasks` under [The panel's database](#the-panels-database). | | 30 days. |
 
-If rsyslog is installed (Ubuntu Server images usually include it; check with `ls /var/log/mail.log /var/log/auth.log`), the journal's mail, SSH and system lines are also written as text to `/var/log/mail.log`, `/var/log/auth.log` and `/var/log/syslog`, rotated by Ubuntu's own rules in `/etc/logrotate.d/rsyslog`. The panel does not manage these files: neither the log retention setting nor the request tool covers them. If you do not need them, remove rsyslog (`apt purge rsyslog`); the journal keeps the same lines.
+If rsyslog is installed (Ubuntu Server images usually include it; check with `ls /var/log/mail.log /var/log/auth.log`), the journal's mail, SSH and system lines are also written as text to `/var/log/mail.log`, `/var/log/auth.log`, `/var/log/syslog` and the other files `/etc/logrotate.d/rsyslog` names, rotated by Ubuntu's own rules there (weekly, 4 old files, so about four weeks). The firewall's lines, with the source address of each connection it logs, go to `/var/log/ufw.log`. A log retention set under Settings > Privacy applies to these files too, and the request tool searches them but does not change them (see below). If you do not need them, remove rsyslog (`apt purge rsyslog`); the journal keeps the same lines.
+
+MariaDB and PostgreSQL write their own server logs to `/var/log/mysql/` and `/var/log/postgresql/`, Rspamd to `/var/log/rspamd/`, each rotated by its package. The panel does not change how long these are kept.
 
 fail2ban's jails here (SSH, Postfix login, Dovecot) read the journal. None reads the nginx logs.
 
@@ -107,14 +109,15 @@ Three things follow from how this works:
 
 | Data | Default | With N days |
 |---|---|---|
-| nginx access and error logs | about 15 days | N days |
-| System journal (mail, SSH, services) | no time limit, 1 GB cap | N days |
+| nginx access and error logs | about 15 days | N days, also when N is longer than 15 |
+| System journal (mail, SSH, services) | no time limit, 1 GB cap | N days; the 1 GB cap stays |
+| rsyslog's files (syslog, auth.log, mail.log and the rest), ufw.log, fail2ban.log, where installed | about four weeks | N days, also when N is longer |
 | Audit log | no limit | N days |
 | Sign-in attempts | 7 days failed, 30 days successful | the shorter of those and N days |
 | Task history | 30 days | the shorter of 30 and N days |
 | Sessions | 1 day after expiry | unchanged |
 | Terminal history | last 100 commands per folder | unchanged |
-| fail2ban log and database, Rspamd log, rsyslog files, container logs | their package defaults | unchanged |
+| fail2ban's database, Rspamd's log, MariaDB's and PostgreSQL's logs, container logs | their package defaults | unchanged |
 | Mail, mailboxes, forwarders, webmail data | until deleted | unchanged |
 | A deleted mailbox in the Files trash | 30 days | unchanged |
 | Backups | up to about six months with daily backups | unchanged |
@@ -126,7 +129,7 @@ Three things follow from how this works:
 | Let's Encrypt (`acme-v02.api.letsencrypt.org`) | The account's contact email: Settings > DNS & SSL > SSL contact email, or else `ACME_EMAIL` in `/etc/vps-panel/.env`, which the installer sets to the admin email. The domain names on each certificate. Let's Encrypt then connects to the server over HTTP to check them. Every certificate, with its names, is published in the public Certificate Transparency logs. | When a certificate is ordered or renewed; renewal runs by itself. | Only by not using certificates. Set a role address (such as `hostmaster@`) as the contact email. |
 | GitHub, or wherever the panel's source clone points (`git -C /root/vps-panel-src remote get-url origin`) | A `git fetch`: the server's IP address and nothing about your data | Each time the panel is opened in a browser (the update check in the top bar) and on every update | Point the clone at another remote. |
 | Package sources: Ubuntu's mirrors, `deb.nodesource.com`, `rspamd.com`, `sh.rustup.rs`, crates.io and the npm registry | Download requests (the server's IP address) | At install and on every update; Ubuntu's mirrors also daily for security updates | No |
-| Next.js telemetry (`telemetry.nextjs.org`, run by Vercel) | Nothing since this version: the panel is built and run with `NEXT_TELEMETRY_DISABLED=1`. Before, each build at install and on every update sent anonymous build information (tool version, operating system, CPU and memory size, page counts, build duration, with a random ID). Apps you deploy that use Next.js make their own choice. | Never | Already off |
+| Next.js telemetry (`telemetry.nextjs.org`, run by Vercel) | Nothing. The installer and the updater build the panel with `NEXT_TELEMETRY_DISABLED=1`, and the panel's service unit runs it with the same setting. Earlier versions sent anonymous build information with each build at install and on every update (tool version, operating system, CPU and memory size, page counts, build duration, with a random ID). Apps you deploy that use Next.js make their own choice. | Never | Already off |
 | Public DNS resolvers 1.1.1.1 (Cloudflare), 8.8.8.8 (Google), 9.9.9.9 (Quad9) | The names being checked: your domains, their mail and DKIM/DMARC names, the reverse name of the server's addresses | Before a certificate is ordered, and on the mail DNS and mail IP checks | No |
 | ipinfo.io, and GeoJS (`get.geojs.io`) when ipinfo.io does not answer | The IP address of each server in your My Networks networks, this one included, in the request URL. Nothing about visitors or users. | When the My Networks page is shown. A found location is cached for 24 hours, a failed lookup for 10 minutes, in memory. | Yes: Settings > Privacy, outside lookups. |
 | api.ipify.org | An empty request; it answers with the server's public IPv4 address | Only when the panel's hostname does not resolve to a public IPv4 address: on the Dashboard, Apps, Databases and MCP pages and when a domain is added; cached 5 minutes | No (not covered by the outside-lookups switch). Make the panel hostname's A record point at the server. |
@@ -147,7 +150,7 @@ Nothing else leaves the server on the panel's initiative. In particular:
 
 ## Privacy settings
 
-Under **Settings > Privacy**. Each is a row in panel.db's `settings` table; when you save, the panel stores it and asks the agent to bring the server in line. If that last step fails, the page says "saved, but not applied" and why. The agent also applies the settings when it starts.
+Under **Settings > Privacy**. Each is a row in panel.db's `settings` table; when you save, the panel stores it and asks the agent to bring the server in line. If that last step fails, the page says "saved, but not applied" and why. The agent also applies the settings when it starts and once a day after that, which puts the log format back after a package upgrade replaced `/etc/nginx/nginx.conf`. The outside-lookups setting is the panel's alone and needs no agent.
 
 | Setting | Key | Values | Default |
 |---|---|---|---|
@@ -156,38 +159,78 @@ Under **Settings > Privacy**. Each is a row in panel.db's `settings` table; when
 | Keep logs for | `privacy.retention_days` | empty (no limit), or 7 to 3650 days | empty |
 | Outside lookups (server locations) | `privacy.server_geo` | `on`, `off` | `on` |
 
-The tab shows, for the web server logs, the system journal and the nginx log files, what the settings ask for ("wanted"), what the server does now ("actual"), and, when the two differ, why and what to do. Read that, not this page, to know what holds on your server right now.
+The tab shows, for the web server's access log, the system logs (the journal and the text logs next to it in `/var/log`) and the web server's log files, what the settings ask for ("wanted"), what the server does now ("actual"), and, when the two differ, why and what to do. Read that, not this page, to know what holds on your server right now.
 
-**Masked IP addresses.** nginx writes visitors' addresses shortened: an IPv4 address with its last number set to 0 (203.0.113.87 becomes 203.0.113.0), an IPv6 address cut to its first three groups (2001:db8:85a3:8d3::7 becomes 2001:db8:85a3::). This covers the access log of every site, app and the panel, since they share one file. Lines already written stay as they are until rotation or the log retention removes them. Bans are not affected: fail2ban reads the journal, not these logs, and the panel's sign-in limits use the address of the live connection, not the log.
+**Masked IP addresses.** nginx writes visitors' addresses shortened: an IPv4 address with its last number set to 0 (203.0.113.87 becomes 203.0.113.0), an IPv6 address cut to its first three groups (2001:db8:85a3:8d3::7 becomes 2001:db8:85a3::). An IPv4 address that reaches nginx written as IPv6 (`::ffff:203.0.113.87`) is logged as `::`, and anything nginx prints that is not an address it recognises is logged as `0.0.0.0`: more coarsely, never in full. This covers the access log of every site, app and the panel, since they share one file. Lines already written stay as they are until rotation or the log retention removes them. Bans are not affected: fail2ban reads the journal, not these logs, and the panel's sign-in limits use the address of the live connection, not the log. The sites and apps behind nginx still receive the visitor's full address and may log it themselves.
 
 **Stripped query strings.** nginx logs the address asked for and the referrer without the part after `?`, where search terms, email addresses in links and tokens tend to be. Again lines written before stay as they were.
 
-**Keep logs for N days.** On the server: entries in the system journal (mail, SSH and service logs) and nginx's rotated log files older than N days are deleted. In the panel: the daily housekeeping also deletes audit log entries, sign-in attempts and task history older than N days; the shorter limits these already have stay. The journal removes whole files rather than single lines, so an entry can stay somewhat longer than N days. Not covered: terminal history, the fail2ban log and database, Rspamd's log, rsyslog's text files, container logs, mail, backups and whatever your apps store.
+How the two settings reach nginx: while either is on, the `access_log` line of the http block in `/etc/nginx/nginx.conf` is commented out with `#vps-panel-privacy:`, and the panel's own file `/etc/nginx/conf.d/vps-panel-privacy.conf` declares the same log again in the format `vps_panel_privacy`. Lines already in the logs are not rewritten. Turning both settings off removes the mark and the file, and nginx.conf is again what it was. The change is tested with `nginx -t` and put back if nginx refuses it. Not covered:
 
-**Outside lookups off.** The My Networks page makes no request to ipinfo.io or GeoJS and shows no locations.
+- **nginx's error log.** nginx cannot change its format, so it keeps full visitor addresses and full request lines. It is rotated and deleted together with the access log.
+- **A vhost you wrote by hand with its own `access_log`** (in a `server` or `location` block), and an `access_log` in nginx.conf in a format of your own. The panel does not rewrite them, so those requests are still logged in full; the status names each one with its file and line. Add the format name (`access_log <path> vps_panel_privacy;`) or remove the line, then reload nginx.
+
+**Keep logs for N days.** A value lower than the current one deletes data at once, so the page (and the `privacy.set` MCP tool) asks for a confirmation first. The setting is applied when you save it, when the agent and the panel start, and once a day after that:
+
+- **The system journal.** The panel writes `/etc/systemd/journald.conf.d/90-vps-panel-retention.conf`, which makes journald start a new journal file every N/30 days, rounded up (every day for a limit of up to 30 days), and delete a file once its first entry is older than N days less that span. No entry is kept longer than N days. journald deletes whole files, never single entries, so the first time a limit is set or lowered, a journal file that holds any entry past the limit is deleted whole, with the newer entries in it; on a quiet server that can be most of the journal. The 1 GB cap from journald.conf still applies.
+- **Log files that logrotate turns over:** nginx's access and error logs (`/etc/logrotate.d/nginx`) and, where the package is installed, rsyslog's files (`/etc/logrotate.d/rsyslog`: syslog, auth.log, mail.log and the rest), ufw.log (`/etc/logrotate.d/ufw`) and fail2ban.log (`/etc/logrotate.d/fail2ban`). The package's file is not edited: the panel puts a copy in front of it (`/etc/logrotate.d/0-vps-panel-nginx`, `0-vps-panel-rsyslog`, `0-vps-panel-ufw`, `0-vps-panel-fail2ban`) with `rotate` set so that no file holds lines older than N days, `maxage` N and `ignoreduplicates`, so that logrotate uses the copy and passes over the package's file. Rotated files already past the limit are deleted when the setting is applied and in the daily run, also those of a log too quiet to be rotated. N is also how long these files are kept when it is longer than the package's own rotation. A package file the panel does not rewrite (one that uses `size`, `dateext` or `olddir`, for example) is left as it is, and the status says so.
+- **In the panel:** housekeeping deletes audit log entries, sign-in records and finished tasks older than N days, right away when you save and once a day. Sign-in records and task history never stay longer than 30 days, whatever is chosen (failed sign-ins 7 days, successful ones and finished tasks 30). With N under 30, a successful sign-in from an address also counts for only N days, instead of 30, when the sign-in limiter decides whether that address is one of the account's own.
+
+Clearing the setting removes the journald drop-in and the logrotate copies; the system's own rotation applies again.
+
+Not covered by the log retention: the terminal history, fail2ban's database, Rspamd's log, the MariaDB and PostgreSQL server logs, wtmp, btmp and lastlog, container logs, your apps' own logs, web logs a hand-written vhost writes to files `/etc/logrotate.d/nginx` does not name (Ubuntu's names `/var/log/nginx/*.log`), mail, backups and whatever your apps store.
+
+**Outside lookups off.** The My Networks page makes no request to ipinfo.io or GeoJS (`get.geojs.io`) and shows no locations, also none found earlier. The server's own-address lookup at api.ipify.org is not part of this switch (see [What leaves the server](#what-leaves-the-server)).
 
 ## Requests about one person
 
 Under Settings > Privacy, for a request about one person ("what do you hold about me", "delete it"). Enter one email address or one IP address. Only admins can use it, and it is also available to AI clients with a full-access MCP token.
 
-**Search** reads, without changing anything:
+**Search** reads, without changing anything, the sources below. Each has an id, which the MCP tools and the downloaded report use.
 
-- in panel.db: the panel account with that email, its sign-in attempts (by email or IP address), and audit log entries whose target or message contains the value;
-- on the server: the nginx access logs, the system journal (mail and SSH lines), fail2ban, and for an email address the mailbox, forwarders and mail folder that belong to it.
+| Source (id) | What is searched | Erase |
+|---|---|---|
+| Web server access log (`nginx_access`) | Every `.log` file in `/var/log/nginx` whose name does not contain "error", the current ones and the rotated ones, `.gz` included. A vhost that logs somewhere else is not searched. | Yes: the value is replaced in each line |
+| Web server error log (`nginx_error`) | nginx's error logs in `/var/log/nginx`, current and rotated | Yes: the value is replaced in each line |
+| Mail server log (`journal_mail`) | Postfix and Dovecot lines in the system journal | No |
+| SSH log (`journal_ssh`), for an IP address | sshd lines in the system journal. For an email address they are counted under `journal_other`. | No |
+| Other services (`journal_other`) | Every other line in the system journal: the firewall, apps, the panel itself | No |
+| Other log files in /var/log (`system_logs`) | syslog, auth.log, mail.log, mail.err, mail.warn, mail.info, kern.log, ufw.log, fail2ban.log, daemon.log, user.log, messages and debug in `/var/log`, and the logs in `/var/log/rspamd`, `/var/log/mysql` and `/var/log/postgresql`, with their rotated files | No |
+| fail2ban bans (`fail2ban`), for an IP address | The bans fail2ban holds now, and its database `/var/lib/fail2ban/fail2ban.sqlite3` | No |
+| Mailbox (`mailboxes`), for an email address | A mailbox with this address (`mail.virtual_users`) | No |
+| Forwarders (`forwarders`), for an email address | Forwarders that have the address as their source or as a destination | No |
+| Stored mail (`maildir`), for an email address | Whether the mailbox's folder `/var/vmail/<domain>/<name>/` exists, with the number of files and their size. The mail itself is not read. | No |
+| Mail of a deleted mailbox (`mail_trash`), for an email address | Files > Trash entries that hold this address's mail folder | No |
+| Mail queue (`mail_queue`), for an email address | Messages from or to the address that Postfix has not delivered yet | No |
+| Task logs (`task_logs`) | The logs of the panel's tasks (deploys, installs, certificates) in panel.db | Yes, in the logs of finished tasks |
+| Panel account (`panel_users`), for an email address | The panel account that signs in with this address | No |
+| Panel sign-in records (`panel_logins`) | Sign-in attempts with this email address, or from this IP address | Yes: the records are deleted |
+| Panel audit log (`panel_audit`) | Audit log entries whose target or message contains the value | Yes: the value is replaced in each entry |
 
-For each source it shows how many records match and up to 20 of them, newest first. The search is limited in time and output; a source that could not be read says so. **Export** downloads this report as a JSON file. The export holds the counts and the examples, not every record: for a full copy of a large source, read it yourself, for example `zgrep -F '203.0.113.87' /var/log/nginx/access.log*` or `journalctl -o short-iso --grep 'alice@example\.com'`.
+A match is the value itself, not part of a longer one: 203.0.113.8 is not found inside 203.0.113.87, and ann@example.com is not found inside joann@example.com. An email address is found in any letter case and also percent-encoded, as it appears in a URL. An IPv6 address is found in any of its spellings, and an IPv4 address written as IPv6 (`::ffff:203.0.113.5`) is searched for as that IPv4 address. While masking is on, the web server logs hold the masked form of new visitors' addresses, so a search for the full address finds only the lines written before.
 
-**Erase** works on the sources you tick that are marked erasable. It replaces the value in place rather than deleting whole files: an IP address becomes its masked form (203.0.113.0), an email address becomes `[erased]`. In panel.db, sign-in attempts for the person are deleted, and in the audit log the value is replaced inside the entries, which stay. The erase is itself written to the audit log, with the kind of value and the first characters of its SHA-256 hash, not the value.
+For each source it shows how many records match and up to 20 of them, newest first, each cut at 500 characters, and a note on what the source is and what happens to it. The search is limited: each source stops after 45 seconds and all of them after 60; a log file source reads the newest 400 files and at most 4 GB of text, the journal at most 200,000 lines, the task logs at most 512 MB; fail2ban, the mail queue and the size of a mail folder get 10 seconds. Files compressed with anything other than gzip are not read. A source that reached a limit or could not be read says so. **Download as JSON** saves this report as a file. It holds the counts, the notes and the examples, not every record: for a full copy of a large source, read it yourself, for example `zgrep -F '203.0.113.87' /var/log/nginx/access.log*` or `journalctl -o short-iso --grep 'alice@example\.com'`.
+
+**Erase** works on the sources you tick that are erasable:
+
+- **nginx's access and error logs** (`nginx_access`, `nginx_error`): the value is replaced inside each line and the rest of the line stays: an IP address becomes its masked form (203.0.113.0), an email address becomes `[erased]`. Each file that holds it is rewritten, a `.gz` unpacked and packed again; the log nginx is writing to is swapped for the corrected copy and nginx is told to reopen it, so no line written meanwhile is lost. One erase runs at a time. It starts no new file after 120 seconds and gives up on the file it is rewriting after 240 seconds, which then stays exactly as it was; run the erase again to go on.
+- **Task logs** (`task_logs`): the same replacement in the logs of finished tasks. A task that is still running is left alone; erase again when it has finished.
+- **Panel sign-in records** (`panel_logins`): the records are deleted. That includes the address's recent failed attempts, so the sign-in limiter no longer counts them. Two-factor code attempts are recorded under `totp:<email>`: an IP address search finds them, an email address search does not.
+- **Panel audit log** (`panel_audit`): the value is replaced inside the entries (an IP address by its masked form, an email address by `[erased]`), and the entries stay.
+
+An IP address that is already in its masked form has nothing to be replaced with: log lines, task logs and audit entries that hold it stay as they are. Every search and every erase is written to the audit log (`privacy.subject.search`, `privacy.subject.erase`) with the kind of value and the first 12 hexadecimal characters of its SHA-256 hash, not the value; for an IPv4 address that hash can be found again by trying every possible address, so anyone who reads the audit log can work out which IPv4 address was asked about. The agent's line about the erase in the journal holds the kind and the number of records changed, not the value.
 
 What the tool does not do, and where you have to act yourself:
 
-- **It never deletes a panel account or a mailbox, or touches the mail in it.** Delete the account on the Users page, the mailbox and its forwarders on the Mailboxes page. A deleted mailbox's mail stays in Files > Trash for 30 days unless you empty it there.
-- **The system journal cannot be edited.** Matching lines go when the log retention removes them; without a retention, when the journal reaches its 1 GB cap, which can take many months.
+- **It never deletes a panel account, a mailbox or a forwarder, or touches the mail in a mailbox.** Delete the account on the Users page, the mailbox and its forwarders on the Mailboxes page. A deleted mailbox's mail stays in Files > Trash for 30 days unless you delete the entry there or empty the trash.
+- **The system journal cannot be edited** (`journal_mail`, `journal_ssh`, `journal_other`). Matching lines go when the log retention removes them; without a retention, when the journal reaches its 1 GB cap, which can take many months.
+- **The text logs in /var/log** (`system_logs`) are not rewritten. logrotate deletes them on its schedule: after about four weeks on Ubuntu, after N days for rsyslog's files, ufw.log and fail2ban.log with a log retention set. Rspamd's, MariaDB's and PostgreSQL's logs follow their package's rotation.
+- **fail2ban bans** are a security measure and are not lifted by an erase: unban the address on the Firewall page if it should go. fail2ban drops a ban from its database by itself, one day after it was set unless `dbpurgeage` says otherwise.
+- **The mail queue**: messages leave it when they are delivered or returned, after five days at the latest.
 - **Backups.** Snapshots already made keep what they hold until they expire: with the default retention, up to about six months after the last backup that contains it (see [Backups](#backups)). The plain-text dumps in `/var/backups/vps-panel-db-dumps/` keep it until the next backup.
-- **Your apps' databases and files**, Drive files, Docker volumes, and webmail's address books and settings: the tool does not search them.
+- **What the tool does not search:** your apps' databases and files, Drive files, Docker volumes and container logs; webmail's database (Roundcube's address books, identities and settings); Rspamd's history of checked messages; wtmp, btmp and lastlog; mail in other mailboxes that was sent by or to the address; the terminal history; and configuration you typed in yourself, such as firewall rules, the trusted IP list (`panel.ip_allowlist`), notification channels and the SSL contact email.
 - **Mail already sent** to other servers, and copies people keep in their own mail clients.
 - **Other servers and services**: the other servers in your networks, Let's Encrypt, Telegram, webhook receivers, your backup store if it is remote.
-- **Files the panel does not manage**: rsyslog's text logs, Rspamd's log, container logs.
 
 ## Cookies
 
@@ -207,7 +250,7 @@ Both cookies are strictly necessary for a service the user asked for, so the pan
 These are recommendations from how the panel works. They are not legal advice.
 
 1. **Mask IP addresses and strip query strings** in Settings > Privacy. Full visitor addresses are rarely needed in web logs, and nothing on the server depends on them: bans come from the journal.
-2. **Set a log retention** you can justify, for example 30 days. It also limits the audit log, so pick a number that leaves you the audit trail you need.
+2. **Set a log retention** you can justify, for example 30 days. It also limits the audit log, so pick a number that leaves you the audit trail you need. For the log files logrotate turns over it is the time they are kept, not only a ceiling: a number over 15 keeps nginx's logs longer than Ubuntu's rotation would.
 3. **Switch outside lookups off** unless you use the server locations on My Networks. They send your servers' addresses (not your visitors') to ipinfo.io or GeoJS.
 4. **Use a role address as the SSL contact email** (Settings > DNS & SSL), not a person's.
 5. **Keep personal data out of notifications** to outside services. Telegram and webhook messages carry log lines; email to a mailbox on your own server keeps them here.

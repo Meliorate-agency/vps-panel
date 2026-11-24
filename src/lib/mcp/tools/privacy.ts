@@ -105,7 +105,7 @@ export const TOOLS: Tool[] = [
     page: "Settings",
     name: "privacy.subject_search",
     description:
-      "Personal data request: what this server holds about one email address or one IP address. Returns sources (web server logs, mail and SSH logs, mailboxes, forwarders, the panel's account, sign-in records and audit log, ...), each with a count, up to 20 sample records, whether privacy.subject_erase can act on it (erasable) and a note saying what it is. agent_error is set when only the panel's own records could be searched. Not covered: what the apps keep in their own files and databases, and backups. The result contains personal data. Can take minutes on a server with large logs.",
+      "Personal data request: what this server holds about one email address or one IP address. Returns sources (nginx's access and error logs, the system journal, the other text logs in /var/log, fail2ban's bans, mailboxes, forwarders, stored mail, the mail queue, task logs, and the panel's account, sign-in records and audit log), each with a count, up to 20 sample records, whether privacy.subject_erase can act on it (erasable) and a note saying what it is. agent_error is set when only the panel's own records could be searched. Not covered: what the apps keep in their own files and databases, and backups. The result contains personal data. Can take minutes on a server with large logs.",
     inputSchema: {
       type: "object",
       properties: {
