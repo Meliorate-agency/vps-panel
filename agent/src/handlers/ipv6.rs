@@ -1199,4 +1199,340 @@ server {
         assert_eq!(serde_json::to_value(Ipv6Source::None).unwrap(), serde_json::json!("none"));
         assert_eq!(serde_json::to_value(Ipv6Source::Interface).unwrap(), serde_json::json!("interface"));
     }
+
+    // --- against a real MariaDB --------------------------------------------
+
+    const A6: &str = "2001:db8:1::1";
+    const B6: &str = "2001:db8:1::2";
+    const F6: &str = "2001:db8:ffff::1";
+    const V4: &str = "198.51.100.127";
+
+    fn real_state(dir: &std::path::Path, url: &str, panel_host: &str, db: &str) -> AppState {
+        let db = dir.join(db);
+        let config = crate::config::Config {
+            socket_path: dir.join("agent.sock"),
+            agent_token: "t".repeat(40),
+            panel_db_path: db.clone(),
+            mariadb_url: url.into(),
+            restic_password: String::new(),
+            restic_repository: String::new(),
+            panel_host: panel_host.into(),
+            acme_email: "ops@example.com".into(),
+            acme_directory: String::new(),
+            vps_panel_gid: 0,
+            vps_panel_uid: None,
+            apps_uid: 0,
+            apps_gid: 0,
+        };
+        let panel_db = crate::db::PanelDb::open(&db).unwrap();
+        panel_db
+            .with(|c| c.execute_batch("CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);"))
+            .unwrap();
+        AppState {
+            config: std::sync::Arc::new(config),
+            tasks: crate::ipc::tasks::TaskTracker::new(panel_db.clone()),
+            panel_db,
+            mariadb: crate::db::MariaDb::connect(url).unwrap(),
+        }
+    }
+
+    /// (name, content) of the zone's records of one type, sorted.
+    async fn rows(state: &AppState, zone: &str, rtype: &str) -> Vec<(String, String)> {
+        use mysql_async::prelude::*;
+        let mut c = state.mariadb.pool().get_conn().await.unwrap();
+        let mut out: Vec<(String, String)> = c
+            .exec(
+                "SELECT r.name, r.content FROM pdns.records r JOIN pdns.domains d ON d.id = r.domain_id \
+                 WHERE d.name = ? AND r.type = ?",
+                (zone, rtype),
+            )
+            .await
+            .unwrap();
+        out.sort();
+        out
+    }
+
+    async fn sql(state: &AppState, q: &str) {
+        use mysql_async::prelude::*;
+        let mut c = state.mariadb.pool().get_conn().await.unwrap();
+        c.query_drop(q).await.unwrap();
+    }
+
+    async fn add(state: &AppState, zone: &str, name: &str, rtype: &str, content: &str) {
+        use mysql_async::prelude::*;
+        let mut c = state.mariadb.pool().get_conn().await.unwrap();
+        c.exec_drop(
+            "INSERT INTO pdns.records (domain_id, name, type, content, ttl, prio, disabled) \
+             SELECT id, ?, ?, ?, 3600, 0, 0 FROM pdns.domains WHERE name = ?",
+            (name, rtype, content, zone),
+        )
+        .await
+        .unwrap();
+    }
+
+    fn named(list: &[(&str, &str)]) -> Vec<(String, String)> {
+        let mut v: Vec<(String, String)> = list.iter().map(|(a, b)| (a.to_string(), b.to_string())).collect();
+        v.sort();
+        v
+    }
+
+    async fn create(state: &AppState, name: &str, ipv6: Option<bool>) -> dns::ZoneRow {
+        dns::create_zone_inner(
+            state,
+            dns::CreateZone { name: name.into(), seed_ip: None, ipv6 },
+        )
+        .await
+        .unwrap()
+    }
+
+    /// The zone functions and the endpoints against a real MariaDB with the
+    /// pdns schema, on a scratch server, never the system's one. `ip` must be
+    /// a stand-in that prints eth0 with 198.51.100.127, 2001:db8:1::1 and
+    /// 2001:db8:1::2, and MAIL_CONFIG a copy of /etc/postfix (the switch of a
+    /// mail domain rebuilds the mail routing):
+    ///
+    ///   IPV6_TEST_MARIADB=mysql://root@127.0.0.1:33099/ IPV6_TEST_DIR=<scratch dir> \
+    ///   PATH=<dir with the fake ip>:$PATH MAIL_CONFIG=<copy of /etc/postfix> \
+    ///   cargo test --manifest-path agent/Cargo.toml -- --ignored real_mariadb
+    #[test]
+    #[ignore = "needs a scratch MariaDB and a stand-in for ip (see above)"]
+    fn real_mariadb_zones_follow_their_ipv6_switch() {
+        // One long async fn: in a debug build its frame is larger than a
+        // test thread's stack.
+        std::thread::Builder::new()
+            .stack_size(64 << 20)
+            .spawn(|| {
+                tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .unwrap()
+                    .block_on(real_mariadb_run())
+            })
+            .unwrap()
+            .join()
+            .unwrap();
+    }
+
+    async fn real_mariadb_run() {
+        let url = std::env::var("IPV6_TEST_MARIADB").expect("IPV6_TEST_MARIADB");
+        let dir = std::path::PathBuf::from(std::env::var("IPV6_TEST_DIR").expect("IPV6_TEST_DIR"));
+        assert!(!url.contains("mysqld.sock") && !url.contains(":3306"), "a scratch server only, not {url}");
+        assert!(std::env::var("MAIL_CONFIG").is_ok_and(|d| !d.starts_with("/etc")), "MAIL_CONFIG must name a copy");
+        for f in ["panel.db", "panel.db-wal", "panel.db-shm", "published.db", "published.db-wal", "published.db-shm", "chosen.db", "chosen.db-wal", "chosen.db-shm"] {
+            let _ = std::fs::remove_file(dir.join(f));
+        }
+        let state = real_state(&dir, &url, V4, "panel.db");
+        sql(&state, "DROP DATABASE IF EXISTS pdns").await;
+        sql(&state, "DROP DATABASE IF EXISTS mail").await;
+
+        // The step at start on a server without a pdns database: decided
+        // (nothing published), recorded, and nothing created.
+        migrate_at_startup(state.clone()).await;
+        assert!(read_setting(&state.panel_db, MIGRATED_KEY).is_some());
+        assert_eq!(read_setting(&state.panel_db, NEW_DOMAINS_KEY), None);
+        {
+            use mysql_async::prelude::*;
+            let mut c = state.mariadb.pool().get_conn().await.unwrap();
+            let dbs: Vec<String> = c.query("SHOW DATABASES LIKE 'pdns'").await.unwrap();
+            assert!(dbs.is_empty(), "{dbs:?}");
+        }
+        // A mail domain for mail.test (the table install.sh makes).
+        sql(&state, "CREATE DATABASE mail").await;
+        sql(&state, "CREATE TABLE mail.virtual_domains (id INT AUTO_INCREMENT PRIMARY KEY, name VARCHAR(255) NOT NULL UNIQUE) Engine=InnoDB").await;
+        sql(&state, "INSERT INTO mail.virtual_domains (name) VALUES ('mail.test')").await;
+
+        // Two addresses and no AAAA for the panel hostname: none in effect.
+        let Json(s) = status(State(state.clone())).await.unwrap();
+        assert_eq!((s.address.as_deref(), s.source), (None, Ipv6Source::None));
+        assert_eq!(s.candidates.iter().map(|c| c.address.as_str()).collect::<Vec<_>>(), vec![A6, B6]);
+        assert_eq!(s.candidates[0].device, "eth0");
+        assert!(s.notes.iter().any(|n| n.contains("more than one IPv6 address")), "{:?}", s.notes);
+        assert_eq!((s.new_domains, s.domains_total), ("off", 0));
+        // Switching a zone on now would publish nothing: create one, then 409.
+        create(&state, "early.test", Some(true)).await;
+        let early = put_zone(State(state.clone()), Path("early.test".into()), Json(PutZone { enabled: true })).await;
+        assert!(matches!(&early, Err(AgentError::Conflict(m)) if m.contains("Settings > DNS & SSL > IPv6")), "{:?}", early.err());
+        assert!(rows(&state, "early.test", "AAAA").await.is_empty());
+        // An address that is not this server's is refused.
+        let refused = put_settings(State(state.clone()), Json(PutSettings { address: Some(F6.into()), new_domains: None })).await;
+        assert!(matches!(&refused, Err(AgentError::Invalid(m)) if m.contains("Choose one of")), "{:?}", refused.err());
+        let Json(s) = put_settings(State(state.clone()), Json(PutSettings { address: Some(A6.into()), new_domains: None }))
+            .await
+            .unwrap();
+        assert_eq!((s.address.as_deref(), s.source, s.setting.as_str()), (Some(A6), Ipv6Source::Setting, A6));
+
+        // New domains: off by default; on when asked; on by default once set.
+        let z = create(&state, "off.test", None).await;
+        assert!(!z.ipv6);
+        assert!(rows(&state, "off.test", "AAAA").await.is_empty());
+        let z = create(&state, "on.test", Some(true)).await;
+        assert!(z.ipv6);
+        assert_eq!(
+            rows(&state, "on.test", "AAAA").await,
+            named(&[("on.test", A6), ("www.on.test", A6), ("mail.on.test", A6), ("ns1.on.test", A6), ("ns2.on.test", A6)])
+        );
+        let _ = put_settings(State(state.clone()), Json(PutSettings { address: None, new_domains: Some("on".into()) }))
+            .await
+            .unwrap();
+        assert!(create(&state, "default.test", None).await.ipv6);
+        assert!(!create(&state, "mail.test", Some(false)).await.ipv6);
+
+        // A hand-edited SPF record, a site, and a www that points elsewhere
+        // over IPv6 in off.test; switched on.
+        let hand = "\"v=spf1 mx include:_spf.google.com ip6:2001:db8:aaaa::/48 ~all\"";
+        add(&state, "off.test", "off.test", "TXT", hand).await;
+        add(&state, "off.test", "off.test", "TXT", "\"google-site-verification=abc\"").await;
+        add(&state, "off.test", "shop.off.test", "A", V4).await;
+        add(&state, "off.test", "blog.off.test", "A", "203.0.113.50").await;
+        add(&state, "off.test", "www.off.test", "AAAA", F6).await;
+        let Json(d) = get_zone(State(state.clone()), Path("off.test".into())).await.unwrap();
+        assert!(!d.enabled && d.can_enable);
+        assert_eq!(d.address.as_deref(), Some(A6));
+        assert!(d.records.iter().all(|r| !r.present));
+        assert!(d.records.iter().any(|r| r.rtype == "TXT" && r.content.contains("ip6:2001:db8:1::1 ~all")));
+        assert!(d.notes.iter().any(|n| n.starts_with(&format!("www.off.test has an AAAA record for {F6}"))), "{:?}", d.notes);
+        let ids: Vec<&str> = d.checks.iter().map(|c| c.id.as_str()).collect();
+        assert_eq!(ids[0], "address", "{ids:?}");
+        assert!(ids.contains(&"web") && ids.contains(&"nameservers") && ids.contains(&"public"), "{ids:?}");
+        assert!(!ids.contains(&"ptr"), "not a mail domain: {ids:?}");
+        let Json(d) = put_zone(State(state.clone()), Path("off.test".into()), Json(PutZone { enabled: true })).await.unwrap();
+        assert!(d.enabled);
+        assert_eq!(
+            rows(&state, "off.test", "AAAA").await,
+            named(&[
+                ("off.test", A6),
+                ("mail.off.test", A6),
+                ("ns1.off.test", A6),
+                ("ns2.off.test", A6),
+                ("shop.off.test", A6),
+                ("www.off.test", F6),
+            ])
+        );
+        let spf_on = "\"v=spf1 mx include:_spf.google.com ip6:2001:db8:aaaa::/48 ip6:2001:db8:1::1 ~all\"";
+        assert_eq!(
+            rows(&state, "off.test", "TXT").await,
+            named(&[("off.test", spf_on), ("off.test", "\"google-site-verification=abc\"")])
+        );
+        // Reconcile with IPv6 on: nothing more to add, nothing removed.
+        let Json(r) = dns::reconcile_zone(State(state.clone()), Path("off.test".into())).await.unwrap();
+        assert!(!r.added.iter().any(|a| a.starts_with("AAAA")) && r.removed.is_empty(), "{:?} {:?}", r.added, r.removed);
+        assert!(r.unchanged.contains(&"AAAA shop.off.test".to_string()));
+        assert_eq!(rows(&state, "off.test", "AAAA").await.len(), 6);
+        // An AAAA the operator deletes in a zone with IPv6 on comes back
+        // with Reconcile: on means it is there.
+        sql(&state, "DELETE FROM pdns.records WHERE name = 'shop.off.test' AND type = 'AAAA'").await;
+        let Json(r) = dns::reconcile_zone(State(state.clone()), Path("off.test".into())).await.unwrap();
+        assert_eq!(r.added, vec!["AAAA shop.off.test".to_string()]);
+
+        // Off again: this server's AAAA records go, the foreign one and the
+        // operator's SPF record stay exactly as they were.
+        let Json(d) = put_zone(State(state.clone()), Path("off.test".into()), Json(PutZone { enabled: false })).await.unwrap();
+        assert!(!d.enabled);
+        assert_eq!(rows(&state, "off.test", "AAAA").await, named(&[("www.off.test", F6)]));
+        assert_eq!(
+            rows(&state, "off.test", "TXT").await,
+            named(&[("off.test", hand), ("off.test", "\"google-site-verification=abc\"")])
+        );
+        // Reconcile with IPv6 off adds none back.
+        let Json(r) = dns::reconcile_zone(State(state.clone()), Path("off.test".into())).await.unwrap();
+        assert!(!r.added.iter().any(|a| a.starts_with("AAAA")) && r.removed.is_empty(), "{:?}", r.added);
+        assert_eq!(rows(&state, "off.test", "AAAA").await, named(&[("www.off.test", F6)]));
+        // An AAAA for this server added by hand in a zone with IPv6 off is
+        // what Reconcile removes.
+        add(&state, "off.test", "shop.off.test", "AAAA", A6).await;
+        let Json(r) = dns::reconcile_zone(State(state.clone()), Path("off.test".into())).await.unwrap();
+        assert_eq!(r.removed, vec![format!("AAAA shop.off.test → {A6}")]);
+
+        // A mail domain: Reconcile writes its SPF record whole, without ip6
+        // while off, with it once on; the switch edits only the term.
+        let Json(_) = dns::reconcile_zone(State(state.clone()), Path("mail.test".into())).await.unwrap();
+        let off_spf = dns::format_spf(Some(V4), None);
+        assert_eq!(rows(&state, "mail.test", "TXT").await.iter().find(|(_, c)| c.contains("v=spf1")).unwrap().1, off_spf);
+        let Json(d) = put_zone(State(state.clone()), Path("mail.test".into()), Json(PutZone { enabled: true })).await.unwrap();
+        assert!(d.checks.iter().any(|c| c.id == "ptr"), "a mail domain gets the reverse DNS check");
+        let on_spf = dns::format_spf(Some(V4), Some(A6));
+        assert_eq!(rows(&state, "mail.test", "TXT").await.iter().find(|(_, c)| c.contains("v=spf1")).unwrap().1, on_spf);
+        let Json(r) = dns::reconcile_zone(State(state.clone()), Path("mail.test".into())).await.unwrap();
+        assert!(r.unchanged.iter().any(|u| u.starts_with("TXT mail.test")), "{:?}", r.unchanged);
+
+        // Certificate preflight: a new name in a zone with IPv6 on gets its
+        // AAAA, in one with IPv6 off only its A.
+        dns::ensure_subdomain_records(&state, "blog.on.test").await.unwrap();
+        assert!(rows(&state, "on.test", "AAAA").await.contains(&("blog.on.test".to_string(), A6.to_string())));
+        dns::ensure_subdomain_records(&state, "news.off.test").await.unwrap();
+        assert!(rows(&state, "off.test", "A").await.contains(&("news.off.test".to_string(), V4.to_string())));
+        assert!(!rows(&state, "off.test", "AAAA").await.iter().any(|(n, _)| n == "news.off.test"));
+
+        // The panel hostname task.
+        let own = vec![A6.to_string(), B6.to_string()];
+        let log = dns::point_name_here(&state, "on.test", "panel.on.test", V4, &own).await.unwrap();
+        assert!(log.iter().any(|l| l == &format!("added AAAA panel.on.test -> {A6}: IPv6 is on for on.test")), "{log:?}");
+        add(&state, "off.test", "panel.off.test", "AAAA", A6).await;
+        let log = dns::point_name_here(&state, "off.test", "panel.off.test", V4, &own).await.unwrap();
+        assert!(log.iter().any(|l| l.starts_with(&format!("removed AAAA panel.off.test -> {A6}: IPv6 is off for off.test"))), "{log:?}");
+        assert!(!rows(&state, "off.test", "AAAA").await.iter().any(|(n, _)| n == "panel.off.test"));
+
+        // The list says which zones have IPv6 on; one from before the choice
+        // existed counts by its apex.
+        {
+            use mysql_async::prelude::*;
+            let mut c = state.mariadb.pool().get_conn().await.unwrap();
+            c.query_drop("INSERT INTO pdns.domains (name, type) VALUES ('legacy.test', 'NATIVE'), ('plain.test', 'NATIVE')").await.unwrap();
+        }
+        add(&state, "legacy.test", "legacy.test", "AAAA", A6).await;
+        add(&state, "legacy.test", "legacy.test", "TXT", "\"v=spf1 mx ip6:2001:db8:1::1 -all\"").await;
+        add(&state, "plain.test", "plain.test", "A", V4).await;
+        let Json(list) = dns::list_zones(State(state.clone())).await.unwrap();
+        let on: Vec<&str> = list.iter().filter(|z| z.ipv6).map(|z| z.name.as_str()).collect();
+        assert_eq!(on, vec!["default.test", "legacy.test", "mail.test", "on.test"]);
+
+        // A new address moves the records of every zone with IPv6 on, in
+        // one go; zones with IPv6 off are not touched.
+        let off_before = rows(&state, "off.test", "AAAA").await;
+        let Json(s) = put_settings(State(state.clone()), Json(PutSettings { address: Some(B6.into()), new_domains: None }))
+            .await
+            .unwrap();
+        assert_eq!((s.address.as_deref(), s.domains_on, s.domains_total), (Some(B6), 4, 7));
+        for zone in ["on.test", "default.test", "mail.test", "legacy.test"] {
+            let aaaa = rows(&state, zone, "AAAA").await;
+            assert!(!aaaa.is_empty() && aaaa.iter().all(|(_, c)| c == B6), "{zone}: {aaaa:?}");
+        }
+        assert_eq!(rows(&state, "mail.test", "TXT").await.iter().find(|(_, c)| c.contains("v=spf1")).unwrap().1, dns::format_spf(Some(V4), Some(B6)));
+        assert_eq!(rows(&state, "legacy.test", "TXT").await, named(&[("legacy.test", "\"v=spf1 mx ip6:2001:db8:1::2 -all\"")]));
+        assert_eq!(rows(&state, "off.test", "AAAA").await, off_before);
+        // Back to automatic: with two addresses that is none, refused while
+        // zones have IPv6 on.
+        let cleared = put_settings(State(state.clone()), Json(PutSettings { address: Some(String::new()), new_domains: None })).await;
+        assert!(matches!(&cleared, Err(AgentError::Conflict(m)) if m.contains("IPv6 is on for 4 domains")), "{:?}", cleared.err());
+        assert_eq!(read_setting(&state.panel_db, ADDRESS_KEY).as_deref(), Some(B6));
+
+        // Deleting a zone takes its choice with it.
+        let _ = dns::delete_zone(State(state.clone()), Path("on.test".into())).await.unwrap();
+        {
+            use mysql_async::prelude::*;
+            let mut c = state.mariadb.pool().get_conn().await.unwrap();
+            let left: Vec<u32> = c
+                .query("SELECT m.id FROM pdns.domainmetadata m LEFT JOIN pdns.domains d ON d.id = m.domain_id WHERE d.id IS NULL")
+                .await
+                .unwrap();
+            assert!(left.is_empty(), "{left:?}");
+        }
+
+        // The step at start on a server that publishes IPv6 today: the panel
+        // hostname's AAAA (here an address literal) is on an interface and
+        // a zone has an AAAA for it. Once, and never over the operator's own choice.
+        let published = real_state(&dir, &url, B6, "published.db");
+        migrate_at_startup(published.clone()).await;
+        assert_eq!(read_setting(&published.panel_db, NEW_DOMAINS_KEY).as_deref(), Some("on"));
+        let stamp = read_setting(&published.panel_db, MIGRATED_KEY).unwrap();
+        write_settings(&published.panel_db, &[(NEW_DOMAINS_KEY, Some("off"))]).unwrap();
+        migrate_at_startup(published.clone()).await;
+        assert_eq!(read_setting(&published.panel_db, NEW_DOMAINS_KEY).as_deref(), Some("off"));
+        assert_eq!(read_setting(&published.panel_db, MIGRATED_KEY).unwrap(), stamp);
+        let chosen = real_state(&dir, &url, B6, "chosen.db");
+        write_settings(&chosen.panel_db, &[(NEW_DOMAINS_KEY, Some("off"))]).unwrap();
+        migrate_at_startup(chosen.clone()).await;
+        assert_eq!(read_setting(&chosen.panel_db, NEW_DOMAINS_KEY).as_deref(), Some("off"));
+        assert!(read_setting(&chosen.panel_db, MIGRATED_KEY).is_some());
+    }
 }

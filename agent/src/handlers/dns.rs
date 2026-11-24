@@ -1730,10 +1730,13 @@ pub(crate) fn ipv6_enabled(
     })
 }
 
-/// The names IPv6 on gives an AAAA: the apex, www, the name servers that
-/// are in the zone, mail.<zone> of a mail domain, every name an A record
-/// sends to this server (sites, apps, the panel hostname, mail.<zone>), and
-/// every name with an AAAA for this server already.
+/// The names IPv6 on gives an AAAA: every name an A record sends to this
+/// server (the apex, www, mail.<zone> and the name servers as create_zone
+/// writes them, sites, apps, the panel hostname), mail.<zone> of a mail
+/// domain, and every name with an AAAA for this server already. A name with
+/// no A record at all gets none: it would exist over IPv6 only. On a server
+/// without IPv4 the apex, www and the name servers in the zone count all
+/// the same.
 fn ipv6_names(
     zone: &str,
     ns: [&str; 2],
@@ -1741,13 +1744,17 @@ fn ipv6_names(
     records: &[ZoneRec],
     own: &OwnAddrs,
 ) -> Vec<String> {
-    let mut names = vec![zone.to_string(), format!("www.{zone}")];
-    for host in ns.into_iter().filter(|host| ns_in_zone(host, zone)) {
-        if !names.iter().any(|n| n == host) {
-            names.push(host.to_string());
+    let mut names: Vec<String> = Vec::new();
+    if own.v4.is_none() {
+        names.push(zone.to_string());
+        names.push(format!("www.{zone}"));
+        for host in ns.into_iter().filter(|host| ns_in_zone(host, zone)) {
+            if !names.iter().any(|n| n == host) {
+                names.push(host.to_string());
+            }
         }
     }
-    if has_mail {
+    if has_mail && !names.contains(&format!("mail.{zone}")) {
         names.push(format!("mail.{zone}"));
     }
     for r in records {
@@ -2633,9 +2640,9 @@ mod tests {
             vec![
                 "example.com",
                 "www.example.com",
+                "mail.example.com",
                 "ns1.example.com",
                 "ns2.example.com",
-                "mail.example.com",
                 "shop.example.com",
                 "panel.example.com",
             ]
@@ -2655,12 +2662,24 @@ mod tests {
         // Still listed: ns1.example.com has its A here.
         assert!(names(&shared).contains(&"ns1.example.com"));
 
-        // www pointing at another host over IPv4 gets no AAAA, and that is said.
+        // www pointing at another host over IPv4 gets no AAAA; nor does a
+        // name with no A record at all (it would exist over IPv6 only).
         let mut moved = zone(&[], false, None);
         moved.iter_mut().find(|r| r.name == "www.example.com" && r.rtype == "A").unwrap().content = "203.0.113.50".into();
+        moved.retain(|r| r.name != "ns2.example.com");
         let plan = plan_ipv6("example.com", NS, false, &moved, true, &own(), true);
         assert!(!names(&plan).contains(&"www.example.com"));
-        assert!(plan.skipped.iter().any(|s| s.starts_with("www.example.com points at 203.0.113.50 over IPv4")), "{:?}", plan.skipped);
+        assert!(!names(&plan).contains(&"ns2.example.com"));
+        // A mail domain's mail host whose A points elsewhere: said so.
+        moved.iter_mut().find(|r| r.name == "mail.example.com" && r.rtype == "A").unwrap().content = "203.0.113.50".into();
+        let plan = plan_ipv6("example.com", NS, true, &moved, true, &own(), true);
+        assert!(!names(&plan).contains(&"mail.example.com"));
+        assert!(plan.skipped.iter().any(|s| s.starts_with("mail.example.com points at 203.0.113.50 over IPv4")), "{:?}", plan.skipped);
+        // A server without IPv4: the apex, www and the name servers all the same.
+        let v6_only = OwnAddrs { v4: None, own_v4: vec![], ..own() };
+        let bare: Vec<ZoneRec> = vec![];
+        let plan = plan_ipv6("example.com", NS, false, &bare, true, &v6_only, true);
+        assert_eq!(names(&plan), vec!["example.com", "www.example.com", "ns1.example.com", "ns2.example.com"]);
 
         // A zone that has it all already changes nothing.
         let done = plan_ipv6("example.com", NS, false, &zone(&[], true, None), true, &own(), true);
