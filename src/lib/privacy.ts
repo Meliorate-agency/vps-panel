@@ -1,5 +1,5 @@
 import "server-only";
-import { createHash } from "node:crypto";
+import { createHmac } from "node:crypto";
 import { isIP } from "node:net";
 import {
   agent,
@@ -10,6 +10,7 @@ import {
   type SubjectSource,
 } from "./agent";
 import { writeAudit } from "./audit";
+import { config } from "./config";
 import { db } from "./db";
 import { agentErrorMessage } from "./redirects";
 import { getSetting } from "./settings";
@@ -280,7 +281,11 @@ export function maskIp(ip: string): string {
 
 /** For the audit log, which must not hold the value itself. */
 function subjectTag(s: Subject): string {
-  return `${s.kind} sha256:${createHash("sha256").update(s.value).digest("hex").slice(0, 12)}`;
+  // Keyed with a secret of this server. A plain hash of an IPv4 address can be
+  // found again by hashing all four billion of them, so the audit log would
+  // still have said which address was asked about.
+  const key = `privacy-audit:${config.jwtSecret}`;
+  return `${s.kind} hmac:${createHmac("sha256", key).update(s.value).digest("hex").slice(0, 12)}`;
 }
 
 function escapeRe(s: string): string {

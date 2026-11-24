@@ -55,7 +55,7 @@ The panel keeps nothing about you in the browser beyond the two sign-in cookies 
 | Data | Where | Kept |
 |---|---|---|
 | Mailboxes: address, password hash (SHA512-CRYPT), quota | MariaDB, database `mail`, table `virtual_users` | Until the mailbox is deleted on the Mailboxes page. |
-| Forwarders and catch-alls: the address and where its mail goes | `mail.virtual_aliases` | Until the forwarder is deleted. Deleting a mailbox does not delete forwarders that name its address; remove those under Forwarders on the Mailboxes page. |
+| Forwarders and catch-alls: the address and where its mail goes | `mail.virtual_aliases` | Until the forwarder is deleted. Deleting a mailbox also removes the forwarders on its address and the forwarders that deliver to it. |
 | The mail itself, in all folders | `/var/vmail/<domain>/<name>/` (Maildir) | Until the mailbox user deletes it. Nothing expires mail automatically, Trash and Junk included. |
 | Filters and Out of Office, set in webmail | `/var/vmail/<domain>/<name>/home/` | With the mailbox. |
 | A deleted mailbox's mail | `/var/lib/vps-panel/trash/<id>/` (Files > Trash) | 30 days, then deleted. The agent checks every 6 hours, and whenever the trash is listed. Emptying the trash deletes it sooner. Until then it can be restored. |
@@ -218,7 +218,7 @@ For each source it shows how many records match and up to 20 of them, newest fir
 - **Panel sign-in records** (`panel_logins`): the records are deleted. That includes the address's recent failed attempts, so the sign-in limiter no longer counts them. Two-factor code attempts are recorded under `totp:<email>`; a search by email address or by IP address finds them too.
 - **Panel audit log** (`panel_audit`): the value is replaced inside the entries (an IP address by its masked form, an email address by `[erased]`), and the entries stay.
 
-An IP address that is already in its masked form has nothing to be replaced with: log lines, task logs and audit entries that hold it stay as they are. Every search and every erase is written to the audit log (`privacy.subject.search`, `privacy.subject.erase`) with the kind of value and the first 12 hexadecimal characters of its SHA-256 hash, not the value; for an IPv4 address that hash can be found again by trying every possible address, so anyone who reads the audit log can work out which IPv4 address was asked about. The agent's line about the erase in the journal holds the kind and the number of records changed, not the value.
+An IP address that is already in its masked form has nothing to be replaced with: log lines, task logs and audit entries that hold it stay as they are. Every search and every erase is written to the audit log (`privacy.subject.search`, `privacy.subject.erase`) with the kind of value and the first 12 hexadecimal characters of a keyed hash of it (HMAC-SHA-256 with a key derived from this server's `JWT_SECRET`), not the value. Without that secret the value cannot be worked out from the audit log; two requests about the same value show the same characters, so they can be told to belong together. The agent's line about the erase in the journal holds the kind and the number of records changed, not the value.
 
 What the tool does not do, and where you have to act yourself:
 

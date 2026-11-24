@@ -141,7 +141,13 @@ export async function deleteMailboxAction(email: string): Promise<ActionResult> 
       action: "mail.mailboxes.delete",
       target: email,
       result: "ok",
-      message: resp?.maildir_trash_id ? `maildir moved to trash ${resp.maildir_trash_id}` : undefined,
+      message:
+        [
+          resp?.maildir_trash_id ? `maildir moved to trash ${resp.maildir_trash_id}` : "",
+          resp?.forwarders_removed ? `${resp.forwarders_removed} forwarder(s) removed` : "",
+        ]
+          .filter(Boolean)
+          .join("; ") || undefined,
     });
     revalidatePath("/mailboxes");
     return { ok: true };

@@ -140,3 +140,16 @@ code, pre {
   from { opacity: 0; }
   to { opacity: 1; }
 }
+
+/* iOS Safari zooms the whole page in when a field whose text is under 16px
+ * gets focus, and stays zoomed. The panel's fields are 13px (some set it
+ * inline, e.g. the env file editor), so on a phone every one of them did
+ * that. On touch screens all fields are 16px; !important because several set
+ * their size in a style attribute. Mouse-driven screens keep the denser size. */
+@media (pointer: coarse) {
+  input,
+  select,
+  textarea {
+    font-size: 16px !important;
+  }
+}

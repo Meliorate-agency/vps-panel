@@ -483,7 +483,7 @@ export const agent = {
     // The maildir goes to Files > Trash (restorable for 30 days); null trash
     // id when the mailbox had no mail on disk.
     deleteMailbox: (email: string) =>
-      agentRequest<{ ok: boolean; maildir_trash_id: string | null }>({
+      agentRequest<{ ok: boolean; maildir_trash_id: string | null; forwarders_removed?: number }>({
         method: "DELETE",
         path: `/mail/mailboxes/${encodeURIComponent(email)}`,
       }),

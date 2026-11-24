@@ -331,7 +331,8 @@ export default function MailboxActions({
           <p>
             The address stops working immediately. Its stored mail moves to{" "}
             <strong>Files &gt; Trash</strong>, where it can be restored for 30 days
-            before it is deleted for good.
+            before it is deleted for good. Forwarders on this address, and forwarders
+            that deliver to it, are removed too.
           </p>
           <label className={pageStyles.field}>
             Type the mailbox email to confirm

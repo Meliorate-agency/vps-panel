@@ -213,7 +213,8 @@ export default async function MailboxesPage() {
                         <>
                           The address stops working immediately. Its stored mail moves
                           to <strong>Files &gt; Trash</strong>, where it can be restored
-                          for 30 days before it is deleted for good.
+                          for 30 days before it is deleted for good. Forwarders on this
+                          address, and forwarders that deliver to it, are removed too.
                         </>
                       }
                       action={deleteMailboxAction.bind(null, m.email)}

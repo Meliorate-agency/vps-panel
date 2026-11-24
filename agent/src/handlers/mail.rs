@@ -763,6 +763,32 @@ pub struct DeleteMailboxResp {
     /// Files > Trash entry now holding the mailbox's maildir, restorable for
     /// 30 days. None when the mailbox had no mail on disk.
     pub maildir_trash_id: Option<String>,
+    /// Forwarders removed with the mailbox: the ones on its address and the
+    /// ones that delivered to it.
+    pub forwarders_removed: u64,
+}
+
+/// Removes the forwarders that name a deleted mailbox, as source or as
+/// destination. They used to stay: mail to the deleted address was still
+/// forwarded, and a mailbox created later under the same address would have
+/// received what other addresses still forwarded to the old one.
+async fn remove_forwarders_of(state: &AppState, email: &str) -> AgentResult<u64> {
+    let removed: Result<u64, mysql_async::Error> = async {
+        let mut conn = state.mariadb.pool().get_conn().await?;
+        conn.query_drop(format!("USE `{MAIL_DB}`")).await?;
+        conn.exec_drop(
+            "DELETE FROM virtual_aliases WHERE source = ? OR destination = ?",
+            (email, email),
+        )
+        .await?;
+        Ok(conn.affected_rows())
+    }
+    .await;
+    removed.map_err(|e| {
+        AgentError::Other(anyhow::anyhow!(
+            "The mailbox {email} was deleted, but its forwarders could not be removed: {e}.              Remove the forwarders that name {email} under Forwarders on the Mailboxes page."
+        ))
+    })
 }
 
 pub async fn delete_mailbox(
@@ -780,12 +806,14 @@ pub async fn delete_mailbox(
     let Ok((_, local, domain)) = parts else {
         conn.exec_drop(DELETE_ROW, (&row_email,)).await?;
         tracing::warn!(email = %email, "mailbox deleted; address not path-safe, maildir left alone");
-        return Ok(Json(DeleteMailboxResp { ok: true, maildir_trash_id: None }));
+        let forwarders_removed = remove_forwarders_of(&state, &row_email).await?;
+        return Ok(Json(DeleteMailboxResp { ok: true, maildir_trash_id: None, forwarders_removed }));
     };
     let maildir = PathBuf::from(format!("/var/vmail/{domain}/{local}"));
     if !is_real_dir(&maildir).await {
         conn.exec_drop(DELETE_ROW, (&row_email,)).await?;
-        return Ok(Json(DeleteMailboxResp { ok: true, maildir_trash_id: None }));
+        let forwarders_removed = remove_forwarders_of(&state, &row_email).await?;
+        return Ok(Json(DeleteMailboxResp { ok: true, maildir_trash_id: None, forwarders_removed }));
     }
 
     // The mail first, the login after. The trash can refuse the maildir (on
@@ -817,9 +845,11 @@ pub async fn delete_mailbox(
         }
     }
     tracing::info!(email = %row_email, trash_id = %trash_id, "mailbox deleted; maildir moved to trash");
+    let forwarders_removed = remove_forwarders_of(&state, &row_email).await?;
     Ok(Json(DeleteMailboxResp {
         ok: true,
         maildir_trash_id: Some(trash_id),
+        forwarders_removed,
     }))
 }
 
