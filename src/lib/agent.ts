@@ -29,6 +29,10 @@ type RequestOptions = {
 const QUICK_MS = 15_000;
 /** Lists and status reads: a few local commands, files or queries. */
 const READ_MS = 60_000;
+/** The personal data search reads through log files and can take minutes.
+ *  Just under the 300 s after which nginx gives up, so the operator reads
+ *  the panel's message instead of a gateway error. */
+const SUBJECT_SEARCH_MS = 280_000;
 
 function buildPath(p: string, q?: RequestOptions["query"]): string {
   if (!q) return p;
@@ -1022,7 +1026,75 @@ export const agent = {
       agentRequest<TailscaleSteps>({ method: "POST", path: "/tailscale/disconnect" }),
     logout: () => agentRequest<TailscaleSteps>({ method: "POST", path: "/tailscale/logout" }),
   },
+
+  /** Settings > Privacy. An agent older than this answers these routes with
+   *  a bare 404. */
+  privacy: {
+    /** What the web server logs and how long logs are kept, as it holds now. */
+    status: () => agentRequest<PrivacyStatus>({ method: "GET", path: "/privacy/status", timeoutMs: READ_MS }),
+    /** Reads the privacy settings from panel.db and brings the system to
+     *  them. A part that could not be applied comes back `ok: false`. No
+     *  timeoutMs: it changes the system and is not cut short. */
+    apply: () => agentRequest<PrivacyStatus>({ method: "POST", path: "/privacy/apply", body: {} }),
+    /** What the server holds about one email address or IP address. The
+     *  value always travels in the body: a URL would end up in logs. */
+    subjectSearch: (body: SubjectQuery) =>
+      agentRequest<SubjectReport>({
+        method: "POST",
+        path: "/privacy/subject/search",
+        body,
+        timeoutMs: SUBJECT_SEARCH_MS,
+      }),
+    /** Replaces the subject in the listed sources, the erasable ones only.
+     *  No timeoutMs: rewriting log files takes as long as it takes. */
+    subjectErase: (body: SubjectQuery & { sources: string[] }) =>
+      agentRequest<SubjectEraseResult>({ method: "POST", path: "/privacy/subject/erase", body }),
+  },
 };
+
+export type PrivacyPart = {
+  /** "nginx_logs", "journal" or "nginx_log_files". */
+  id: string;
+  label: string;
+  /** Plain words: what the settings ask for. */
+  wanted: string;
+  /** Plain words: what the system does now. */
+  actual: string;
+  ok: boolean;
+  /** When not ok: why, and what to do. May be empty. */
+  detail: string;
+};
+export type PrivacyStatus = {
+  /** The settings as stored in panel.db. */
+  log_ip: "full" | "masked";
+  log_query: "keep" | "strip";
+  retention_days: number | null;
+  parts: PrivacyPart[];
+  /** Plain sentences, shown as they are. */
+  notes: string[];
+};
+
+export type SubjectKind = "email" | "ip";
+export type SubjectQuery = { kind: SubjectKind; value: string };
+/** One place that holds records about the person asked about. */
+export type SubjectSource = {
+  /** Stable id, e.g. "nginx_access", "journal_mail", "mailboxes". */
+  id: string;
+  label: string;
+  /** Matching records (lines, rows). */
+  count: number;
+  /** Up to 20 matching records, newest first. */
+  samples: string[];
+  /** More matches exist than were counted or sampled. */
+  truncated: boolean;
+  /** An erase can act on this source. */
+  erasable: boolean;
+  /** What this is and, when not erasable, what happens to it instead. */
+  note: string;
+};
+export type SubjectReport = { kind: SubjectKind; value: string; sources: SubjectSource[] };
+export type SubjectEraseItem = { id: string; ok: boolean; changed: number; detail: string };
+export type SubjectEraseResult = { results: SubjectEraseItem[] };
 
 /** What the panel sets on Tailscale. Empty hostname = the server's own. */
 export type TailscaleOptions = {
