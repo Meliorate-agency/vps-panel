@@ -111,8 +111,15 @@ export async function restoreSubdomainRecords(
  * not rolled back. Returns a sentence for the operator when something was
  * not done (null when all is well); it used to go only to the audit log, so
  * "Site created" hid a failed zone.
+ *
+ * `opts.ipv6` is the Add domain form's IPv6 choice for a zone created here;
+ * left out, the agent applies the server default.
  */
-export async function ensureDnsZone(actorId: number, domain: string): Promise<string | null> {
+export async function ensureDnsZone(
+  actorId: number,
+  domain: string,
+  opts?: { ipv6?: boolean },
+): Promise<string | null> {
   try {
     const zones = await agent.dns.listZones().catch(() => []);
     const zoneNames = new Set(zones.map((z) => z.name));
@@ -183,13 +190,14 @@ export async function ensureDnsZone(actorId: number, domain: string): Promise<st
     // No parent zone — create a fresh top-level zone (original behavior).
     const addr = await getServerAddress();
     const seedIp = addr.ip ?? undefined;
-    await agent.dns.createZone(domain, seedIp);
+    const zone = await agent.dns.createZone(domain, seedIp, { ipv6: opts?.ipv6 });
     db().prepare(`INSERT OR IGNORE INTO domains (name) VALUES (?)`).run(domain);
     writeAudit({
       actorId,
       action: "dns.zones.create",
       target: domain,
       result: "ok",
+      message: zone?.ipv6 === undefined ? undefined : `ipv6 ${zone.ipv6 ? "on" : "off"}`,
     });
     return null;
   } catch (e: unknown) {

@@ -71,6 +71,8 @@ type ParsedForm =
       issueSsl: boolean;
       createDnsZone: boolean;
       configureMail: boolean;
+      /** IPv6 for a new zone; undefined = the server default. */
+      ipv6: boolean | undefined;
     }
   | { ok: false; result: ActionResult };
 
@@ -81,6 +83,10 @@ function parseAndValidate(fd: FormData): ParsedForm {
   let forceWwwRedirect = fd.get("force_www_redirect") === "on";
   const createDnsZone = fd.get("create_dns_zone") === "on";
   let configureMail = fd.get("configure_mail") === "on";
+  // Sent only when the form offered the choice (a new zone, an agent that
+  // has IPv6 settings); otherwise the agent applies its default.
+  const rawIpv6 = fd.get("ipv6");
+  const ipv6 = rawIpv6 === "on" ? true : rawIpv6 === "off" ? false : undefined;
 
   if (!FQDN_RE.test(domain)) {
     return { ok: false, result: { ok: false, error: "invalid domain" } };
@@ -108,6 +114,7 @@ function parseAndValidate(fd: FormData): ParsedForm {
     issueSsl,
     createDnsZone,
     configureMail,
+    ipv6,
   };
 }
 
@@ -249,7 +256,7 @@ export async function createSiteAction(
   const s = await requireAdmin();
   const parsed = parseAndValidate(fd);
   if (!parsed.ok) return parsed.result;
-  const { domain, route, forceWwwRedirect, issueSsl, createDnsZone, configureMail } = parsed;
+  const { domain, route, forceWwwRedirect, issueSsl, createDnsZone, configureMail, ipv6 } = parsed;
 
   // The panel's own hostname is served by the panel. A site with that name
   // would be loaded first by nginx and hide the panel.
@@ -274,7 +281,7 @@ export async function createSiteAction(
 
   const warnings: string[] = [];
   if (createDnsZone) {
-    const w = await ensureDnsZone(s.userId, domain);
+    const w = await ensureDnsZone(s.userId, domain, { ipv6 });
     if (w) warnings.push(w);
   }
 

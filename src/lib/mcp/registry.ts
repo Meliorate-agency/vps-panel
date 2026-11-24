@@ -15,6 +15,7 @@ import { TOOLS as BACKUPS } from "./tools/backups";
 import { TOOLS as SSH } from "./tools/ssh";
 import { TOOLS as TASKS } from "./tools/tasks";
 import { TOOLS as PRIVACY } from "./tools/privacy";
+import { TOOLS as IPV6 } from "./tools/ipv6";
 
 /**
  * Tools a read-only token may call: they read state and return no secrets.
@@ -37,6 +38,7 @@ const READ_ONLY_TOOLS = new Set([
   "db.list_databases",
   "dns.list_zones",
   "dns.list_records",
+  "domains.ipv6",
   "sites.list",
   "sites.status",
   "networks.status",
@@ -58,6 +60,7 @@ const READ_ONLY_TOOLS = new Set([
   "ssh.get_server_config",
   "tasks.list",
   "privacy.status",
+  "ipv6.status",
 ]);
 
 /**
@@ -80,6 +83,7 @@ const ALL: Tool[] = [
   ...SSH,
   ...TASKS,
   ...PRIVACY,
+  ...IPV6,
 ];
 
 // Sanity-check at module load: every tool name must be unique. A duplicate

@@ -33,6 +33,12 @@ const READ_MS = 60_000;
  *  Just under the 300 s after which nginx gives up, so the operator reads
  *  the panel's message instead of a gateway error. */
 const SUBJECT_SEARCH_MS = 280_000;
+/** GET /ipv6/status reads the network interfaces and may resolve the panel
+ *  hostname's AAAA record. Short: the settings and domains pages wait for it. */
+const IPV6_STATUS_MS = 15_000;
+/** GET /dns/zones/{name}/ipv6 runs live DNS lookups (the name servers over
+ *  IPv6, reverse DNS) that take seconds each and can time out one by one. */
+const ZONE_IPV6_MS = 120_000;
 
 function buildPath(p: string, q?: RequestOptions["query"]): string {
   if (!q) return p;
@@ -410,11 +416,17 @@ export const agent = {
 
   dns: {
     listZones: () => agentRequest<ZoneRow[]>({ method: "GET", path: "/dns/zones", timeoutMs: READ_MS }),
-    createZone: (name: string, seedIp?: string) =>
+    /** `opts.ipv6` publishes the zone's IPv6 records (or not); left out,
+     *  the agent applies the server default (Settings > DNS & SSL > IPv6). */
+    createZone: (name: string, seedIp?: string, opts?: { ipv6?: boolean }) =>
       agentRequest<ZoneRow>({
         method: "POST",
         path: "/dns/zones",
-        body: seedIp ? { name, seed_ip: seedIp } : { name },
+        body: {
+          name,
+          ...(seedIp ? { seed_ip: seedIp } : {}),
+          ...(opts?.ipv6 === undefined ? {} : { ipv6: opts.ipv6 }),
+        },
       }),
     deleteZone: (zone: string) =>
       agentRequest<Ok>({ method: "DELETE", path: `/dns/zones/${encodeURIComponent(zone)}` }),
@@ -441,6 +453,35 @@ export const agent = {
       agentRequest<Ok>({ method: "PATCH", path: `/dns/records/${id}`, body }),
     deleteRecord: (id: number) =>
       agentRequest<Ok>({ method: "DELETE", path: `/dns/records/${id}` }),
+    /** One zone's IPv6: on or off, the records on means and whether each is
+     *  there, and live checks of whether IPv6 will work. Slow: DNS lookups. */
+    zoneIpv6: (name: string) =>
+      agentRequest<DomainIpv6>({
+        method: "GET",
+        path: `/dns/zones/${encodeURIComponent(name)}/ipv6`,
+        timeoutMs: ZONE_IPV6_MS,
+      }),
+    /** Publishes (true) or removes (false) the zone's IPv6 records. 409 when
+     *  switching on while the server has no IPv6 address. */
+    setZoneIpv6: (name: string, enabled: boolean) =>
+      agentRequest<DomainIpv6>({
+        method: "PUT",
+        path: `/dns/zones/${encodeURIComponent(name)}/ipv6`,
+        body: { enabled },
+      }),
+  },
+
+  /** The server's IPv6 address that domains with IPv6 on publish, and the
+   *  default for new domains. */
+  ipv6: {
+    status: () =>
+      agentRequest<Ipv6Status>({ method: "GET", path: "/ipv6/status", timeoutMs: IPV6_STATUS_MS }),
+    /** Only the fields given are changed. `address` "" = automatic. A new
+     *  address moves the records of every zone with IPv6 on; 400 for an
+     *  address that is not on an interface, 409 when clearing it to none
+     *  while zones have IPv6 on. */
+    setSettings: (body: { address?: string; new_domains?: Ipv6NewDomains }) =>
+      agentRequest<Ipv6Status>({ method: "PUT", path: "/ipv6/settings", body }),
   },
 
   mail: {
@@ -1541,7 +1582,14 @@ export type CertRow = {
   serving: boolean;
 };
 
-export type ZoneRow = { id: number; name: string; type: string; records: number };
+export type ZoneRow = {
+  id: number;
+  name: string;
+  type: string;
+  records: number;
+  /** IPv6 is on for the zone. Missing from an agent older than the switch. */
+  ipv6?: boolean;
+};
 export type RecordRow = {
   id: number;
   name: string;
@@ -1636,6 +1684,53 @@ export type MailDomainDnsCheck = {
   /** The zone is in this panel's PowerDNS, so Reconcile zone can repair it. */
   managed: boolean;
   checks: MailCheckItem[];
+};
+export type Ipv6NewDomains = "on" | "off";
+/** A global IPv6 address on one of the server's network interfaces. */
+export type Ipv6Candidate = {
+  address: string;
+  device: string;
+  /** e.g. "the panel hostname's AAAA record points here"; may be empty. */
+  note: string;
+};
+/** Where the address in effect comes from: the stored choice, the panel
+ *  hostname's AAAA record, the only address on the interfaces, or nowhere. */
+export type Ipv6Source = "setting" | "hostname" | "interface" | "none";
+export type Ipv6Status = {
+  /** The server's IPv6 address in effect; null = none. */
+  address: string | null;
+  source: Ipv6Source;
+  /** ipv6.address as stored; "" = automatic. */
+  setting: string;
+  /** Temporary and deprecated addresses are left out. */
+  candidates: Ipv6Candidate[];
+  new_domains: Ipv6NewDomains;
+  /** Zones with IPv6 on. */
+  domains_on: number;
+  domains_total: number;
+  /** Plain sentences, shown as they are. */
+  notes: string[];
+};
+export type DomainIpv6Record = {
+  name: string;
+  type: "AAAA" | "TXT";
+  content: string;
+  /** The record is in the zone now. */
+  present: boolean;
+};
+export type DomainIpv6 = {
+  domain: string;
+  enabled: boolean;
+  /** The server's IPv6 address in effect. */
+  address: string | null;
+  /** False only when the server has no IPv6 address at all. */
+  can_enable: boolean;
+  /** What on means for this zone. */
+  records: DomainIpv6Record[];
+  /** Will IPv6 work for this domain. warn / fail never block switching on.
+   *  Same shape as the mail checks. */
+  checks: MailCheckItem[];
+  notes: string[];
 };
 export type MailDomainCreateResp = {
   name: string;
