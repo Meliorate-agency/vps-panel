@@ -98,6 +98,13 @@ fn describe_task(kind: &str) -> String {
     }
 }
 
+/// Tasks whose failure is not reported: a Tailscale login ends "failed" when
+/// it is cancelled, replaced by another or left unanswered for 15 minutes,
+/// and the operator who started it is watching it on the page.
+fn reported(kind: &str) -> bool {
+    kind != "tailscale:up"
+}
+
 /// Task kinds a background loop starts again every day while they fail (the
 /// renewal loop): reported once, until one of that kind succeeds.
 fn retried_daily(kind: &str) -> bool {
@@ -911,6 +918,9 @@ fn task_message(kind: &str, id: &str, log_tail: &str) -> Message {
 
 /// A task ended failed (ipc/tasks.rs).
 pub fn task_failed(db: &PanelDb, kind: &str, id: &str, log_tail: &str) {
+    if !reported(kind) {
+        return;
+    }
     if retried_daily(kind) {
         match db.with(|conn| mark_once(conn, &format!("task:{kind}"), Utc::now())) {
             Ok(false) => return,
@@ -950,7 +960,7 @@ pub fn interrupted_tasks(db: &PanelDb) {
 
 fn interrupted_messages(rows: &[(String, String)]) -> Vec<Message> {
     let mut by_event: BTreeMap<&'static str, Vec<&(String, String)>> = BTreeMap::new();
-    for row in rows {
+    for row in rows.iter().filter(|r| reported(&r.1)) {
         by_event.entry(event_for_task(&row.1)).or_default().push(row);
     }
     by_event
@@ -1894,6 +1904,7 @@ mod tests {
         assert_eq!(describe_task("db:import:shop"), "Database import into shop");
         assert_eq!(describe_task("system:self-update"), "Panel update");
         assert_eq!(describe_task("tailscale:up"), "The task tailscale:up");
+        assert!(!reported("tailscale:up") && reported("quick-install:tailscale"));
     }
 
     /// The page offers what the agent sends, no more and no less.
