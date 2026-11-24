@@ -20,6 +20,7 @@ pub mod nginx;
 pub mod panel_access;
 pub mod postgres;
 pub mod privacy;
+pub mod privacy_subject;
 pub mod quick_install;
 pub mod redirects;
 pub mod sites;
@@ -130,6 +131,10 @@ pub fn router(state: AppState) -> Router {
         .route("/mail/aliases/{id}", delete(mail_aliases::delete))
         // Track delivery: Postfix's journal for one address.
         .route("/mail/track", get(mail_log::track))
+        // Personal data requests: what the server holds about one email
+        // address or IP address outside panel.db, and erasing what can be.
+        .route("/privacy/subject/search", post(privacy_subject::search))
+        .route("/privacy/subject/erase", post(privacy_subject::erase))
         // Make sure a valid cert covers mail.<tenant> (re-issue site cert with
         // the SAN, or a standalone mail.<tenant> cert). Returns a task id.
         .route("/mail/domains/{name}/ssl", post(mail::ensure_ssl))
