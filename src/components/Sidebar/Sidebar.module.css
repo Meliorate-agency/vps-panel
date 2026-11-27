@@ -145,6 +145,31 @@
   }
 }
 
+/* On / off badge after a label (MCP): a filled circle with a white check
+   or dash. Its own colours, not the row's: it must read the same at rest,
+   on hover and on the active row. */
+.statusBadge {
+  flex-shrink: 0;
+  width: 14px;
+  height: 14px;
+}
+
+.statusBadge path {
+  fill: none;
+  stroke: #fff;
+  stroke-width: 1.9;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.statusOn circle {
+  fill: var(--ok);
+}
+
+.statusOff circle {
+  fill: var(--danger);
+}
+
 .backdrop {
   display: none;
 }

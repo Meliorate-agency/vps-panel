@@ -75,7 +75,7 @@ const SECTIONS: { group: string; items: NavItem[] }[] = [
 
 export const SIDEBAR_TOGGLE_EVENT = "vps-panel:toggle-sidebar";
 
-export default function Sidebar() {
+export default function Sidebar({ mcpOn }: { mcpOn: boolean }) {
   const pathname = usePathname();
   const [open, setOpen] = useState(false);
 
@@ -153,7 +153,11 @@ export default function Sidebar() {
                       className={[styles.link, active ? styles.active : ""].join(" ").trim()}
                       onClick={() => setOpen(false)}
                     >
-                      <SidebarLinkLabel icon={item.icon} label={item.label} />
+                      <SidebarLinkLabel
+                        icon={item.icon}
+                        label={item.label}
+                        status={item.href === "/ai-agent" ? (mcpOn ? "on" : "off") : undefined}
+                      />
                     </Link>
                   </li>
                 );
@@ -166,13 +170,43 @@ export default function Sidebar() {
   );
 }
 
-function SidebarLinkLabel({ icon, label }: { icon: NavIconName; label: string }) {
+function SidebarLinkLabel({
+  icon,
+  label,
+  status,
+}: {
+  icon: NavIconName;
+  label: string;
+  /** A feature switched on or off, shown as a badge after the label. */
+  status?: "on" | "off";
+}) {
   const { pending } = useLinkStatus();
   return (
     <span className={styles.linkRow}>
       <NavIcon name={icon} className={styles.linkIcon} />
       <span className={styles.linkText}>{label}</span>
-      {pending && <span className={styles.linkSpinner} aria-hidden="true" />}
+      {pending ? (
+        <span className={styles.linkSpinner} aria-hidden="true" />
+      ) : (
+        status && <StatusBadge on={status === "on"} />
+      )}
     </span>
+  );
+}
+
+/** A green check (on) or a red dash (off) in a filled circle. */
+function StatusBadge({ on }: { on: boolean }) {
+  const text = on ? "Enabled" : "Disabled";
+  return (
+    <svg
+      className={[styles.statusBadge, on ? styles.statusOn : styles.statusOff].join(" ")}
+      viewBox="0 0 16 16"
+      role="img"
+      aria-label={text}
+    >
+      <title>{text}</title>
+      <circle cx="8" cy="8" r="7.5" />
+      {on ? <path d="M4.6 8.3l2.3 2.3l4.5-4.8" /> : <path d="M4.8 8h6.4" />}
+    </svg>
   );
 }
