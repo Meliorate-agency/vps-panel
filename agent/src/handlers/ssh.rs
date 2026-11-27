@@ -227,6 +227,54 @@ fn lockout_reason(
     ))
 }
 
+/// Why writing `new_keys` as `user`'s authorized_keys (`path`) is refused
+/// without `force`: an account can log in over SSH now and none could
+/// afterwards. Deleting the last login key, or saving an emptied file, while
+/// password login is off did exactly that; config_set had the check, the key
+/// edits that reach the same state did not.
+async fn key_lockout_reason(user: &str, path: &std::path::Path, new_keys: &str) -> Option<String> {
+    let cfg = effective_config().await.ok()?;
+    let policy = LoginPolicy {
+        passwords: cfg.password_auth || cfg.kbd_interactive,
+        root_login: cfg.permit_root_login.clone(),
+    };
+    let passwd = fs::read_to_string("/etc/passwd").await.unwrap_or_default();
+    let shadow = fs::read_to_string("/etc/shadow").await.unwrap_or_default();
+    let mut before = Vec::new();
+    let mut after = Vec::new();
+    for (name, uid, home, has_password) in parse_login_accounts(&passwd, &shadow) {
+        let files = authorized_keys_files(&cfg.authorized_keys_files, &name, &home);
+        let has_key = has_login_key(&files).await;
+        let has_key_after = if name == user {
+            let others: Vec<PathBuf> = files.iter().filter(|f| f.as_path() != path).cloned().collect();
+            text_has_login_key(new_keys).await || has_login_key(&others).await
+        } else {
+            has_key
+        };
+        before.push(LoginAccount { uid, has_password, has_key });
+        after.push(LoginAccount { uid, has_password, has_key: has_key_after });
+    }
+    if !before.iter().any(|a| can_log_in(a, &policy)) || after.iter().any(|a| can_log_in(a, &policy)) {
+        return None;
+    }
+    Some(format!(
+        "nobody could log in over SSH after this change: it takes away the last key that opens a shell for {user}, \
+         and no other account has a key{}. Add another SSH key first{}. The panel terminal would still work.",
+        if policy.passwords { " or a password" } else { ", and password login is off" },
+        if policy.passwords { "" } else { ", or turn password login on" },
+    ))
+}
+
+/// An authorized_keys text has a line that opens a shell.
+async fn text_has_login_key(text: &str) -> bool {
+    for line in text.lines() {
+        if line_opens_a_shell(line) && fingerprint(line.trim()).await.is_ok() {
+            return true;
+        }
+    }
+    false
+}
+
 /// Accounts in /etc/passwd with a login shell, as (name, uid, home, has a
 /// password). A password is usable when its /etc/shadow field is a hash:
 /// not empty, and not locked with `!` or `*`.
@@ -908,6 +956,10 @@ pub async fn get_private_key(
 #[derive(Deserialize)]
 pub struct UpdateKeyBody {
     pub content: String,
+    /// authorized_keys only: write it even though nobody could log in over
+    /// SSH afterwards (key_lockout_reason).
+    #[serde(default)]
+    pub force: bool,
 }
 
 #[derive(Serialize)]
@@ -985,6 +1037,11 @@ pub async fn update_public_key(
     if !body_out.ends_with('\n') {
         body_out.push('\n');
     }
+    if !body.force {
+        if let Some(why) = key_lockout_reason(&q.user, &path, &body_out).await {
+            return Err(AgentError::Conflict(why));
+        }
+    }
     fs_atomic::ensure_dir(path.parent().unwrap(), 0o700).await?;
     fs_atomic::write(&path, body_out.as_bytes(), 0o600).await?;
     chown_for_user(&q.user, &path)?;
@@ -1054,6 +1111,11 @@ pub async fn put_authorized_keys_file(
     let mut content = body.content;
     if !content.ends_with('\n') {
         content.push('\n');
+    }
+    if !body.force {
+        if let Some(why) = key_lockout_reason(&q.user, &path, &content).await {
+            return Err(AgentError::Conflict(why));
+        }
     }
     fs_atomic::ensure_dir(path.parent().unwrap(), 0o700).await?;
     fs_atomic::write(&path, content.as_bytes(), 0o600).await?;
@@ -1405,6 +1467,9 @@ pub struct RemoveKeyQuery {
     /// (the list is driven by authorized_keys lines) but still blocking
     /// `generate_keypair` from reusing the name.
     pub purge_keypair: Option<String>,
+    /// Remove it even though nobody could log in over SSH afterwards.
+    #[serde(default)]
+    pub force: bool,
 }
 
 pub async fn remove(
@@ -1445,6 +1510,12 @@ pub async fn remove(
     };
 
     let path = authorized_keys_path(&q.user)?;
+    let (new_body, removed) = without_line(&read_user_file(&path).await?, &fp).await;
+    if removed && !q.force {
+        if let Some(why) = key_lockout_reason(&q.user, &path, &new_body).await {
+            return Err(AgentError::Conflict(why));
+        }
+    }
     if drop_authorized_line(&path, &fp).await? {
         chown_for_user(&q.user, &path)?;
     }
@@ -1470,6 +1541,15 @@ pub async fn remove(
 /// anyway would create the file for an account that never had one.
 async fn drop_authorized_line(path: &std::path::Path, fp: &str) -> AgentResult<bool> {
     let body = read_user_file(path).await?;
+    let (new_body, removed) = without_line(&body, fp).await;
+    if removed {
+        fs_atomic::write(path, new_body.as_bytes(), 0o600).await?;
+    }
+    Ok(removed)
+}
+
+/// `body` without the line whose fingerprint is `fp`, and whether one went.
+async fn without_line(body: &str, fp: &str) -> (String, bool) {
     let mut keep = Vec::new();
     let mut removed = false;
     for (i, line) in body.lines().enumerate() {
@@ -1490,14 +1570,11 @@ async fn drop_authorized_line(path: &std::path::Path, fp: &str) -> AgentResult<b
             keep.push(line.to_string());
         }
     }
-    if removed {
-        let mut new_body = keep.join("\n");
-        if !new_body.ends_with('\n') {
-            new_body.push('\n');
-        }
-        fs_atomic::write(path, new_body.as_bytes(), 0o600).await?;
+    let mut new_body = keep.join("\n");
+    if !new_body.ends_with('\n') {
+        new_body.push('\n');
     }
-    Ok(removed)
+    (new_body, removed)
 }
 
 fn authorized_keys_path(user: &str) -> AgentResult<PathBuf> {
