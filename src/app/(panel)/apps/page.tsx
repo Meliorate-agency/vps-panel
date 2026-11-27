@@ -47,6 +47,9 @@ import CheckStatusCell from "./CheckStatusCell";
 import AppFolderSection from "./AppFolderSection";
 import MoveToFolderButton from "./MoveToFolderButton";
 import NewFolderButton from "./NewFolderButton";
+import UpdateAllButton from "./UpdateAllButton";
+import UpdateQueueStrip from "./UpdateQueueStrip";
+import { getSetting } from "@/lib/settings";
 
 export const dynamic = "force-dynamic";
 
@@ -202,7 +205,7 @@ export default async function AppsPage() {
     getN8nAutoCheck(),
   ]);
 
-  const [apps, recipes, addr, folders, folderAssignments, tsStatus, session, comments] = await Promise.all([
+  const [apps, recipes, addr, folders, folderAssignments, tsStatus, session, comments, updateQueue] = await Promise.all([
     agent.apps.list().catch(() => []),
     // checkUpdates reaches out to Docker Hub for the n8n image tag (6s
     // timeout) — the single slowest thing on this page. Gated by n8n's own
@@ -218,6 +221,8 @@ export default async function AppsPage() {
     agent.tailscale.status().catch(() => null),
     getSession(),
     listAppComments(),
+    // The Update all queue (in the agent's memory, answers at once).
+    agent.apps.updateQueue().catch(() => null),
   ]);
   const serverAddress = addr.domain ?? addr.ip ?? null;
   // Only the phase and the tailnet IP reach the client: the full status
@@ -295,9 +300,18 @@ export default async function AppsPage() {
         </div>
         <div className={styles.actions}>
           <NewFolderButton action={createAppFolderAction} />
+          {session?.role === "admin" && (
+            <UpdateAllButton running={updateQueue?.running ?? false} appCount={panelApps.length} />
+          )}
           <DeployMethodButton />
         </div>
       </div>
+
+      <UpdateQueueStrip
+        initial={updateQueue}
+        dismissedTaskId={getSetting("apps.update_all_dismissed", "")}
+        canManage={session?.role === "admin"}
+      />
 
       {orphans.length > 0 && (
         <div

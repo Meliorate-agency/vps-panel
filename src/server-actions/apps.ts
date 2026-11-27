@@ -4,6 +4,7 @@ import { revalidatePath } from "next/cache";
 import { redirect } from "next/navigation";
 import {
   agent,
+  type AppUpdateQueue,
   type CreateApp,
   type AppEnvFilesResp,
   type DockerImageInfo,
@@ -514,6 +515,67 @@ export async function updateAppAction(
     });
     return { ok: false, error: msg };
   }
+}
+
+/**
+ * Update all: the agent checks every app one at a time and updates each one
+ * with something new (new commits, a newer image), never two at once. A
+ * queue that is already running keeps going; apps not in it yet join it.
+ */
+export async function updateAllAppsAction(): Promise<
+  { ok: true; taskId: string; added: string[] } | { ok: false; error: string }
+> {
+  const s = await requireAdmin();
+  try {
+    const res = await agent.apps.updateAll();
+    writeAudit({
+      actorId: s.userId,
+      action: "apps.update_all",
+      result: "ok",
+      message: res.added.length ? `queued: ${res.added.join(", ")}` : "nothing new to queue",
+    });
+    revalidatePath("/apps");
+    return { ok: true, taskId: res.task_id, added: res.added };
+  } catch (e: unknown) {
+    const msg = e instanceof Error ? e.message : String(e);
+    writeAudit({ actorId: s.userId, action: "apps.update_all", result: "error", message: msg });
+    return { ok: false, error: msg };
+  }
+}
+
+/** The Update all queue as it stands, for the strip on /apps while it runs. */
+export async function appUpdateQueueAction(): Promise<
+  { ok: true; queue: AppUpdateQueue } | { ok: false; error: string }
+> {
+  await requireSession();
+  try {
+    return { ok: true, queue: await agent.apps.updateQueue() };
+  } catch (e: unknown) {
+    return { ok: false, error: e instanceof Error ? e.message : String(e) };
+  }
+}
+
+/** Takes the apps still waiting out of the queue; the one in progress finishes. */
+export async function stopAppUpdateQueueAction(): Promise<
+  { ok: true; queue: AppUpdateQueue } | { ok: false; error: string }
+> {
+  const s = await requireAdmin();
+  try {
+    const queue = await agent.apps.stopUpdateQueue();
+    writeAudit({ actorId: s.userId, action: "apps.update_all_stop", result: "ok" });
+    return { ok: true, queue };
+  } catch (e: unknown) {
+    const msg = e instanceof Error ? e.message : String(e);
+    writeAudit({ actorId: s.userId, action: "apps.update_all_stop", result: "error", message: msg });
+    return { ok: false, error: msg };
+  }
+}
+
+/** Hides the last Update all result on /apps until the next run. */
+export async function dismissUpdateAllResultAction(taskId: string): Promise<void> {
+  await requireSession();
+  if (!/^[0-9a-f-]{36}$/.test(taskId)) return;
+  setSetting("apps.update_all_dismissed", taskId);
 }
 
 // External apps (drift-detected from /srv/apps/) have a systemd unit named

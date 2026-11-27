@@ -220,6 +220,21 @@ export const agent = {
         path: `/apps/${encodeURIComponent(name)}/env`,
         body: { env },
       }),
+    /** Update all: the queue that checks the apps one at a time and updates
+     *  each one with something new. */
+    updateQueue: () =>
+      agentRequest<AppUpdateQueue>({ method: "GET", path: "/apps-update-queue", timeoutMs: QUICK_MS }),
+    /** Puts apps in the queue (none named = every app the panel manages) and
+     *  starts it when it is not running. */
+    updateAll: (names: string[] = []) =>
+      agentRequest<{ task_id: string; added: string[] }>({
+        method: "POST",
+        path: "/apps-update-queue",
+        body: { names },
+      }),
+    /** Takes the apps still waiting out of the queue; the current one finishes. */
+    stopUpdateQueue: () =>
+      agentRequest<AppUpdateQueue>({ method: "DELETE", path: "/apps-update-queue", timeoutMs: QUICK_MS }),
     gitStatus: (name: string) =>
       agentRequest<GitStatusResp>({
         method: "GET",
@@ -1606,6 +1621,26 @@ export type DockerStatus = {
   /** The daemon answers. */
   running: boolean;
   version: string | null;
+};
+
+/** One app in an Update all run. */
+export type AppUpdateOutcome = {
+  name: string;
+  result: "updated" | "up_to_date" | "failed" | "skipped";
+  detail: string;
+  /** The app's own update task, when one ran. */
+  task_id: string | null;
+};
+
+/** The Update all queue (agent app_update_queue.rs). */
+export type AppUpdateQueue = {
+  running: boolean;
+  /** The running queue's task, else the last run's. */
+  task_id: string | null;
+  current: { name: string; step: "checking" | "updating"; task_id: string | null } | null;
+  waiting: string[];
+  /** What the current (or last) run did so far, in order. */
+  done: AppUpdateOutcome[];
 };
 
 export type GitStatusResp = {

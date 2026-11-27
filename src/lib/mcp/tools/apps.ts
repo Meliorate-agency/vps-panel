@@ -315,7 +315,7 @@ export const TOOLS: Tool[] = [
     page: "Apps",
     name: "apps.update",
     description:
-      "Node apps: pull latest code, reinstall deps (npm ci or install), run build (if defined in package.json), then restart. Docker apps: pull the image tag again and, if it changed, restart on it (rolled back to the previous image if it does not come up). Returns a task_id; stream the log via tasks.get.",
+      "Node apps: pull latest code, reinstall deps (npm ci or install), run build (if defined in package.json), then restart. Docker apps: pull the image tag again and, if it changed, restart on it (rolled back to the previous image if it does not come up). Returns a task_id; stream the log via tasks.get. While Update all (the /apps queue) runs, the app joins that queue instead of building next to it, and the task_id is the queue's: its log names the app's own update task when its turn comes.",
     inputSchema: {
       type: "object",
       properties: { name: { type: "string", description: "App name." } },

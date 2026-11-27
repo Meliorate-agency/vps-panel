@@ -324,6 +324,19 @@ impl TaskTracker {
         });
     }
 
+    /// A line for a live task's log from outside its handle: the Update all
+    /// queue notes an app that joins it while its worker waits on an update.
+    /// Watchers get the line at once; panel.db with the handle's next write.
+    pub fn log_live(&self, id: &str, line: &str) {
+        let task = self.live.lock().unwrap().get(id).cloned();
+        if let Some(task) = task {
+            let mut g = task.lock().unwrap();
+            let line = cap_line(line);
+            let _ = g.tx.send(TaskEvent::Line { text: line.clone() });
+            g.log.push(line);
+        }
+    }
+
     /// Exact kind match, for names where a prefix would also match a longer
     /// sibling (`apps.update:shop` vs `apps.update:shop-test`).
     pub fn any_live_kind(&self, kind: &str) -> bool {

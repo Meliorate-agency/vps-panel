@@ -1,4 +1,5 @@
 pub mod app_git;
+pub mod app_update_queue;
 pub mod apps;
 pub mod backups;
 pub mod cron;
@@ -64,6 +65,14 @@ pub fn router(state: AppState) -> Router {
         )
         .route("/apps/{name}/git-status", get(apps::git_status))
         .route("/apps/{name}/source-state", get(apps::source_state))
+        // Update all: one queue, one app at a time (app_update_queue.rs). Not
+        // under /apps/ so it can never shadow an app with that name.
+        .route(
+            "/apps-update-queue",
+            get(app_update_queue::get)
+                .post(app_update_queue::add)
+                .delete(app_update_queue::clear),
+        )
         // Docker image apps (docker_apps.rs; deploy/update go through /apps)
         .route("/apps/{name}/docker", get(docker_apps::info))
         .route("/apps/{name}/image-status", get(docker_apps::image_status))

@@ -122,6 +122,7 @@ fn describe_task(kind: &str) -> String {
         ("backups.restore", s) => format!("Restore of snapshot {s}"),
         ("apps.create", a) => format!("Deploy of the app {a}"),
         ("apps.update", a) => format!("Update of the app {a}"),
+        ("apps.update-all", _) => "Update all apps".to_string(),
         ("apps.recover", a) => format!("Putting back the last build of the app {a}"),
         ("system", "self-update") => "Panel update".to_string(),
         ("system", "apt-upgrade") => "System package upgrade".to_string(),
@@ -135,9 +136,10 @@ fn describe_task(kind: &str) -> String {
 
 /// Tasks whose failure is not reported: a Tailscale login ends "failed" when
 /// it is cancelled, replaced by another or left unanswered for 15 minutes,
-/// and the operator who started it is watching it on the page.
+/// and the operator who started it is watching it on the page. Update all
+/// is not either: each app it updates reports its own failure.
 fn reported(kind: &str) -> bool {
-    kind != "tailscale:up"
+    kind != "tailscale:up" && kind != crate::handlers::app_update_queue::QUEUE_TASK_KIND
 }
 
 /// Task kinds a background loop starts again every day while they fail (the

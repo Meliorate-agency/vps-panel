@@ -2025,30 +2025,46 @@ pub async fn update(
     Path(name): Path<String>,
 ) -> AgentResult<Json<TaskAccepted>> {
     validate_name(&name)?;
-    let (_subdomain, port, source_dir) = lookup_app(&state, &name)
+    lookup_app(&state, &name).await.ok_or(AgentError::NotFound)?;
+    // While Update all works through its queue, this update waits its turn
+    // in it: two builds at once is what the queue is there to prevent. The
+    // caller follows the queue's task, which names this app's own log.
+    if let Some(task_id) = super::app_update_queue::join(&state, &name)? {
+        return Ok(Json(TaskAccepted { task_id }));
+    }
+    let job = prepare_update(&state, &name).await?;
+    let task = state.tasks.create(&format!("apps.update:{name}"));
+    let task_id = task.id.clone();
+    tokio::spawn(job.run(task));
+    Ok(Json(TaskAccepted { task_id }))
+}
+
+/// An app update that passed its checks, ready to run as a task: the single
+/// Update button and the Update all queue both run it.
+pub(crate) struct UpdateJob {
+    cfg: std::sync::Arc<crate::config::Config>,
+    name: String,
+    /// None = the app has no routing slot: built, not restarted.
+    slot_port: Option<u16>,
+    repo_url: Option<String>,
+    /// A Node app's checkout and unit; None for a Docker app.
+    node: Option<(String, String)>,
+}
+
+pub(crate) async fn prepare_update(state: &AppState, name: &str) -> AgentResult<UpdateJob> {
+    let (_subdomain, port, source_dir) = lookup_app(state, name)
         .await
         .ok_or(AgentError::NotFound)?;
-    let has_slot = port != 0;
-    if docker_apps::is_docker_app(&name) {
-        refuse_if_app_task_running(&state, &name)?;
-        let repo_url = stored_repo_url(&state, &name);
-        let task = state.tasks.create(&format!("apps.update:{name}"));
-        let task_id = task.id.clone();
-        let cfg = state.config.clone();
-        tokio::spawn(async move {
-            task.start();
-            match Box::pin(docker_apps::run_update(&cfg, &name, has_slot.then_some(port), repo_url.as_deref(), &task)).await {
-                Ok(()) => {
-                    task.log("done");
-                    task.finish(true);
-                }
-                Err(e) => {
-                    task.log(format!("error: {e}"));
-                    task.finish(false);
-                }
-            }
-        });
-        return Ok(Json(TaskAccepted { task_id }));
+    let mut job = UpdateJob {
+        cfg: state.config.clone(),
+        name: name.to_string(),
+        slot_port: (port != 0).then_some(port),
+        repo_url: stored_repo_url(state, name),
+        node: None,
+    };
+    if docker_apps::is_docker_app(name) {
+        refuse_if_app_task_running(state, name)?;
+        return Ok(job);
     }
     if source_dir.is_empty() {
         return Err(AgentError::Invalid(
@@ -2061,43 +2077,55 @@ pub async fn update(
             "source_dir {source_dir} is not a git checkout - nothing to pull"
         )));
     }
-
-    let repo_url = stored_repo_url(&state, &name);
-    if let Some(url) = repo_url.as_deref() {
+    if let Some(url) = job.repo_url.as_deref() {
         check_repo_url(url)?;
     }
+    refuse_if_app_task_running(state, name)?;
+    job.node = Some((source_dir, format!("{VPS_APP_PREFIX}{name}.service")));
+    Ok(job)
+}
 
-    refuse_if_app_task_running(&state, &name)?;
-    let unit = format!("{VPS_APP_PREFIX}{name}.service");
-    let task = state.tasks.create(&format!("apps.update:{name}"));
-    let task_id = task.id.clone();
-    let cfg = state.config.clone();
-
-    tokio::spawn(async move {
+impl UpdateJob {
+    /// Runs the update as `task` and finishes it. True when it worked.
+    pub(crate) async fn run(self, task: crate::ipc::tasks::TaskHandle) -> bool {
         task.start();
-        let result = run_app_update(
-            &cfg,
-            &name,
-            &source_dir,
-            repo_url.as_deref(),
-            &unit,
-            has_slot.then_some(port),
-            &task,
-        )
-        .await;
+        let result = match &self.node {
+            None => {
+                Box::pin(docker_apps::run_update(
+                    &self.cfg,
+                    &self.name,
+                    self.slot_port,
+                    self.repo_url.as_deref(),
+                    &task,
+                ))
+                .await
+            }
+            Some((source_dir, unit)) => {
+                Box::pin(run_app_update(
+                    &self.cfg,
+                    &self.name,
+                    source_dir,
+                    self.repo_url.as_deref(),
+                    unit,
+                    self.slot_port,
+                    &task,
+                ))
+                .await
+            }
+        };
         match result {
             Ok(()) => {
                 task.log("done");
                 task.finish(true);
+                true
             }
             Err(e) => {
                 task.log(format!("error: {e}"));
                 task.finish(false);
+                false
             }
         }
-    });
-
-    Ok(Json(TaskAccepted { task_id }))
+    }
 }
 
 /// One deploy stage or update per app at a time. Two runs in the same checkout
@@ -2114,7 +2142,7 @@ pub(crate) fn refuse_if_app_task_running(state: &AppState, name: &str) -> AgentR
 /// The app's task that is still running, as (what it is, task id): a deploy
 /// stage, an update, or the build put back at agent start
 /// (recover_interrupted_builds).
-fn running_app_task(state: &AppState, name: &str) -> Option<(&'static str, String)> {
+pub(crate) fn running_app_task(state: &AppState, name: &str) -> Option<(&'static str, String)> {
     [
         ("deploy", format!("apps.create:{name}")),
         ("update", format!("apps.update:{name}")),
