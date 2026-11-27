@@ -166,6 +166,18 @@ pub fn volume_name(app: &str, path: &str) -> String {
     format!("{VPS_APP_PREFIX}{app}-{}", volume_slug(path))
 }
 
+/// The app a volume was made for (its vps-panel.app label, "" when it has
+/// none); None when there is no such volume. Names can run together (app
+/// blog's /api/uploads and app blog-api's /uploads are both
+/// vps-app-blog-api-uploads), so the label, not the name, says whose data it is.
+async fn volume_owner(volume: &str) -> Option<String> {
+    let out = exec::run("docker", ["volume", "inspect", "-f", "{{index .Labels \"vps-panel.app\"}}", volume])
+        .await
+        .ok()?;
+    let owner = out.stdout.trim();
+    Some(if owner == "<no value>" { String::new() } else { owner.to_string() })
+}
+
 /// Trimmed image, folders without a trailing slash, blank and repeated
 /// folders dropped; build paths without `./` or a trailing slash, an empty
 /// context or Dockerfile back to the default, blank build args dropped.
@@ -697,10 +709,19 @@ async fn deploy(
 
     for folder in &spec.volumes {
         let volume = volume_name(name, folder);
-        if exec::run("docker", ["volume", "inspect", &volume]).await.is_err() {
-            task.log(format!("creating volume {volume} for {folder}"));
-            exec::run("docker", ["volume", "create", "--label", &format!("vps-panel.app={name}"), &volume])
-                .await?;
+        match volume_owner(&volume).await {
+            None => {
+                task.log(format!("creating volume {volume} for {folder}"));
+                exec::run("docker", ["volume", "create", "--label", &format!("vps-panel.app={name}"), &volume])
+                    .await?;
+            }
+            // This app's (or one made before volumes were labelled).
+            Some(owner) if owner.is_empty() || owner == name => {}
+            Some(owner) => {
+                return Err(AgentError::Conflict(format!(
+                    "the Docker volume {volume} for {folder} already holds the data of the app {owner} (the two names run together): keep that folder under another path, or give this app another name"
+                )));
+            }
         }
     }
 
@@ -742,7 +763,9 @@ async fn deploy(
              fix the settings and Deploy again."
         )));
     }
-    Box::pin(apps::publish_vhost(cfg, acme_email, req, &unit, &unit_path, unit_existed, task)).await
+    Box::pin(apps::publish_vhost(cfg, acme_email, req, &unit, &unit_path, unit_existed, task)).await?;
+    apps::drop_stale_app_vhosts(name, &req.subdomain).await;
+    Ok(())
 }
 
 /// The build folder and Dockerfile as real paths, both inside the checkout.
@@ -1005,6 +1028,11 @@ pub async fn remove_app(name: &str, spec: &DockerSpec, wipe: bool) {
         }
     }
     for v in volumes {
+        // Only this app's data: a volume whose name it shares with another
+        // app's (see volume_owner) or that carries no label is left.
+        if volume_owner(&v).await.as_deref() != Some(name) {
+            continue;
+        }
         let _ = exec::run("docker", ["volume", "rm", &v]).await;
     }
 }

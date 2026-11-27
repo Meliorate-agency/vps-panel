@@ -306,6 +306,19 @@ async fn install_vhost_tested(
     Ok(())
 }
 
+/// A certificate order for the site is running. When it lands, its task
+/// writes the vhost with the route it was started with, so a change made in
+/// the meantime would be undone without a word (and a deleted site written
+/// back): the change waits until the order is done.
+fn refuse_while_issuing(state: &AppState, domain: &str) -> AgentResult<()> {
+    if state.tasks.live_task_id(&format!("sites.ssl:{domain}")).is_some() {
+        return Err(AgentError::Conflict(format!(
+            "a certificate for {domain} is being issued - change the site once that is done (a minute or two)"
+        )));
+    }
+    Ok(())
+}
+
 async fn spawn_ssl_task(state: &AppState, domain: String, route: RouteSpec) -> String {
     let task = state.tasks.create(&format!("sites.ssl:{domain}"));
     let task_id = task.id.clone();
@@ -484,6 +497,7 @@ pub async fn update(
             "issue_ssl and remove_ssl cannot both be set".into(),
         ));
     }
+    refuse_while_issuing(&state, &domain)?;
     let route = build_route(
         &req.mode,
         req.upstream_port,
@@ -545,6 +559,7 @@ pub async fn delete(
     if !is_safe_subdomain(&domain) {
         return Err(AgentError::Invalid("invalid domain".into()));
     }
+    refuse_while_issuing(&state, &domain)?;
     // Hard refuse: never delete the panel-host vhost from here — it would lock
     // the operator out. The UI already hides the Remove button for panel-host
     // rows, this is defense in depth.

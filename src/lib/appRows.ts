@@ -51,7 +51,10 @@ function unprovenApps(): Map<string, string[]> {
  */
 export function recordAppDeploy(req: CreateApp, taskId: string): void {
   const conn = db();
-  const existed = !!conn.prepare(`SELECT 1 FROM apps WHERE name = ?`).get(req.name);
+  const prev = conn
+    .prepare(`SELECT source_dir, port, subdomain, runtime, ssl_enabled FROM apps WHERE name = ?`)
+    .get(req.name) as RecordedSlot | undefined;
+  const existed = !!prev;
   // A row whose first deploy is not settled yet is still a brand-new app.
   const earlier = unprovenApps().get(req.name);
   conn
@@ -78,7 +81,46 @@ export function recordAppDeploy(req: CreateApp, taskId: string): void {
   if (!existed || earlier) {
     unprovenApps().set(req.name, [...(earlier ?? []), taskId]);
     void forgetIfDeployFails(req.name, taskId);
+  } else if (
+    prev.port !== req.port ||
+    prev.subdomain !== req.subdomain ||
+    prev.source_dir !== req.source_dir ||
+    prev.runtime !== req.runtime
+  ) {
+    void restoreIfDeployFails(req, prev, taskId);
   }
+}
+
+type RecordedSlot = { source_dir: string; port: number; subdomain: string; runtime: string; ssl_enabled: number };
+
+/**
+ * An app that has run, redeployed onto another slot or folder: if that
+ * deploy fails, the row goes back to what it was. The new values were written
+ * when the agent took the deploy, but a failed deploy never published the new
+ * slot's vhost, so the old slot is still the one nginx sends to the app; a
+ * row left on the new one made Update and the slot pickers work on a slot the
+ * app does not have. Only what this deploy wrote is put back: a later deploy
+ * or domain change keeps its values.
+ */
+async function restoreIfDeployFails(req: CreateApp, prev: RecordedSlot, taskId: string): Promise<void> {
+  if ((await taskOutcome(taskId)) !== "failed") return;
+  db()
+    .prepare(
+      `UPDATE apps SET source_dir = ?, port = ?, subdomain = ?, runtime = ?, ssl_enabled = ?
+        WHERE name = ? AND source_dir = ? AND port = ? AND subdomain = ? AND runtime = ?`,
+    )
+    .run(
+      prev.source_dir,
+      prev.port,
+      prev.subdomain,
+      prev.runtime,
+      prev.ssl_enabled,
+      req.name,
+      req.source_dir,
+      req.port,
+      req.subdomain,
+      req.runtime,
+    );
 }
 
 /** How the task ended, or null when it was still running after an hour. */

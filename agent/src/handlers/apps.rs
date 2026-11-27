@@ -959,7 +959,34 @@ async fn run_deploy(
         )));
     }
 
-    publish_vhost(cfg, acme_email, req, &unit_name, &unit_path, unit_existed, task).await
+    publish_vhost(cfg, acme_email, req, &unit_name, &unit_path, unit_existed, task).await?;
+    drop_stale_app_vhosts(&req.name, &req.subdomain).await;
+    Ok(())
+}
+
+/// The vhosts this app wrote for other names than `keep`: a redeploy onto
+/// another subdomain left the old one enabled, proxying its name to a port
+/// the app no longer has (and to whichever app took that port later).
+pub(crate) async fn drop_stale_app_vhosts(name: &str, keep: &str) {
+    let Ok(mut entries) = tokio::fs::read_dir("/etc/nginx/sites-available").await else {
+        return;
+    };
+    let marker = format!("# vps-app:{name}");
+    let mut stale = Vec::new();
+    while let Ok(Some(entry)) = entries.next_entry().await {
+        let file = entry.file_name().to_string_lossy().into_owned();
+        if file == keep {
+            continue;
+        }
+        if let Ok(body) = tokio::fs::read_to_string(entry.path()).await {
+            if body.lines().next().map(str::trim) == Some(marker.as_str()) {
+                stale.push(file);
+            }
+        }
+    }
+    for subdomain in stale {
+        remove_app_vhost(name, &subdomain).await;
+    }
 }
 
 /// The deploy's EnvironmentFile: the request's variables replace the file,
@@ -3265,9 +3292,36 @@ fn render_env_file(env: &[EnvKv]) -> String {
 }
 
 /// The port answers, and not because this app's own unit holds it (a
-/// re-deploy of a running app is not a conflict).
+/// re-deploy of a running app is not a conflict). Its unit counts only when
+/// it runs on that very port: a running app redeployed onto a port another
+/// program holds used to pass, and the restart onto it took the app down.
 pub(crate) async fn port_held_by_other(port: u16, own_unit: &str) -> bool {
-    port_in_use(port).await && unit_prop(own_unit, "ActiveState").await != "active"
+    if !port_in_use(port).await {
+        return false;
+    }
+    let body = tokio::fs::read_to_string(format!("/etc/systemd/system/{own_unit}"))
+        .await
+        .unwrap_or_default();
+    !(unit_port(&body) == Some(port) && unit_prop(own_unit, "ActiveState").await == "active")
+}
+
+/// The port an app's unit runs it on: `Environment=PORT=` (a Node app) or
+/// the `-p 127.0.0.1:<port>:` publish (a Docker app).
+fn unit_port(unit_body: &str) -> Option<u16> {
+    const PUBLISH: &str = "-p 127.0.0.1:";
+    for line in unit_body.lines().map(str::trim) {
+        if let Some(p) = line.strip_prefix("Environment=PORT=") {
+            if let Ok(n) = p.trim().parse() {
+                return Some(n);
+            }
+        }
+        if let Some(i) = line.find(PUBLISH) {
+            if let Some(n) = line[i + PUBLISH.len()..].split(':').next().and_then(|s| s.parse().ok()) {
+                return Some(n);
+            }
+        }
+    }
+    None
 }
 
 async fn port_in_use(port: u16) -> bool {
@@ -3415,6 +3469,19 @@ fn field(s: &str, key: &str) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn the_port_a_unit_runs_on() {
+        use super::unit_port;
+        assert_eq!(unit_port("[Service]\nEnvironment=NODE_ENV=production\nEnvironment=PORT=3005\n"), Some(3005));
+        assert_eq!(
+            unit_port("ExecStart=/usr/bin/docker run --rm --name vps-app-kuma -p 127.0.0.1:7010:3001 louislam/uptime-kuma:1"),
+            Some(7010)
+        );
+        assert_eq!(unit_port("[Service]
+ExecStart=/usr/bin/npm start
+"), None);
+    }
+
     use super::*;
 
     fn kv(key: &str, value: &str) -> EnvKv {
