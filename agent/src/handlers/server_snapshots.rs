@@ -22,6 +22,9 @@ pub struct Item {
     pub sidecar: Sidecar,
     /// "local" (made here) or "incoming" (pulled from another server).
     pub location: &'static str,
+    /// An import of it stopped part way: it can be continued or discarded
+    /// (shown even when the panel no longer looks freshly installed).
+    pub import_unfinished: bool,
 }
 
 #[derive(Serialize)]
@@ -47,7 +50,8 @@ pub async fn list() -> AgentResult<Json<ListResp>> {
                 origin: location.to_string(),
                 ..Default::default()
             });
-            snapshots.push(Item { sidecar, location });
+            let import_unfinished = crate::snapshot::import::unfinished(stem).await;
+            snapshots.push(Item { sidecar, location, import_unfinished });
         }
     }
     snapshots.sort_by(|a, b| b.sidecar.created_at.cmp(&a.sidecar.created_at).then(b.sidecar.name.cmp(&a.sidecar.name)));

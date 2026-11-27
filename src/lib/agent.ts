@@ -1400,6 +1400,8 @@ export type ServerSnapshot = {
   origin: string;
   /** Which folder it is in: made here, or pulled from another server. */
   location: "local" | "incoming";
+  /** An import of it stopped part way: it can be continued or discarded. */
+  import_unfinished: boolean;
 };
 
 export type ServerSnapshotList = {

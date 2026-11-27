@@ -85,6 +85,13 @@ struct Journal {
     /// Zone ids (pdns) taken over, for the DNS moves.
     zone_ids: Vec<i64>,
     zones: Vec<String>,
+    /// The schemas (pdns, mail) whose rows are merged into this server's:
+    /// a resumed dns-mail step does not merge them again.
+    merged_schemas: Vec<String>,
+    /// Folders (Docker volumes, Redis) emptied for the snapshot's copy: a
+    /// resumed step does not empty them again, which would delete what the
+    /// first attempt had already moved in.
+    emptied: Vec<String>,
     notes: Vec<String>,
     finished: bool,
 }
@@ -100,6 +107,12 @@ fn journal_path(stem: &str) -> PathBuf {
 async fn load_journal(stem: &str) -> Option<Journal> {
     let bytes = tokio::fs::read(journal_path(stem)).await.ok()?;
     serde_json::from_slice(&bytes).ok()
+}
+
+/// An import of this snapshot stopped part way: it can be continued or
+/// discarded.
+pub(crate) async fn unfinished(stem: &str) -> bool {
+    load_journal(stem).await.is_some_and(|j| !j.finished)
 }
 
 async fn save_journal(j: &Journal) -> AgentResult<()> {
@@ -774,6 +787,67 @@ fn place_tree(from: &Path, to: &Path, placed: &mut Vec<String>, own_panel_host: 
     Ok(())
 }
 
+/// Replaces `live`'s content with the staged copy at `staged` (a Docker
+/// volume's data, Redis's folder). `live` is emptied once, and that is in the
+/// journal (under `key`) before anything moves; then every staged entry is
+/// moved in and the staged folder removed. A resumed import so moves only what
+/// is still staged and never empties `live` again: emptying it a second time
+/// deleted what the first attempt had already moved in, with no copy left.
+/// `keep_owner` gives `live` the staged folder's owner (a volume's: the
+/// container's user).
+async fn fill_from_stage(staged: &Path, live: &Path, key: &str, keep_owner: bool, j: &mut Journal) -> AgentResult<()> {
+    if !j.emptied.iter().any(|k| k == key) {
+        let live2 = live.to_path_buf();
+        tokio::task::spawn_blocking(move || empty_dir(&live2))
+            .await
+            .map_err(|e| AgentError::Other(anyhow::anyhow!("{key}: {e}")))?;
+        j.emptied.push(key.to_string());
+        save_journal(j).await?;
+    }
+    let (staged2, live2) = (staged.to_path_buf(), live.to_path_buf());
+    tokio::task::spawn_blocking(move || move_children(&staged2, &live2, keep_owner))
+        .await
+        .map_err(|e| AgentError::Other(anyhow::anyhow!("{key}: {e}")))?
+        .map_err(|e| AgentError::Other(anyhow::anyhow!("{key}: {e}")))?;
+    Ok(())
+}
+
+/// Removes everything inside `dir`, not `dir` itself.
+fn empty_dir(dir: &Path) {
+    if let Ok(rd) = std::fs::read_dir(dir) {
+        for e in rd.flatten() {
+            let p = e.path();
+            let _ = if p.is_dir() && !p.is_symlink() { std::fs::remove_dir_all(&p) } else { std::fs::remove_file(&p) };
+        }
+    }
+}
+
+/// Moves every entry of `staged` into `live`, then removes `staged`. An entry
+/// an interrupted move left half done in `live` is replaced by the staged one.
+fn move_children(staged: &Path, live: &Path, keep_owner: bool) -> std::io::Result<usize> {
+    std::fs::create_dir_all(live)?;
+    if keep_owner {
+        let m = std::fs::symlink_metadata(staged)?;
+        let _ = std::os::unix::fs::chown(live, Some(m.uid()), Some(m.gid()));
+    }
+    let mut n = 0;
+    for e in std::fs::read_dir(staged)? {
+        let e = e?;
+        let target = live.join(e.file_name());
+        if let Ok(t) = std::fs::symlink_metadata(&target) {
+            if t.is_dir() && !t.file_type().is_symlink() {
+                std::fs::remove_dir_all(&target)?;
+            } else {
+                std::fs::remove_file(&target)?;
+            }
+        }
+        move_path(&e.path(), &target)?;
+        n += 1;
+    }
+    std::fs::remove_dir_all(staged)?;
+    Ok(n)
+}
+
 /// rename(2), or a copy when the staging is on another filesystem.
 fn move_path(from: &Path, to: &Path) -> std::io::Result<()> {
     match std::fs::rename(from, to) {
@@ -850,22 +924,26 @@ fn remap_owners(root: &Path, uids: &HashMap<u32, u32>, gids: &HashMap<u32, u32>)
 async fn step_files(state: &AppState, stage: &Path, j: &mut Journal, task: &TaskHandle) -> AgentResult<()> {
     let fs_root = stage.join("fs");
     let own_host = crate::server_ip::panel_host_now(&state.config.panel_host).await.to_lowercase();
-    let mut placed: Vec<String> = Vec::new();
     let fs2 = fs_root.clone();
     let host2 = own_host.clone();
-    let placed_result = tokio::task::spawn_blocking(move || -> std::io::Result<Vec<String>> {
+    // What was moved before an error comes back with it: those trees still
+    // get this server's owners and go in the journal (for discard), since a
+    // resumed import will not find them in the staging again.
+    let (placed, failed) = tokio::task::spawn_blocking(move || {
         let mut placed = Vec::new();
-        if fs2.exists() {
-            for e in std::fs::read_dir(&fs2)? {
-                let e = e?;
-                place_tree(&e.path(), &Path::new("/").join(e.file_name()), &mut placed, &host2)?;
+        let result = (|| -> std::io::Result<()> {
+            if fs2.exists() {
+                for e in std::fs::read_dir(&fs2)? {
+                    let e = e?;
+                    place_tree(&e.path(), &Path::new("/").join(e.file_name()), &mut placed, &host2)?;
+                }
             }
-        }
-        Ok(placed)
+            Ok(())
+        })();
+        (placed, result.err())
     })
     .await
-    .map_err(|e| AgentError::Other(anyhow::anyhow!("place files: {e}")))??;
-    placed.extend(placed_result);
+    .map_err(|e| AgentError::Other(anyhow::anyhow!("place files: {e}")))?;
     task.log(format!("{} paths put in place", placed.len()));
 
     let (uids, gids, unknown) = owner_maps(j);
@@ -882,8 +960,12 @@ async fn step_files(state: &AppState, stage: &Path, j: &mut Journal, task: &Task
     if n > 0 {
         task.log(format!("{n} files given this server's owner of the same name"));
     }
-    merge_root_ssh(stage, task).await;
     j.placed.extend(placed);
+    if let Some(e) = failed {
+        save_journal(j).await?;
+        return Err(AgentError::Other(anyhow::anyhow!("putting the files in place: {e}")));
+    }
+    merge_root_ssh(stage, task).await;
     Ok(())
 }
 
@@ -1016,6 +1098,12 @@ async fn step_dns_mail(state: &AppState, m: &Manifest, stage: &Path, j: &mut Jou
         if !data.exists() {
             continue;
         }
+        // Merged by an earlier attempt of this step: merging again would
+        // find every name here already and take nothing.
+        if j.merged_schemas.iter().any(|s| s == schema) {
+            task.log(format!("{schema}: merged earlier"));
+            continue;
+        }
         let mut conn = pool.get_conn().await?;
         conn.query_drop(format!("DROP DATABASE IF EXISTS `{scratch}`")).await?;
         conn.query_drop(format!("CREATE DATABASE `{scratch}`")).await?;
@@ -1030,15 +1118,32 @@ async fn step_dns_mail(state: &AppState, m: &Manifest, stage: &Path, j: &mut Jou
             merged.taken.len(),
             if merged.skipped.is_empty() { String::new() } else { format!(", {} here already: {}", merged.skipped.len(), merged.skipped.join(", ")) }
         ));
-        if !merged.skipped.is_empty() {
-            j.notes.push(format!("{schema}: kept this server's own {}", merged.skipped.join(", ")));
+        // A zone this import took earlier is not "this server's own".
+        let kept: Vec<&String> = merged
+            .skipped
+            .iter()
+            .filter(|n| !(schema == "pdns" && j.zones.iter().any(|z| z.eq_ignore_ascii_case(n))))
+            .collect();
+        if !kept.is_empty() {
+            j.notes.push(format!(
+                "{schema}: kept this server's own {}",
+                kept.iter().map(|s| s.as_str()).collect::<Vec<_>>().join(", ")
+            ));
         }
         if schema == "pdns" {
-            j.zone_ids = merged.ids.values().copied().collect();
-            j.zones = merged.taken.clone();
+            // Added to, never replaced: the ids are what the IP moves and
+            // Discard work on. ids (by old id) and taken are in the same
+            // order.
+            for (id, zone) in merged.ids.values().zip(&merged.taken) {
+                if !j.zones.contains(zone) {
+                    j.zone_ids.push(*id);
+                    j.zones.push(zone.clone());
+                }
+            }
         }
+        j.merged_schemas.push(schema.to_string());
+        save_journal(j).await?;
     }
-    save_journal(j).await?;
 
     // The zones move to this server's addresses.
     let own = crate::handlers::dns::own_addrs(state).await;
@@ -1158,7 +1263,10 @@ async fn step_docker(state: &AppState, stage: &Path, j: &mut Journal, task: &Tas
         while let Ok(Some(e)) = rd.next_entry().await {
             let name = e.file_name().to_string_lossy().into_owned();
             let data = e.path().join("_data");
-            if !data.exists() {
+            let placed_key = format!("docker-volume:{name}");
+            // Filled by an earlier attempt of this step (its staged copy is
+            // gone by then).
+            if !data.exists() || j.placed.contains(&placed_key) {
                 continue;
             }
             let mut args: Vec<String> = vec!["volume".into(), "create".into()];
@@ -1170,29 +1278,10 @@ async fn step_docker(state: &AppState, stage: &Path, j: &mut Journal, task: &Tas
             exec::run("docker", args.iter().map(String::as_str)).await?;
             let mount = exec::run("docker", ["volume", "inspect", "-f", "{{.Mountpoint}}", name.as_str()]).await?.stdout;
             let mount = PathBuf::from(mount.trim());
-            let data2 = data.clone();
-            let mount2 = mount.clone();
-            tokio::task::spawn_blocking(move || -> std::io::Result<()> {
-                // The volume's own content (a fresh recipe's) makes way.
-                if let Ok(rd) = std::fs::read_dir(&mount2) {
-                    for e in rd.flatten() {
-                        let p = e.path();
-                        let _ = if p.is_dir() && !p.is_symlink() { std::fs::remove_dir_all(&p) } else { std::fs::remove_file(&p) };
-                    }
-                }
-                for e in std::fs::read_dir(&data2)? {
-                    let e = e?;
-                    move_path(&e.path(), &mount2.join(e.file_name()))?;
-                }
-                // Numeric owners stay: they are the container's users.
-                if let Ok(m) = std::fs::symlink_metadata(&data2) {
-                    let _ = std::os::unix::fs::chown(&mount2, Some(m.uid()), Some(m.gid()));
-                }
-                Ok(())
-            })
-            .await
-            .map_err(|e| AgentError::Other(anyhow::anyhow!("volume {name}: {e}")))??;
-            j.placed.push(format!("docker-volume:{name}"));
+            // Numeric owners stay: they are the container's users.
+            fill_from_stage(&data, &mount, &placed_key, true, j).await?;
+            j.placed.push(placed_key);
+            save_journal(j).await?;
             task.log(format!("volume {name} filled"));
         }
         for c in &ours {
@@ -1205,14 +1294,18 @@ async fn step_docker(state: &AppState, stage: &Path, j: &mut Journal, task: &Tas
             ));
         }
     }
+    // Redis: its data folder is left out of the files step (placement skips
+    // it while redis-server runs) and filled here with the server stopped.
     let redis = stage.join("fs/var/lib/redis");
-    if redis.exists() && has_cmd("redis-server").await {
+    const REDIS_KEY: &str = "redis:/var/lib/redis";
+    if redis.exists() && !j.placed.iter().any(|p| p == REDIS_KEY) && has_cmd("redis-server").await {
         let _ = exec::run("systemctl", ["stop", "redis-server"]).await;
-        let mut placed = Vec::new();
-        let r2 = redis.clone();
-        let _ = tokio::task::spawn_blocking(move || place_tree(&r2, Path::new("/var/lib/redis"), &mut placed, "")).await;
+        let filled = fill_from_stage(&redis, Path::new("/var/lib/redis"), REDIS_KEY, false, j).await;
         let _ = exec::run("chown", ["-R", "redis:redis", "/var/lib/redis"]).await;
         let _ = exec::run("systemctl", ["start", "redis-server"]).await;
+        filled?;
+        j.placed.push(REDIS_KEY.to_string());
+        save_journal(j).await?;
         task.log("Redis data put back");
     }
     // Docker apps: their image pulled or built again, from the restored
@@ -1615,6 +1708,47 @@ mod tests {
             0o755,
             "a folder that is here already keeps its mode"
         );
+    }
+
+    #[test]
+    fn a_staged_folder_replaces_the_live_one_and_a_resume_keeps_what_moved() {
+        let tmp = tempfile::tempdir().unwrap();
+        let staged = tmp.path().join("stage/var/lib/redis");
+        let live = tmp.path().join("live/redis");
+        std::fs::create_dir_all(staged.join("appendonlydir")).unwrap();
+        std::fs::write(staged.join("dump.rdb"), b"old server").unwrap();
+        std::fs::write(staged.join("appendonlydir/a.aof"), b"aof").unwrap();
+        std::fs::create_dir_all(&live).unwrap();
+        std::fs::write(live.join("dump.rdb"), b"fresh install").unwrap();
+        std::fs::write(live.join("stray"), b"x").unwrap();
+        // First attempt: emptied, then filled; the staged folder is gone.
+        empty_dir(&live);
+        assert_eq!(move_children(&staged, &live, false).unwrap(), 2);
+        assert_eq!(std::fs::read(live.join("dump.rdb")).unwrap(), b"old server");
+        assert_eq!(std::fs::read(live.join("appendonlydir/a.aof")).unwrap(), b"aof");
+        assert!(!live.join("stray").exists());
+        assert!(!staged.exists(), "nothing left staged for a resume to move again");
+
+        // An interrupted fill: one entry moved, one half copied. The resume
+        // (no second emptying) keeps the moved one and replaces the half one.
+        let staged = tmp.path().join("stage2/vol/_data");
+        let live = tmp.path().join("live2/vol");
+        std::fs::create_dir_all(&staged).unwrap();
+        std::fs::create_dir_all(&live).unwrap();
+        std::fs::write(live.join("moved.db"), b"moved before the stop").unwrap();
+        std::fs::write(live.join("half.db"), b"ha").unwrap();
+        std::fs::write(staged.join("half.db"), b"half, whole").unwrap();
+        assert_eq!(move_children(&staged, &live, false).unwrap(), 1);
+        assert_eq!(std::fs::read(live.join("moved.db")).unwrap(), b"moved before the stop");
+        assert_eq!(std::fs::read(live.join("half.db")).unwrap(), b"half, whole");
+    }
+
+    #[test]
+    fn redis_is_left_out_of_the_files_step() {
+        // The docker step puts it back (fill_from_stage), with redis-server
+        // stopped; place_tree must not be what moves it.
+        assert!(matches!(placement("/var/lib/redis", ""), Place::Skip));
+        assert!(matches!(placement("/var/lib/redis/dump.rdb", ""), Place::Skip));
     }
 
     #[test]

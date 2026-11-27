@@ -101,7 +101,12 @@ export default function ServerSnapshots({
                 {s.source_host || "this server"}
                 {s.panel_commit ? ` · panel ${s.panel_commit.slice(0, 7)}${s.panel_dirty ? " (local changes)" : ""}` : ""}
               </div>
-              {s.location === "incoming" && !fresh && (
+              {s.import_unfinished && (
+                <div className={styles.muted} style={{ fontSize: 11 }}>
+                  An import of it stopped part way: continue it or discard what it did.
+                </div>
+              )}
+              {s.location === "incoming" && !fresh && !s.import_unfinished && (
                 <div className={styles.muted} style={{ fontSize: 11 }}>
                   Import it on a freshly installed panel: this one already hosts apps or sites.
                 </div>
@@ -125,13 +130,19 @@ export default function ServerSnapshots({
                     : ""}
                 </button>
               )}
-              {fresh && (
+              {/* An unfinished import is offered even though the panel no
+                  longer looks fresh: its first steps put apps and sites in. */}
+              {(fresh || s.import_unfinished) && (
                 <button
                   className={styles.btnGhost}
                   onClick={() => setPanel({ importing: s.name })}
-                  title="Make THIS server what the snapshot describes"
+                  title={
+                    s.import_unfinished
+                      ? "Continue the import that stopped, or discard what it did"
+                      : "Make THIS server what the snapshot describes"
+                  }
                 >
-                  Import
+                  {s.import_unfinished ? "Continue import" : "Import"}
                 </button>
               )}
               <a className={styles.btnGhost} href={`/api/server-snapshots/${encodeURIComponent(s.name)}/download`}>
@@ -616,10 +627,28 @@ function ImportPanel({ snapshot, onClose }: { snapshot: ServerSnapshot | undefin
           </div>
         )}
         {finished === "failed" && (
-          <div className={styles.error} style={{ marginTop: 10 }}>
-            The import stopped. Import the snapshot again to continue from where it stopped, or
-            discard what it did.
-          </div>
+          <>
+            <div className={styles.error} style={{ marginTop: 10 }}>
+              The import stopped. Continue it from where it stopped, or discard what it did: both
+              start from the passphrase again.
+            </div>
+            <div style={{ display: "flex", gap: 8, marginTop: 10 }}>
+              <button
+                className={styles.btn}
+                onClick={() => {
+                  setTaskId(null);
+                  setFinished(null);
+                  setPre(null);
+                  setSure(false);
+                }}
+              >
+                Continue or discard
+              </button>
+              <button className={styles.btnGhost} onClick={onClose}>
+                Close
+              </button>
+            </div>
+          </>
         )}
       </div>
     );
