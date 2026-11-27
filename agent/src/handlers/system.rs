@@ -489,7 +489,15 @@ async fn run_panel_host_task(
             }
         };
         if let Some(zone) = zone {
-            let ipv4 = match crate::server_ip::ipv4_on_interfaces().await {
+            // A public address on an interface is this server's for sure. A
+            // private one is not what the world reaches behind 1:1 NAT (AWS,
+            // GCP, Oracle): the usual rule (server_ip) keeps the public
+            // address the hostname resolves to then, where the interface
+            // address went into the public A record.
+            let ipv4 = match crate::server_ip::ipv4_on_interfaces()
+                .await
+                .filter(|ip| crate::server_ip::is_public_v4(ip))
+            {
                 Some(ip) => Some(ip),
                 None => crate::server_ip::resolve_ipv4(None, &state.config.panel_host).await,
             };

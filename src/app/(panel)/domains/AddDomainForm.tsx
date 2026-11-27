@@ -3,6 +3,7 @@
 import { useRouter } from "next/navigation";
 import { useActionState, useEffect, useMemo, useRef, useState, useTransition } from "react";
 import styles from "@/components/page.module.css";
+import { isSubdomainName } from "@/lib/domainName";
 import TaskProgress from "@/components/TaskProgress/TaskProgress";
 
 type Result =
@@ -125,10 +126,7 @@ export default function AddDomainForm({
   const subdomainLabel = parentZone
     ? domain.slice(0, domain.length - parentZone.length - 1)
     : null;
-  const isSubdomain = useMemo(() => {
-    const labels = domain.split(".").filter((l) => l.length > 0);
-    return labels.length >= 3;
-  }, [domain]);
+  const isSubdomain = useMemo(() => isSubdomainName(domain), [domain]);
   // Only a zone created here takes the choice: a name in a managed parent
   // zone follows the parent, an existing zone keeps its own.
   const offerIpv6 =

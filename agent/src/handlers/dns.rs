@@ -238,7 +238,11 @@ pub async fn create_zone(
     State(state): State<AppState>,
     Json(req): Json<CreateZone>,
 ) -> AgentResult<Json<ZoneRow>> {
-    create_zone_inner(&state, req).await.map(Json)
+    let zone = create_zone_inner(&state, req).await?;
+    if let Some(problem) = crate::handlers::mail::publish_for_new_zone(&state, &zone.name).await {
+        tracing::warn!("zone {} created, but {problem}", zone.name);
+    }
+    Ok(Json(zone))
 }
 
 /// The NS records at the apex of `zone` as this panel's PowerDNS serves them,

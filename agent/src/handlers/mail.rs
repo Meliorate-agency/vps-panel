@@ -489,6 +489,27 @@ async fn ensure_dkim_key(domain: &str) -> AgentResult<String> {
     Ok(b64)
 }
 
+/// A zone just created for a name that is a mail domain already (the mail
+/// came first, its DNS elsewhere): its MX, SPF, DKIM and DMARC go in now, as
+/// create_domain's note promised. Without this the zone was served with no
+/// mail records until someone ran Reconcile, and mail from it failed SPF and
+/// DKIM. Returns what went wrong, if anything.
+pub(crate) async fn publish_for_new_zone(state: &AppState, zone: &str) -> Option<String> {
+    let mut conn = mail_conn(state).await.ok()?;
+    let id: Option<u32> = conn
+        .exec_first("SELECT id FROM virtual_domains WHERE name = ?", (zone,))
+        .await
+        .ok()?;
+    id?;
+    match ensure_dkim_key(zone).await {
+        Ok(pubkey) => publish_mail_records(state, zone, &pubkey)
+            .await
+            .err()
+            .map(|e| format!("mail records for {zone}: {e}")),
+        Err(e) => Some(format!("DKIM key for {zone}: {e}")),
+    }
+}
+
 async fn publish_mail_records(
     state: &AppState,
     domain: &str,

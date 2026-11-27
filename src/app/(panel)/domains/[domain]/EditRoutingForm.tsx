@@ -1,6 +1,7 @@
 "use client";
 
 import { useActionState, useState, useTransition } from "react";
+import { isSubdomainName } from "@/lib/domainName";
 import styles from "@/components/page.module.css";
 
 type Result = { ok: true } | { ok: false; error: string };
@@ -26,8 +27,7 @@ export default function EditRoutingForm({
 }: Props) {
   const [state, formAction, pending] = useActionState<Result | null, FormData>(action, null);
   const [mode, setMode] = useState<"folder" | "port">(initialMode);
-  const isSubdomain =
-    domain.split(".").filter((l) => l.length > 0).length >= 3;
+  const isSubdomain = isSubdomainName(domain);
 
   // Submitted by hand rather than through <form action>: React resets a form
   // after its action ran, and the Mode select (no default option) snapped to

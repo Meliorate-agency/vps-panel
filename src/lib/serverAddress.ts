@@ -1,5 +1,6 @@
 import "server-only";
 import dns from "node:dns/promises";
+import os from "node:os";
 import { config } from "./config";
 
 // Both fields independently optional so callers can render whichever they have.
@@ -42,13 +43,13 @@ async function resolveServerAddress(): Promise<ServerAddress> {
   // with the panel hostname as the server's hostname, new zones got 127.0.1.1
   // in every record.
   if (!looksLikeIp(host)) {
-    let ip: string | null = null;
+    let named: string[] = [];
     try {
-      const addrs = await dns.resolve4(host);
-      ip = addrs.find(isPublicIpv4) ?? null;
+      named = (await dns.resolve4(host)).filter(isPublicIpv4);
     } catch {
-      // forward DNS failed — fall through to public IP probe
+      // forward DNS failed — fall through to the interfaces and the probe
     }
+    let ip = pickServerIpv4(named, interfaceIpv4s());
     if (!ip) ip = await fetchPublicIp();
     return { domain: host, ip };
   }
@@ -59,6 +60,27 @@ async function resolveServerAddress(): Promise<ServerAddress> {
   // the bare IP.
   const domain = await reverseLookup(host);
   return { domain, ip: host };
+}
+
+/** IPv4 addresses on this server's interfaces, loopback aside. The panel
+ *  runs on the server itself, so these are the server's. */
+function interfaceIpv4s(): string[] {
+  return Object.values(os.networkInterfaces())
+    .flat()
+    .filter((a) => a && a.family === "IPv4" && !a.internal)
+    .map((a) => a!.address);
+}
+
+/**
+ * The address DNS records for this server should carry, by the agent's rule
+ * (server_ip::Ipv4Facts::address): the panel hostname's answer when it is on
+ * an interface; else a public address on an interface, since an answer that
+ * is not here is a proxy in front of the panel or the server the name used to
+ * point at (after a move), and records naming it sent mail and sites away;
+ * else that answer (1:1 NAT: the interface holds only a private address).
+ */
+export function pickServerIpv4(named: string[], local: string[]): string | null {
+  return named.find((a) => local.includes(a)) ?? local.find(isPublicIpv4) ?? named[0] ?? null;
 }
 
 function looksLikeIp(s: string): boolean {

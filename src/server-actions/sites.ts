@@ -3,6 +3,7 @@
 import { revalidatePath } from "next/cache";
 import { redirect } from "next/navigation";
 import { agent, AgentError, type SiteMode } from "@/lib/agent";
+import { isSubdomainName } from "@/lib/domainName";
 import { requireAdmin } from "@/lib/auth";
 import { writeAudit } from "@/lib/audit";
 import { config } from "@/lib/config";
@@ -97,8 +98,7 @@ function parseAndValidate(fd: FormData): ParsedForm {
       result: { ok: false, error: "cannot force www redirect on a www subdomain" },
     };
   }
-  const isSubdomain = domain.split(".").filter((l) => l.length > 0).length >= 3;
-  if (isSubdomain) {
+  if (isSubdomainName(domain)) {
     forceWwwRedirect = false;
     configureMail = false;
   }

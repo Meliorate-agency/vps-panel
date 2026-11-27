@@ -83,8 +83,8 @@ log()  { printf "\033[1;36m==>\033[0m %s\n" "$*"; }
 warn() { printf "\033[1;33m  !\033[0m %s\n" "$*" >&2; }
 
 # Public IPv4 detection — used in IP-only mode for the .env PANEL_HOST display
-# value and later by pdns for local-address. Detected once here so both
-# consumers see the same value. The filter strips RFC1918/100.64/127/169.254
+# value, by Postfix and for the final URL. Detected once here so they all see
+# the same value. The filter strips RFC1918/100.64/127/169.254
 # ranges and falls back to the first global v4 if no public one is found.
 # `|| true`: with pipefail, grep matching nothing (a NAT'd VPS with only a
 # private address) used to abort the installer right here.
@@ -410,13 +410,17 @@ log "configuring PowerDNS"
 # already listening on 127.0.0.53:53 and 127.0.0.54:53 (the stub resolver).
 # Binding to 0.0.0.0 collides with those and pdns fails to start with
 # "Unable to bind UDP socket to '0.0.0.0:53': Address already in use".
-# Bind to the public IPv4 + 127.0.0.1 explicitly instead. $PUBLIC_IP was
-# detected near the top of this script.
-if [[ -z "$PUBLIC_IP" ]]; then
-  warn "no public IPv4 detected for pdns local-address; falling back to 127.0.0.1 only (pdns will only answer locally)"
+# Bind to this server's IPv4 addresses + 127.0.0.1 explicitly instead: all of
+# them, not only the first public one ($PUBLIC_IP). Zones name the address
+# the panel hostname resolves to as their ns1/ns2, and on a server with
+# several addresses that is not always the first; a name server that does not
+# answer on its published address makes every zone using it fail to resolve.
+ALL_IPV4=$(ip -4 -o addr show scope global 2>/dev/null | awk '{print $4}' | cut -d/ -f1 | paste -sd, - || true)
+if [[ -z "$ALL_IPV4" ]]; then
+  warn "no IPv4 address found for pdns local-address; falling back to 127.0.0.1 only (pdns will only answer locally)"
   PDNS_LOCAL_ADDRESS="127.0.0.1"
 else
-  PDNS_LOCAL_ADDRESS="$PUBLIC_IP,127.0.0.1"
+  PDNS_LOCAL_ADDRESS="$ALL_IPV4,127.0.0.1"
 fi
 # IPv6 too. Once the server has a published IPv6 address, zones get AAAA
 # records for their own ns1/ns2 (agent/src/handlers/dns.rs), and a name server

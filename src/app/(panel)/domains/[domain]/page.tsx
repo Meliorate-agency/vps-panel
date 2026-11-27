@@ -1,4 +1,5 @@
 import Link from "next/link";
+import { isSubdomainName } from "@/lib/domainName";
 import { agent, type SiteStatus } from "@/lib/agent";
 import { db } from "@/lib/db";
 import Table from "@/components/Table/Table";
@@ -109,8 +110,7 @@ export default async function DomainDetailPage({
     ? true
     : allZones.some((z) => z.name === domain);
   const managedZones = allZones.map((z) => z.name);
-  const isSubdomain =
-    domain.split(".").filter((l) => l.length > 0).length >= 3;
+  const isSubdomain = isSubdomainName(domain);
   const parentManagedZone = (() => {
     if (!isSubdomain) return null;
     const labels = domain.split(".");

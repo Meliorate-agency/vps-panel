@@ -76,7 +76,7 @@ pub struct Ipv4Facts {
     pub default_source: Option<String>,
 }
 
-fn is_public_v4(ip: &str) -> bool {
+pub(crate) fn is_public_v4(ip: &str) -> bool {
     ip.parse::<Ipv4Addr>().is_ok_and(|ip| !is_private_v4(&ip))
 }
 
