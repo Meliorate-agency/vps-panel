@@ -248,6 +248,11 @@ pub async fn create_domain(
     // 0 rows when the domain was there already: the panel calls this before
     // every new mailbox.
     let created = conn.affected_rows() > 0;
+    if created {
+        if let Some(problem) = ensure_postmaster(&state, &name).await {
+            tracing::warn!(domain = %name, "postmaster forwarder: {problem}");
+        }
+    }
 
     let (dkim_status, dkim_pubkey) = match ensure_dkim_key(&name).await {
         Ok(pubkey) => ("ok".to_string(), Some(pubkey)),
@@ -489,6 +494,300 @@ async fn ensure_dkim_key(domain: &str) -> AgentResult<String> {
     Ok(b64)
 }
 
+/// Where postmaster@<domain> forwards to: the email of the panel's first
+/// admin, the person who runs this server.
+fn postmaster_target(state: &AppState) -> Option<String> {
+    state
+        .panel_db
+        .with(|c| {
+            c.query_row(
+                "SELECT email FROM users WHERE role = 'admin' ORDER BY id LIMIT 1",
+                [],
+                |r| r.get::<_, String>(0),
+            )
+        })
+        .ok()
+        .map(|e| e.trim().to_ascii_lowercase())
+        .filter(|e| e.contains('@'))
+}
+
+/// The domain part of an address, without a trailing dot.
+fn address_domain(addr: &str) -> &str {
+    addr.rsplit_once('@').map(|(_, d)| d).unwrap_or("").trim_end_matches('.')
+}
+
+/// Why mail forwarded to `target` would not arrive, or None when it can.
+/// Once postmaster@ has a forwarder, Postfix accepts mail for it. If the
+/// target then cannot receive, every DMARC report and every spam with a
+/// forged sender comes back as a bounce from this server (backscatter, which
+/// gets servers blocklisted). Without the forwarder that mail was refused
+/// at RCPT and the sender kept it. `myhostname` is Postfix's own host name,
+/// when it could be read. `here` is None when the target's domain is not a
+/// mail domain of this server, else whether that exact address has a
+/// mailbox or a forwarder here.
+fn target_problem(target: &str, myhostname: Option<&str>, here: Option<bool>) -> Option<String> {
+    let domain = address_domain(target);
+    let cannot = |why: &str| {
+        Some(format!(
+            "not made: the admin email {target} cannot receive mail ({why}). \
+             Set the first admin's email to an address that receives mail."
+        ))
+    };
+    if !domain.contains('.') || domain.starts_with('.') || domain.contains("..") {
+        return cannot("its domain is not a full domain name");
+    }
+    // Names reserved for documentation, tests and local networks (RFC 2606,
+    // RFC 6761, RFC 6762) never have mail delivered to them.
+    const LOCAL_TLDS: [&str; 7] =
+        ["invalid", "example", "test", "local", "localhost", "localdomain", "internal"];
+    const EXAMPLE_DOMAINS: [&str; 3] = ["example.com", "example.org", "example.net"];
+    let tld = domain.rsplit('.').next().unwrap_or("");
+    if LOCAL_TLDS.contains(&tld) {
+        return cannot("its domain is reserved for tests or local networks");
+    }
+    if EXAMPLE_DOMAINS
+        .iter()
+        .any(|d| domain == *d || domain.ends_with(&format!(".{d}")))
+    {
+        return cannot("its domain is reserved for examples");
+    }
+    match here {
+        Some(true) => None,
+        Some(false) => cannot(
+            format!("{domain} is a mail domain of this server, with no mailbox or forwarder of that name")
+                .as_str(),
+        ),
+        // The installer's default admin email is admin@<Postfix's myhostname>.
+        // Postfix takes mail only for localhost and the mail domains, so mail
+        // to its own name finds this server again and bounces ("loops back to
+        // myself"). Any other name, the panel host with an outside MX among
+        // them, is delivered wherever its MX says.
+        None if myhostname
+            .is_some_and(|h| domain.eq_ignore_ascii_case(h.trim().trim_end_matches('.'))) =>
+        {
+            cannot("it is this server's own mail host name, which takes no mail here")
+        }
+        None => None,
+    }
+}
+
+/// Postfix's own host name (`postconf -h myhostname`) when mail to it would
+/// come back to this server: it has no MX record of another name, so its A
+/// record (this server) is used. None when Postfix is not there to ask, or
+/// when the name's mail goes to an outside MX: the panel host with its mail
+/// at an outside provider is a fine target, although Postfix's myhostname is
+/// the panel host whenever one is set.
+async fn postfix_myhostname() -> Option<String> {
+    let name = exec::run("postconf", ["-h", "myhostname"])
+        .await
+        .ok()
+        .map(|out| out.stdout.trim().trim_end_matches('.').to_ascii_lowercase())
+        .filter(|name| !name.is_empty())?;
+    let mx = exec::run("dig", ["+short", "+time=3", "+tries=1", "MX", name.as_str()]).await;
+    let elsewhere = mx.ok().is_some_and(|out| mx_elsewhere(&out.stdout, &name));
+    (!elsewhere).then_some(name)
+}
+
+/// `dig +short MX` lines ("10 mx.example.net.") name a mail host other than
+/// `name` itself.
+fn mx_elsewhere(dig_short: &str, name: &str) -> bool {
+    dig_short
+        .lines()
+        .filter_map(|line| line.split_whitespace().nth(1))
+        .map(|host| host.trim_end_matches('.').to_ascii_lowercase())
+        .any(|host| !host.is_empty() && host != name)
+}
+
+/// True when the forwarder rows of an address all go to `target`: the
+/// forwarder ensure_postmaster made, nobody having added to it since.
+fn only_forwards_to(destinations: &[String], target: &str) -> bool {
+    !destinations.is_empty()
+        && destinations.iter().all(|d| d.trim().eq_ignore_ascii_case(target))
+}
+
+/// postmaster@<domain> as a forwarder to the panel's admin, when the domain
+/// has neither a mailbox nor a forwarder by that name, nor a catch-all that
+/// takes it already. Every mail domain needs the address (RFC 5321), and
+/// its DMARC record sends the daily reports there: without it they bounced
+/// ("User unknown in virtual mailbox table"). It is an ordinary forwarder,
+/// changed or removed under Mailboxes. Nothing is made when the admin email
+/// cannot receive mail. Returns why the domain is still without one, if it
+/// is.
+pub(crate) async fn ensure_postmaster(state: &AppState, domain: &str) -> Option<String> {
+    let source = format!("postmaster@{domain}");
+    let catch_all = format!("@{domain}");
+    let Some(target) = postmaster_target(state) else {
+        return Some("the panel has no admin email to forward it to".into());
+    };
+    if target == source {
+        return None;
+    }
+    let result: AgentResult<Option<String>> = async {
+        let mut conn = mail_conn(state).await?;
+        let Some(domain_id) = conn
+            .exec_first::<u32, _, _>("SELECT id FROM virtual_domains WHERE name = ?", (domain,))
+            .await?
+        else {
+            return Ok(None);
+        };
+        let mailbox: Option<u32> = conn
+            .exec_first("SELECT id FROM virtual_users WHERE email = ?", (&source,))
+            .await?;
+        // A catch-all counts: Postfix looks up the full address before
+        // @domain, so a postmaster row would take the domain's postmaster
+        // and DMARC mail away from where its owner sends the rest.
+        let alias: Option<u32> = conn
+            .exec_first(
+                "SELECT id FROM virtual_aliases WHERE source IN (?, ?) LIMIT 1",
+                (&source, &catch_all),
+            )
+            .await?;
+        if mailbox.is_some() || alias.is_some() {
+            return Ok(None);
+        }
+        let target_domain = address_domain(&target);
+        let hosted: Option<u32> = conn
+            .exec_first("SELECT id FROM virtual_domains WHERE name = ?", (target_domain,))
+            .await?;
+        let here = match hosted {
+            None => None,
+            Some(_) => {
+                let target_mailbox: Option<u32> = conn
+                    .exec_first("SELECT id FROM virtual_users WHERE email = ?", (&target,))
+                    .await?;
+                // A catch-all of the admin's domain receives the address too.
+                let target_alias: Option<u32> = conn
+                    .exec_first(
+                        "SELECT id FROM virtual_aliases WHERE source IN (?, ?) LIMIT 1",
+                        (&target, format!("@{target_domain}")),
+                    )
+                    .await?;
+                Some(target_mailbox.is_some() || target_alias.is_some())
+            }
+        };
+        // Only a name that is not a mail domain here can be Postfix's own.
+        let myhostname = match here {
+            None => postfix_myhostname().await,
+            Some(_) => None,
+        };
+        if let Some(problem) = target_problem(&target, myhostname.as_deref(), here) {
+            return Ok(Some(problem));
+        }
+        // When the admin's email is a mailbox on this server, the sender
+        // login map (alias destinations may send as the source) lets that
+        // mailbox send as postmaster@ of every domain. Accepted: the admin
+        // runs the server and its mail already.
+        conn.exec_drop(
+            "INSERT INTO virtual_aliases (domain_id, source, destination) VALUES (?, ?, ?)",
+            (domain_id, &source, &target),
+        )
+        .await?;
+        tracing::info!(%source, %target, "postmaster forwarder made");
+        Ok(None)
+    }
+    .await;
+    match result {
+        Ok(problem) => problem,
+        Err(e) => Some(e.to_string()),
+    }
+}
+
+/// The admin email just got a mailbox or a forwarder here. Until then
+/// ensure_postmaster refused it as a target, so its own domain, made a mail
+/// domain first, has no postmaster@ yet, and neither creating the domain
+/// nor the backfill runs again for it. It runs now; a problem is only
+/// logged, the address having been made either way.
+pub(crate) async fn postmaster_once_admin_address_exists(
+    state: &AppState,
+    address: &str,
+    domain: &str,
+) {
+    // The address itself, or a catch-all of its domain, which receives it too.
+    let Some(target) = postmaster_target(state) else {
+        return;
+    };
+    if address != target && address != format!("@{}", address_domain(&target)) {
+        return;
+    }
+    if let Some(problem) = ensure_postmaster(state, domain).await {
+        tracing::warn!(%domain, "postmaster forwarder: {problem}");
+    }
+}
+
+/// A mailbox postmaster@<domain> was just made. The forwarder ensure_postmaster
+/// made with the domain would go on sending a copy of everything to the
+/// panel's admin, so it goes, as long as it still forwards only there. One
+/// with other destinations was changed by someone and stays. So does one
+/// that points at an earlier admin email, after the admin's email changed:
+/// accepted, and it can be removed under Forwarders.
+async fn drop_automatic_postmaster(
+    state: &AppState,
+    conn: &mut mysql_async::Conn,
+    email: &str,
+) -> AgentResult<()> {
+    let Some(target) = postmaster_target(state) else {
+        return Ok(());
+    };
+    let destinations: Vec<String> = conn
+        .exec("SELECT destination FROM virtual_aliases WHERE source = ?", (email,))
+        .await?;
+    if only_forwards_to(&destinations, &target) {
+        conn.exec_drop(
+            "DELETE FROM virtual_aliases WHERE source = ? AND destination = ?",
+            (email, &destinations[0]),
+        )
+        .await?;
+        tracing::info!(%email, %target, "postmaster forwarder removed: the address has a mailbox now");
+    }
+    Ok(())
+}
+
+/// Once per server: postmaster@ for the mail domains made before it was
+/// made with each new one. Later on, a forwarder the operator removed stays
+/// removed. While the admin email cannot receive mail no domain gets one,
+/// and the backfill runs again at the next start.
+pub async fn backfill_postmasters(state: AppState) {
+    const DONE: &str = "mail.postmaster_backfilled";
+    let done = state
+        .panel_db
+        .with(|c| {
+            c.query_row("SELECT value FROM settings WHERE key = ?1", [DONE], |r| r.get::<_, String>(0))
+        })
+        .is_ok();
+    if done {
+        return;
+    }
+    // MariaDB may still be starting.
+    let mut domains: Option<Vec<String>> = None;
+    for _ in 0..6 {
+        let listed: AgentResult<Vec<String>> = async {
+            let mut conn = mail_conn(&state).await?;
+            Ok(conn.query("SELECT name FROM virtual_domains ORDER BY name").await?)
+        }
+        .await;
+        if let Ok(names) = listed {
+            domains = Some(names);
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_secs(10)).await;
+    }
+    let Some(domains) = domains else {
+        return;
+    };
+    for domain in &domains {
+        if let Some(problem) = ensure_postmaster(&state, domain).await {
+            tracing::warn!(%domain, "postmaster forwarder: {problem}");
+            return;
+        }
+    }
+    let _ = state.panel_db.with(|c| {
+        c.execute(
+            "INSERT OR REPLACE INTO settings (key, value) VALUES (?1, 'done')",
+            [DONE],
+        )
+    });
+}
+
 /// A zone just created for a name that is a mail domain already (the mail
 /// came first, its DNS elsewhere): its MX, SPF, DKIM and DMARC go in now, as
 /// create_domain's note promised. Without this the zone was served with no
@@ -719,7 +1018,7 @@ pub async fn create_mailbox(
     State(state): State<AppState>,
     Json(req): Json<CreateMailbox>,
 ) -> AgentResult<Json<CreateMailboxResp>> {
-    let (email, _local, domain) = mailbox_parts(&req.email)?;
+    let (email, local, domain) = mailbox_parts(&req.email)?;
     let password = req.password.unwrap_or_else(random_password);
     let hashed = doveadm_hash(&password).await?;
 
@@ -747,6 +1046,15 @@ pub async fn create_mailbox(
         }
         Err(e) => return Err(e.into()),
     }
+    // The mailbox exists either way: a forwarder left in place only means
+    // the admin still gets a copy, which can be removed under Forwarders.
+    if local == "postmaster" {
+        if let Err(e) = drop_automatic_postmaster(&state, &mut conn, &email).await {
+            tracing::warn!(%email, error = %e, "automatic postmaster forwarder not removed");
+        }
+    }
+    drop(conn);
+    postmaster_once_admin_address_exists(&state, &email, &domain).await;
 
     Ok(Json(CreateMailboxResp {
         email,
@@ -953,8 +1261,95 @@ fn random_password() -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{is_mail_helper_vhost, mail_helper_vhost_body, mail_not_trashed, mailbox_parts};
+    use super::{
+        address_domain, is_mail_helper_vhost, mail_helper_vhost_body, mail_not_trashed,
+        mailbox_parts, mx_elsewhere, only_forwards_to, target_problem,
+    };
     use crate::error::AgentError;
+
+    /// Postfix's myhostname on a test server.
+    const MAILHOST: Option<&str> = Some("vps-1.provider.example.co");
+
+    #[test]
+    fn postmaster_is_forwarded_only_to_an_address_that_receives_mail() {
+        // An outside mailbox, and one hosted here that exists.
+        assert_eq!(target_problem("ops@example.co.uk", MAILHOST, None), None);
+        assert_eq!(target_problem("ops@example.co.uk", None, None), None);
+        assert_eq!(target_problem("ops@hosted.example.co", MAILHOST, Some(true)), None);
+        // The installer's defaults and other names that take no mail.
+        for target in [
+            "admin@localhost",
+            "admin@vps-panel.local",
+            "admin@server.localdomain",
+            "admin@box.internal",
+            "admin@x.invalid",
+            "admin@site.example",
+            "admin@site.test",
+            "admin@example.com",
+            "admin@mail.example.org",
+            "admin@example.net.",
+            "admin@.co",
+            "admin@a..co",
+        ] {
+            let problem = target_problem(target, MAILHOST, None);
+            let msg = problem.unwrap_or_else(|| panic!("{target} should be refused"));
+            assert!(msg.contains(target), "{msg}");
+            assert!(msg.contains("Set the first admin's email"), "{msg}");
+        }
+        // A domain merely ending in a reserved word is a real one.
+        assert_eq!(target_problem("ops@myexample.com", MAILHOST, None), None);
+    }
+
+    #[test]
+    fn an_mx_of_another_name_takes_the_host_names_mail_elsewhere() {
+        assert!(mx_elsewhere("1 aspmx.l.google.example.\n5 alt1.aspmx.l.google.example.\n", "panel.example.co"));
+        assert!(!mx_elsewhere("10 panel.example.co.\n", "panel.example.co"));
+        assert!(!mx_elsewhere("", "panel.example.co"));
+    }
+
+    #[test]
+    fn postfix_own_host_name_takes_mail_only_as_a_mail_domain_of_its_own() {
+        // The installer's default admin@<myhostname> loops back to this server.
+        let problem = target_problem("admin@vps-1.provider.example.co", MAILHOST, None).unwrap();
+        assert!(problem.contains("own mail host name"), "{problem}");
+        assert!(
+            target_problem("admin@vps-1.provider.example.co", Some(" VPS-1.Provider.example.co. "), None)
+                .is_some()
+        );
+        // Made a mail domain here, it is judged by its mailboxes.
+        assert_eq!(target_problem("admin@vps-1.provider.example.co", MAILHOST, Some(true)), None);
+        let problem =
+            target_problem("admin@vps-1.provider.example.co", MAILHOST, Some(false)).unwrap();
+        assert!(problem.contains("no mailbox or forwarder"), "{problem}");
+        // Any other name is delivered by its MX: the panel host with mail at
+        // an outside provider, or a server where Postfix could not be asked.
+        assert_eq!(target_problem("me@panel.example.co", MAILHOST, None), None);
+        assert_eq!(target_problem("admin@vps-1.provider.example.co", None, None), None);
+    }
+
+    #[test]
+    fn a_hosted_domain_without_that_address_is_refused() {
+        let problem = target_problem("ops@hosted.example.co", MAILHOST, Some(false)).unwrap();
+        assert!(problem.contains("hosted.example.co is a mail domain of this server"), "{problem}");
+    }
+
+    #[test]
+    fn address_domain_takes_the_part_after_the_last_at() {
+        assert_eq!(address_domain("ops@example.co"), "example.co");
+        assert_eq!(address_domain("ops@example.co."), "example.co");
+        assert_eq!(address_domain("no-at"), "");
+    }
+
+    #[test]
+    fn only_the_untouched_automatic_forwarder_is_recognised() {
+        let admin = "ops@example.co";
+        assert!(only_forwards_to(&["ops@example.co".into()], admin));
+        // A duplicate row from a race is still only the admin.
+        assert!(only_forwards_to(&["ops@example.co".into(), "OPS@example.co".into()], admin));
+        assert!(!only_forwards_to(&[], admin));
+        assert!(!only_forwards_to(&["someone@example.co".into()], admin));
+        assert!(!only_forwards_to(&["ops@example.co".into(), "dmarc@example.co".into()], admin));
+    }
 
     #[test]
     fn a_maildir_the_trash_did_not_take_leaves_the_mailbox_and_says_so() {

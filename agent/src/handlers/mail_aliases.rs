@@ -9,7 +9,7 @@
 //! catch-all never takes mail meant for a real mailbox.
 
 use crate::error::{AgentError, AgentResult};
-use crate::handlers::mail::{mail_conn, mailbox_parts};
+use crate::handlers::mail::{mail_conn, mailbox_parts, postmaster_once_admin_address_exists};
 use crate::ipc::OkResponse;
 use crate::state::AppState;
 use axum::{
@@ -132,6 +132,10 @@ pub async fn create(
         .await?;
         added += 1;
     }
+    drop(conn);
+    // A forwarder on the admin email lets it receive mail, so its domain
+    // can now get the postmaster@ forwarder that was refused before.
+    postmaster_once_admin_address_exists(&state, &source, &domain).await;
     Ok(Json(CreateAliasResp { added }))
 }
 
