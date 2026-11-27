@@ -92,8 +92,81 @@ struct Journal {
     /// resumed step does not empty them again, which would delete what the
     /// first attempt had already moved in.
     emptied: Vec<String>,
+    /// What this server had where the snapshot put its own files: moved
+    /// aside under the staging's `replaced/`; Discard puts them back.
+    replaced: Vec<String>,
+    /// Mail domains (virtual_domains ids) this import created, for Discard.
+    mail_domain_ids: Vec<i64>,
+    /// This panel's own zone as it was, when the snapshot's copy of it took
+    /// its place (make_way_for_own_zone), for Discard.
+    own_zone: Option<SavedZone>,
+    /// The panel hostname's records are back in the snapshot's copy of the
+    /// own zone (keep_own_host_records): a resume does not do it again.
+    own_host_kept: bool,
+    /// The MariaDB accounts of users.sql this server did not have before it
+    /// ran, as written there. None until the mariadb step gets to users.sql;
+    /// Discard drops these and no other.
+    new_db_accounts: Option<Vec<String>>,
+    /// A Discard of this import stopped part way: only Discard again goes
+    /// on from here, an import would redo what it already undid.
+    discarding: bool,
     notes: Vec<String>,
     finished: bool,
+}
+
+/// One PowerDNS zone as it was: enough to make it again.
+#[derive(Serialize, Deserialize, Default, Clone)]
+#[serde(default)]
+struct SavedZone {
+    /// Its domains.id here: a zone of that name with another id is the
+    /// snapshot's copy, which an earlier attempt took.
+    id: i64,
+    name: String,
+    /// domains.type (NATIVE, MASTER, ...).
+    kind: String,
+    /// The panel hostname that lives in it: its A/AAAA stay this server's.
+    host: String,
+    records: Vec<ZoneRecord>,
+    /// kind, content.
+    meta: Vec<(Option<String>, Option<String>)>,
+    /// Its DNSSEC keys: without them a signed zone comes back unsigned while
+    /// the parent zone still has its DS record.
+    keys: Vec<ZoneKey>,
+}
+
+/// One pdns.records row.
+#[derive(Serialize, Deserialize, Default, Clone, Debug, PartialEq)]
+#[serde(default)]
+struct ZoneRecord {
+    name: Option<String>,
+    kind: Option<String>,
+    content: Option<String>,
+    ttl: Option<i64>,
+    prio: Option<i64>,
+    disabled: Option<i64>,
+    auth: Option<i64>,
+}
+
+/// name, type, content, ttl, prio, disabled, auth, as read from pdns.records.
+type ZoneRecordRow = (Option<String>, Option<String>, Option<String>, Option<i64>, Option<i64>, Option<i64>, Option<i64>);
+
+/// flags, active, published, content of a cryptokeys row.
+type CryptoKeyRow = (i64, Option<i64>, Option<i64>, Option<String>);
+
+impl From<ZoneRecordRow> for ZoneRecord {
+    fn from((name, kind, content, ttl, prio, disabled, auth): ZoneRecordRow) -> Self {
+        ZoneRecord { name, kind, content, ttl, prio, disabled, auth }
+    }
+}
+
+/// One pdns.cryptokeys row.
+#[derive(Serialize, Deserialize, Default, Clone)]
+#[serde(default)]
+struct ZoneKey {
+    flags: i64,
+    active: Option<i64>,
+    published: Option<i64>,
+    content: Option<String>,
 }
 
 fn staging(stem: &str) -> PathBuf {
@@ -156,7 +229,10 @@ pub async fn preflight(State(state): State<AppState>, Json(req): Json<PreflightR
     let manifest = read_manifest(&path, &req.passphrase).await?;
     let journal = load_journal(&req.name).await.filter(|j| !j.finished);
     let size = tokio::fs::metadata(&path).await.map(|m| m.len()).unwrap_or(0);
-    let checks = checks(&state, &manifest, journal.is_some(), size).await;
+    let mut checks = checks(&state, &manifest, journal.is_some(), size).await;
+    if journal.as_ref().is_some_and(|j| j.discarding) {
+        checks.push(discard_stopped());
+    }
     let can_import = !checks.iter().any(|c| c.level == "block");
     Ok(Json(Preflight {
         manifest,
@@ -165,6 +241,14 @@ pub async fn preflight(State(state): State<AppState>, Json(req): Json<PreflightR
         done_steps: journal.map(|j| j.done).unwrap_or_default(),
         checks,
     }))
+}
+
+fn discard_stopped() -> Check {
+    Check {
+        id: "discard",
+        level: "block",
+        message: "A Discard of this import could not put everything back and stopped: discard it again.".into(),
+    }
 }
 
 async fn checks(state: &AppState, m: &Manifest, resuming: bool, file_size: u64) -> Vec<Check> {
@@ -321,6 +405,9 @@ pub async fn start(State(state): State<AppState>, Json(req): Json<ImportReq>) ->
     let path = locate(&req.name).await?;
     let manifest = read_manifest(&path, &req.passphrase).await?;
     let journal = load_journal(&req.name).await.filter(|j| !j.finished);
+    if journal.as_ref().is_some_and(|j| j.discarding) {
+        return Err(AgentError::Conflict(discard_stopped().message));
+    }
     let size = tokio::fs::metadata(&path).await.map(|m| m.len()).unwrap_or(0);
     let blocks: Vec<String> = checks(&state, &manifest, journal.is_some(), size)
         .await
@@ -407,11 +494,20 @@ async fn run(
             "accounts" => step_accounts(&stage, j, task).await?,
             "files" => step_files(state, &stage, j, task).await?,
             "panel-a" => {
+                // This panel's records as they were, for Discard. Taken once:
+                // a resumed step must not copy what part A already wrote.
+                let before = stage.join("panel-before.db");
+                if !before.exists() {
+                    let target = before.to_string_lossy().into_owned();
+                    state
+                        .panel_db
+                        .with(|c| c.execute("VACUUM INTO ?1", rusqlite::params![target]).map(|_| ()))?;
+                }
                 let db = stage.join("panel/panel.db");
                 let done = state.panel_db.with(|c| merge::merge_panel_part_a(c, &db))?;
                 task.log(format!("panel records: {}", done.join(", ")));
             }
-            "mariadb" => step_mariadb(m, &stage, j, task).await?,
+            "mariadb" => step_mariadb(state, m, &stage, j, task).await?,
             "dns-mail" => step_dns_mail(state, m, &stage, j, task).await?,
             "postgres" => step_postgres(m, &stage, j, task).await?,
             "docker" => step_docker(state, &stage, j, task).await?,
@@ -745,7 +841,17 @@ fn placement(path: &str, own_panel_host: &str) -> Place {
 }
 
 /// Moves `from` (a staged tree) onto `to`, merging folders.
-fn place_tree(from: &Path, to: &Path, placed: &mut Vec<String>, own_panel_host: &str) -> std::io::Result<()> {
+/// `aside`: where something this server has at a path goes when the
+/// snapshot's copy replaces it (recorded in `replaced`), so Discard can put
+/// it back; None removes it.
+fn place_tree(
+    from: &Path,
+    to: &Path,
+    placed: &mut Vec<String>,
+    own_panel_host: &str,
+    aside: Option<&Path>,
+    replaced: &mut Vec<String>,
+) -> std::io::Result<()> {
     let rel = to.to_string_lossy().into_owned();
     if let Place::Skip = placement(&rel, own_panel_host) {
         return Ok(());
@@ -769,16 +875,25 @@ fn place_tree(from: &Path, to: &Path, placed: &mut Vec<String>, own_panel_host: 
             // logins, nginx's workers and the rest stopped working.
             for e in std::fs::read_dir(from)? {
                 let e = e?;
-                place_tree(&e.path(), &to.join(e.file_name()), placed, own_panel_host)?;
+                place_tree(&e.path(), &to.join(e.file_name()), placed, own_panel_host, aside, replaced)?;
             }
         }
         Some(t) => {
             // A file (or a folder of another kind) here already: the
-            // snapshot's copy replaces it.
-            if t.is_dir() && !t.file_type().is_symlink() {
-                std::fs::remove_dir_all(to)?;
-            } else {
-                std::fs::remove_file(to)?;
+            // snapshot's copy replaces it. Discard deleted the snapshot's
+            // copy and so left the server without the file it had (a fresh
+            // install's cron file, a MariaDB drop-in): it is kept aside.
+            match aside {
+                Some(dir) => {
+                    let keep = dir.join(rel.trim_start_matches('/'));
+                    if let Some(parent) = keep.parent() {
+                        std::fs::create_dir_all(parent)?;
+                    }
+                    move_path(to, &keep)?;
+                    replaced.push(rel.clone());
+                }
+                None if t.is_dir() && !t.file_type().is_symlink() => std::fs::remove_dir_all(to)?,
+                None => std::fs::remove_file(to)?,
             }
             move_path(from, to)?;
             placed.push(rel);
@@ -929,18 +1044,21 @@ async fn step_files(state: &AppState, stage: &Path, j: &mut Journal, task: &Task
     // What was moved before an error comes back with it: those trees still
     // get this server's owners and go in the journal (for discard), since a
     // resumed import will not find them in the staging again.
-    let (placed, failed) = tokio::task::spawn_blocking(move || {
+    let aside = stage.join("replaced");
+    let (placed, replaced, failed) = tokio::task::spawn_blocking(move || {
         let mut placed = Vec::new();
+        let mut replaced = Vec::new();
         let result = (|| -> std::io::Result<()> {
             if fs2.exists() {
                 for e in std::fs::read_dir(&fs2)? {
                     let e = e?;
-                    place_tree(&e.path(), &Path::new("/").join(e.file_name()), &mut placed, &host2)?;
+                    let to = Path::new("/").join(e.file_name());
+                    place_tree(&e.path(), &to, &mut placed, &host2, Some(&aside), &mut replaced)?;
                 }
             }
             Ok(())
         })();
-        (placed, result.err())
+        (placed, replaced, result.err())
     })
     .await
     .map_err(|e| AgentError::Other(anyhow::anyhow!("place files: {e}")))?;
@@ -961,6 +1079,7 @@ async fn step_files(state: &AppState, stage: &Path, j: &mut Journal, task: &Task
         task.log(format!("{n} files given this server's owner of the same name"));
     }
     j.placed.extend(placed);
+    j.replaced.extend(replaced);
     if let Some(e) = failed {
         save_journal(j).await?;
         return Err(AgentError::Other(anyhow::anyhow!("putting the files in place: {e}")));
@@ -1052,7 +1171,7 @@ async fn mariadb_file(path: &Path, db: Option<&str>) -> AgentResult<()> {
     exec::run("bash", ["-c", script, "import", p.as_str(), db.unwrap_or("")]).await.map(|_| ())
 }
 
-async fn step_mariadb(m: &Manifest, stage: &Path, j: &mut Journal, task: &TaskHandle) -> AgentResult<()> {
+async fn step_mariadb(state: &AppState, m: &Manifest, stage: &Path, j: &mut Journal, task: &TaskHandle) -> AgentResult<()> {
     let dir = stage.join("db/mariadb");
     if !dir.exists() {
         return Ok(());
@@ -1075,6 +1194,18 @@ async fn step_mariadb(m: &Manifest, stage: &Path, j: &mut Journal, task: &TaskHa
     }
     let users = dir.join("users.sql");
     if users.exists() {
+        // users.sql leaves an account this server has alone (CREATE USER IF
+        // NOT EXISTS), so Discard may drop only the ones it makes. Which
+        // those are is taken once, before it runs: a resume finds the first
+        // attempt's accounts here already.
+        if j.new_db_accounts.is_none() {
+            let sql = tokio::fs::read_to_string(&users).await?;
+            let mut conn = state.mariadb.pool().get_conn().await?;
+            let here: Vec<(String, String)> = conn.query("SELECT User, Host FROM mysql.user").await?;
+            drop(conn);
+            j.new_db_accounts = Some(new_accounts(&created_accounts(&sql), &here));
+            save_journal(j).await?;
+        }
         mariadb_file(&users, None).await?;
         task.log(format!("{} MariaDB account(s) with their grants", m.inventory.mariadb_users));
     }
@@ -1102,6 +1233,17 @@ async fn step_dns_mail(state: &AppState, m: &Manifest, stage: &Path, j: &mut Jou
         // find every name here already and take nothing.
         if j.merged_schemas.iter().any(|s| s == schema) {
             task.log(format!("{schema}: merged earlier"));
+            // The attempt that merged it may have stopped before its scratch
+            // copy went.
+            let mut conn = pool.get_conn().await?;
+            conn.query_drop(format!("DROP DATABASE IF EXISTS `{scratch}`")).await?;
+            drop(conn);
+            // A resume whose first attempt merged pdns but stopped before this
+            // server's hostname records went back: they go back now, before
+            // the mail part can stop the step again (no-op once done).
+            if schema == "pdns" {
+                keep_own_host(pool, j).await?;
+            }
             continue;
         }
         let mut conn = pool.get_conn().await?;
@@ -1110,14 +1252,25 @@ async fn step_dns_mail(state: &AppState, m: &Manifest, stage: &Path, j: &mut Jou
         drop(conn);
         exec::run_with_input("mariadb", [scratch], sql).await?;
         mariadb_file(&data, Some(scratch)).await?;
+        if schema == "pdns" {
+            if let Some(note) = make_way_for_own_zone(state, pool, scratch, j).await? {
+                task.log(note);
+            }
+        }
         let merged = merge::merge_schema(pool, scratch, live, parent, "name", children).await?;
-        let mut conn = pool.get_conn().await?;
-        conn.query_drop(format!("DROP DATABASE IF EXISTS `{scratch}`")).await?;
-        task.log(format!(
-            "{schema}: {} taken{}",
-            merged.taken.len(),
-            if merged.skipped.is_empty() { String::new() } else { format!(", {} here already: {}", merged.skipped.len(), merged.skipped.join(", ")) }
-        ));
+        // What the merge took goes in the journal before anything else can
+        // fail: a resume then does not merge again (which would take nothing
+        // and lose these ids), and the ids are what the IP moves and Discard
+        // work on.
+        if schema == "pdns" {
+            // ids (by old id) and taken are in the same order.
+            for (id, zone) in merged.ids.values().zip(&merged.taken) {
+                record_zone(j, *id, zone);
+            }
+        }
+        if schema == "mail" {
+            j.mail_domain_ids.extend(merged.ids.values().copied());
+        }
         // A zone this import took earlier is not "this server's own".
         let kept: Vec<&String> = merged
             .skipped
@@ -1130,20 +1283,26 @@ async fn step_dns_mail(state: &AppState, m: &Manifest, stage: &Path, j: &mut Jou
                 kept.iter().map(|s| s.as_str()).collect::<Vec<_>>().join(", ")
             ));
         }
-        if schema == "pdns" {
-            // Added to, never replaced: the ids are what the IP moves and
-            // Discard work on. ids (by old id) and taken are in the same
-            // order.
-            for (id, zone) in merged.ids.values().zip(&merged.taken) {
-                if !j.zones.contains(zone) {
-                    j.zone_ids.push(*id);
-                    j.zones.push(zone.clone());
-                }
-            }
-        }
         j.merged_schemas.push(schema.to_string());
         save_journal(j).await?;
+        // Right away, not after the mail part: if that fails, the panel
+        // hostname must not go on resolving to the old server, which would
+        // keep the operator from the panel that resumes or discards.
+        if schema == "pdns" {
+            keep_own_host(pool, j).await?;
+        }
+        let mut conn = pool.get_conn().await?;
+        conn.query_drop(format!("DROP DATABASE IF EXISTS `{scratch}`")).await?;
+        task.log(format!(
+            "{schema}: {} taken{}",
+            merged.taken.len(),
+            if merged.skipped.is_empty() { String::new() } else { format!(", {} here already: {}", merged.skipped.len(), merged.skipped.join(", ")) }
+        ));
     }
+
+    // A resume whose pdns merge an earlier attempt recorded, but which stopped
+    // before the hostname's records were back: done here (a no-op once done).
+    keep_own_host(pool, j).await?;
 
     // The zones move to this server's addresses.
     let own = crate::handlers::dns::own_addrs(state).await;
@@ -1196,6 +1355,267 @@ async fn step_dns_mail(state: &AppState, m: &Manifest, stage: &Path, j: &mut Jou
     let _ = exec::run("pdns_control", ["rediscover"]).await;
     let _ = exec::run("pdns_control", ["purge"]).await;
     Ok(())
+}
+
+/// This panel's own zone (the one its hostname is in: the occupancy check
+/// lets a fresh panel have it) when the snapshot has a zone of that name too.
+/// The merge skips a name that is here already, so the old server's records
+/// for the domain (its sites, MX, DKIM, SPF) were dropped and only a note
+/// said so. The zone as it is goes in the journal (Discard makes it again)
+/// and out of PowerDNS, so the merge takes the snapshot's; the records for
+/// this panel's hostname are put back after it (keep_own_host_records).
+async fn make_way_for_own_zone(
+    state: &AppState,
+    pool: &mysql_async::Pool,
+    scratch: &str,
+    j: &mut Journal,
+) -> AgentResult<Option<String>> {
+    let mut conn = pool.get_conn().await?;
+    let saved = match j.own_zone.clone() {
+        // Saved by an earlier attempt: only its removal may be left to do.
+        Some(saved) => saved,
+        None => {
+            let host = state.config.panel_host.to_lowercase();
+            if host.is_empty() {
+                return Ok(None);
+            }
+            let live: Vec<(i64, String, String)> = conn.query("SELECT id, name, type FROM pdns.domains").await?;
+            let Some((id, name, kind)) = live.into_iter().find(|(_, z, _)| {
+                let z = z.to_lowercase();
+                host == z || host.ends_with(&format!(".{z}"))
+            }) else {
+                return Ok(None);
+            };
+            let theirs: Option<i64> = conn
+                .exec_first(format!("SELECT id FROM `{scratch}`.domains WHERE name = ?"), (&name,))
+                .await?;
+            if theirs.is_none() {
+                return Ok(None);
+            }
+            let rows: Vec<ZoneRecordRow> = conn
+                .exec(
+                    "SELECT name, type, content, ttl, prio, disabled, auth FROM pdns.records WHERE domain_id = ?",
+                    (id,),
+                )
+                .await?;
+            let records = rows.into_iter().map(ZoneRecord::from).collect();
+            let meta: Vec<(Option<String>, Option<String>)> = conn
+                .exec("SELECT kind, content FROM pdns.domainmetadata WHERE domain_id = ?", (id,))
+                .await?;
+            let keys: Vec<CryptoKeyRow> = conn
+                .exec("SELECT flags, active, published, content FROM pdns.cryptokeys WHERE domain_id = ?", (id,))
+                .await?;
+            let keys = keys
+                .into_iter()
+                .map(|(flags, active, published, content)| ZoneKey { flags, active, published, content })
+                .collect();
+            let saved = SavedZone { id, name, kind, host, records, meta, keys };
+            j.own_zone = Some(saved.clone());
+            save_journal(j).await?;
+            saved
+        }
+    };
+    let id: Option<i64> = conn
+        .exec_first("SELECT id FROM pdns.domains WHERE name = ?", (&saved.name,))
+        .await?;
+    let Some(id) = id else {
+        return Ok(None);
+    };
+    // A zone of that name that is not the saved one is the snapshot's copy,
+    // which an earlier attempt of this step took: it stays.
+    if !is_servers_own_zone(id, &saved, &j.zone_ids) {
+        return Ok(None);
+    }
+    let mut tx = conn.start_transaction(mysql_async::TxOpts::default()).await?;
+    for t in ["records", "domainmetadata", "cryptokeys", "comments"] {
+        tx.exec_drop(format!("DELETE FROM pdns.{t} WHERE domain_id = ?"), (id,)).await?;
+    }
+    tx.exec_drop("DELETE FROM pdns.domains WHERE id = ?", (id,)).await?;
+    tx.commit().await?;
+    Ok(Some(format!(
+        "pdns: the snapshot's {} takes the place of this server's own; the records for {} stay this server's",
+        saved.name, saved.host
+    )))
+}
+
+/// The panel hostname keeps this server's addresses in the snapshot's copy
+/// of its zone. Only once the pdns merge is in the journal, and only once: a
+/// call that finds it done (or the merge not yet recorded) does nothing.
+async fn keep_own_host(pool: &mysql_async::Pool, j: &mut Journal) -> AgentResult<()> {
+    let Some(saved) = j.own_zone.clone() else {
+        return Ok(());
+    };
+    if j.own_host_kept || !j.merged_schemas.iter().any(|s| s == "pdns") {
+        return Ok(());
+    }
+    let mut conn = pool.get_conn().await?;
+    let found: Option<i64> = conn
+        .exec_first("SELECT id FROM pdns.domains WHERE name = ?", (&saved.name,))
+        .await?;
+    drop(conn);
+    if let Some(id) = found.filter(|id| !is_servers_own_zone(*id, &saved, &j.zone_ids)) {
+        // Taken by an attempt that stopped before its ids were saved.
+        if !j.zone_ids.contains(&id) {
+            record_zone(j, id, &saved.name);
+            save_journal(j).await?;
+        }
+        keep_own_host_records(pool, id, &saved).await?;
+    }
+    j.own_host_kept = true;
+    save_journal(j).await?;
+    Ok(())
+}
+
+/// The A/AAAA records of this panel's hostname, as they were in its own
+/// zone, in the snapshot's copy of that zone (`zone_id`) in place of what
+/// the snapshot has for that name.
+async fn keep_own_host_records(pool: &mysql_async::Pool, zone_id: i64, saved: &SavedZone) -> AgentResult<()> {
+    let ours = own_host_records(saved);
+    if ours.is_empty() {
+        return Ok(());
+    }
+    // One transaction that removes what it adds: running it again (a resume
+    // after it failed) leaves the same records.
+    let mut conn = pool.get_conn().await?;
+    let mut tx = conn.start_transaction(mysql_async::TxOpts::default()).await?;
+    for kind in ["A", "AAAA"] {
+        if ours.iter().any(|r| r.kind.as_deref() == Some(kind)) {
+            tx.exec_drop(
+                "DELETE FROM pdns.records WHERE domain_id = ? AND name = ? AND type = ?",
+                (zone_id, &saved.host, kind),
+            )
+            .await?;
+        }
+    }
+    for r in ours.into_iter().cloned() {
+        tx.exec_drop(
+            "INSERT INTO pdns.records (domain_id, name, type, content, ttl, prio, disabled, auth) \
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            (zone_id, r.name, r.kind, r.content, r.ttl, r.prio, r.disabled.unwrap_or(0), r.auth.unwrap_or(1)),
+        )
+        .await?;
+    }
+    tx.commit().await?;
+    Ok(())
+}
+
+/// The A/AAAA records of the panel hostname in a saved zone.
+fn own_host_records(saved: &SavedZone) -> Vec<&ZoneRecord> {
+    saved
+        .records
+        .iter()
+        .filter(|r| r.name.as_deref().is_some_and(|n| n.eq_ignore_ascii_case(&saved.host)))
+        .filter(|r| matches!(r.kind.as_deref(), Some("A" | "AAAA")))
+        .collect()
+}
+
+/// Whether the zone `found` (of the saved zone's name) is this server's own
+/// one rather than the snapshot's copy of it. A journal from before ids were
+/// saved tells them apart by the ids this import took.
+fn is_servers_own_zone(found: i64, saved: &SavedZone, taken: &[i64]) -> bool {
+    if saved.id != 0 {
+        found == saved.id
+    } else {
+        !taken.contains(&found)
+    }
+}
+
+/// A zone the import took, in the journal. A zone of that name there
+/// already gets the new id: the old one names a zone that is gone.
+fn record_zone(j: &mut Journal, id: i64, zone: &str) {
+    match j.zones.iter().position(|z| z.eq_ignore_ascii_case(zone)) {
+        Some(at) if at < j.zone_ids.len() => j.zone_ids[at] = id,
+        _ => {
+            j.zone_ids.push(id);
+            j.zones.push(zone.to_string());
+        }
+    }
+}
+
+/// Puts a saved zone back as it was (Discard), with its DNSSEC keys. A zone
+/// of that name that is not the saved one is the snapshot's copy, which the
+/// removal of the import's zones missed: it goes first.
+async fn restore_zone(conn: &mut mysql_async::Conn, saved: &SavedZone) -> AgentResult<()> {
+    let here: Option<i64> = conn
+        .exec_first("SELECT id FROM pdns.domains WHERE name = ?", (&saved.name,))
+        .await?;
+    if let Some(id) = here {
+        // A journal from before ids were saved cannot tell: leave it.
+        if saved.id == 0 || id == saved.id {
+            return Ok(());
+        }
+    }
+    let mut tx = conn.start_transaction(mysql_async::TxOpts::default()).await?;
+    if let Some(theirs) = here {
+        for t in ["records", "domainmetadata", "cryptokeys", "comments"] {
+            tx.exec_drop(format!("DELETE FROM pdns.{t} WHERE domain_id = ?"), (theirs,)).await?;
+        }
+        tx.exec_drop("DELETE FROM pdns.domains WHERE id = ?", (theirs,)).await?;
+    }
+    tx.exec_drop("INSERT INTO pdns.domains (name, type) VALUES (?, ?)", (&saved.name, &saved.kind))
+        .await?;
+    let id = tx.last_insert_id().unwrap_or(0);
+    for r in saved.records.iter().cloned() {
+        tx.exec_drop(
+            "INSERT INTO pdns.records (domain_id, name, type, content, ttl, prio, disabled, auth) \
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            (id, r.name, r.kind, r.content, r.ttl, r.prio, r.disabled.unwrap_or(0), r.auth.unwrap_or(1)),
+        )
+        .await?;
+    }
+    for (kind, content) in saved.meta.iter().cloned() {
+        tx.exec_drop(
+            "INSERT INTO pdns.domainmetadata (domain_id, kind, content) VALUES (?, ?, ?)",
+            (id, kind, content),
+        )
+        .await?;
+    }
+    for k in saved.keys.iter().cloned() {
+        tx.exec_drop(
+            "INSERT INTO pdns.cryptokeys (domain_id, flags, active, published, content) VALUES (?, ?, ?, ?, ?)",
+            (id, k.flags, k.active, k.published.unwrap_or(1), k.content),
+        )
+        .await?;
+    }
+    tx.commit().await?;
+    Ok(())
+}
+
+/// The MariaDB accounts users.sql makes (`CREATE USER IF NOT EXISTS
+/// <account>`), as (account as written, user name, host). Only accounts
+/// written the way the export writes them: a quoted name and host, nothing
+/// else.
+fn created_accounts(sql: &str) -> Vec<(String, String, String)> {
+    sql.lines()
+        .filter_map(|line| {
+            let rest = line.trim().strip_prefix("CREATE USER IF NOT EXISTS ")?;
+            let account = rest.split(" IDENTIFIED").next()?.trim().trim_end_matches(';').trim();
+            let (user, host) = account.split_once('@')?;
+            let unquote = |s: &str| -> Option<String> {
+                let q = s.chars().next()?;
+                if !matches!(q, '`' | '\'' | '"') || s.len() < 2 || !s.ends_with(q) {
+                    return None;
+                }
+                let inner = &s[1..s.len() - 1];
+                (!inner.contains(['`', '\'', '"', ';', '\\'])).then(|| inner.to_string())
+            };
+            let user = unquote(user)?;
+            let host = unquote(host)?;
+            Some((account.to_string(), user, host))
+        })
+        .collect()
+}
+
+/// Of the accounts users.sql makes, the ones not among `here` (User, Host of
+/// mysql.user) and not a service account: the ones the import creates. A
+/// host differing only in case counts as here, so such an account is kept.
+fn new_accounts(listed: &[(String, String, String)], here: &[(String, String)]) -> Vec<String> {
+    listed
+        .iter()
+        .filter(|(_, user, _)| !crate::handlers::databases::is_reserved_user(user))
+        .filter(|(_, user, host)| !here.iter().any(|(u, h)| u == user && h.eq_ignore_ascii_case(host)))
+        .map(|(account, _, _)| account.clone())
+        .collect()
 }
 
 async fn step_postgres(m: &Manifest, stage: &Path, j: &mut Journal, task: &TaskHandle) -> AgentResult<()> {
@@ -1581,6 +2001,12 @@ pub struct DiscardReq {
 /// Undoes what an unfinished import did, from its journal: its databases,
 /// accounts and placed files go, and its staging. Packages it installed
 /// stay. Reinstalling the server is the sure way back.
+///
+/// The staging holds the only copies of what the import replaced (this
+/// panel's own zone, the files moved aside, the panel records): when one of
+/// them cannot be put back, or something the import added cannot be removed,
+/// the staging stays with the journal, which keeps only what is still to do,
+/// and Discard says so and can be run again.
 pub async fn discard(State(state): State<AppState>, Json(req): Json<DiscardReq>) -> AgentResult<Json<crate::ipc::OkResponse>> {
     if state.tasks.any_live_with_prefix("snapshots.") {
         return Err(AgentError::Conflict("a snapshot task is running".into()));
@@ -1588,24 +2014,113 @@ pub async fn discard(State(state): State<AppState>, Json(req): Json<DiscardReq>)
     if !format::is_valid_stem(&req.name) {
         return Err(AgentError::Invalid("not a snapshot name".into()));
     }
-    let Some(j) = load_journal(&req.name).await else {
+    let Some(mut j) = load_journal(&req.name).await else {
         let _ = tokio::fs::remove_dir_all(staging(&req.name)).await;
         return Ok(Json(crate::ipc::OkResponse::default()));
     };
     if j.finished {
         return Err(AgentError::Conflict("that import finished; there is nothing to discard".into()));
     }
-    if let Ok(mut conn) = state.mariadb.pool().get_conn().await {
-        for db in &j.created_dbs {
-            if !crate::handlers::databases::is_reserved_db(db) {
-                let _ = conn.query_drop(format!("DROP DATABASE IF EXISTS `{}`", db.replace('`', "``"))).await;
+    let stage = staging(&req.name);
+    // From here on the import cannot be resumed: it would redo what this
+    // undoes.
+    j.discarding = true;
+    let _ = save_journal(&j).await;
+    let mut not_back: Vec<String> = Vec::new();
+    // The units it put in place stop before their files go.
+    for p in &j.placed {
+        if let Some(unit) = p.strip_prefix("/etc/systemd/system/") {
+            if !unit.contains('/') && (unit.ends_with(".service") || unit.ends_with(".timer")) {
+                let _ = exec::run("systemctl", ["disable", "--now", unit]).await;
             }
         }
-        for id in &j.zone_ids {
-            for t in ["records", "domainmetadata", "cryptokeys", "comments"] {
-                let _ = conn.exec_drop(format!("DELETE FROM pdns.{t} WHERE domain_id = ?"), (id,)).await;
+    }
+    match state.mariadb.pool().get_conn().await {
+        Ok(mut conn) => {
+            // Each list keeps only what could not be removed, for a second
+            // Discard to try again; what went is dropped from it. Deleting
+            // by id again is safe: InnoDB never hands out an auto-increment
+            // id twice, so a kept id cannot name the zone put back below.
+            for db in std::mem::take(&mut j.created_dbs) {
+                if crate::handlers::databases::is_reserved_db(&db) {
+                    continue;
+                }
+                if conn.query_drop(format!("DROP DATABASE IF EXISTS `{}`", db.replace('`', "``"))).await.is_err() {
+                    j.created_dbs.push(db);
+                }
             }
-            let _ = conn.exec_drop("DELETE FROM pdns.domains WHERE id = ?", (id,)).await;
+            // Only the accounts users.sql made: one this server had already
+            // stays (the service accounts are never in the list).
+            if let Some(accounts) = j.new_db_accounts.take() {
+                let mut left = Vec::new();
+                for account in accounts {
+                    if conn.query_drop(format!("DROP USER IF EXISTS {account}")).await.is_err() {
+                        left.push(account);
+                    }
+                }
+                j.new_db_accounts = if left.is_empty() { None } else { Some(left) };
+            }
+            let ids = std::mem::take(&mut j.zone_ids);
+            let names = std::mem::take(&mut j.zones);
+            for (at, id) in ids.into_iter().enumerate() {
+                if delete_zone(&mut conn, id).await.is_err() {
+                    j.zone_ids.push(id);
+                    j.zones.push(names.get(at).cloned().unwrap_or_default());
+                }
+            }
+            // Mail domains it made; their mailboxes and forwarders go with
+            // them (ON DELETE CASCADE).
+            for id in std::mem::take(&mut j.mail_domain_ids) {
+                if conn.exec_drop("DELETE FROM mail.virtual_domains WHERE id = ?", (id,)).await.is_err() {
+                    j.mail_domain_ids.push(id);
+                }
+            }
+            if let Some(what) = not_removed(&j) {
+                not_back.push(format!("what the import added could not all be removed ({what})"));
+            }
+            // This panel's own zone, which the snapshot's copy replaced.
+            if let Some(saved) = j.own_zone.clone() {
+                match restore_zone(&mut conn, &saved).await {
+                    Ok(()) => {
+                        // Sets auth and ordername the way PowerDNS needs them
+                        // to sign the zone with its keys again.
+                        if let Err(e) = exec::run("pdnsutil", ["rectify-zone", saved.name.as_str()]).await {
+                            tracing::warn!(zone = %saved.name, error = %e, "discard: could not rectify the zone");
+                        }
+                        j.own_zone = None;
+                    }
+                    Err(e) => {
+                        tracing::warn!(zone = %saved.name, error = %e, "discard: could not put the zone back");
+                        not_back.push(format!("this server's own DNS zone {} is not back ({e})", saved.name));
+                    }
+                }
+            }
+            let _ = save_journal(&j).await;
+        }
+        Err(e) => {
+            if mariadb_left(&j) {
+                not_back.push(format!(
+                    "MariaDB could not be reached ({e}), so the imported databases, accounts, DNS zones and mail domains are still there{}",
+                    if j.own_zone.is_some() { " and this server's own DNS zone is not back" } else { "" }
+                ));
+            }
+        }
+    }
+    let _ = exec::run("pdns_control", ["rediscover"]).await;
+    let _ = exec::run("pdns_control", ["purge"]).await;
+    // The panel's records as they were before part A: its apps, sites and
+    // domains go, so the panel counts as freshly installed again.
+    let before = stage.join("panel-before.db");
+    if before.exists() {
+        match state.panel_db.with(|c| merge::restore_panel_part_a(c, &before)) {
+            // Back: a second Discard has nothing to put back here.
+            Ok(()) => {
+                let _ = tokio::fs::remove_file(&before).await;
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, "discard: could not put the panel records back");
+                not_back.push(format!("the panel's own apps, sites and domains are not back ({e})"));
+            }
         }
     }
     for db in &j.created_pg_dbs {
@@ -1613,27 +2128,151 @@ pub async fn discard(State(state): State<AppState>, Json(req): Json<DiscardReq>)
             let _ = exec::run("runuser", ["-u", "postgres", "--", "dropdb", "--if-exists", db.as_str()]).await;
         }
     }
+    j.created_pg_dbs.clear();
     for u in &j.created_users {
         let _ = exec::run("userdel", [u.as_str()]).await;
     }
-    for p in j.placed.iter().rev() {
+    j.created_users.clear();
+    // A path that also held something of this server's is left to the loop
+    // over `replaced` below, which swaps the original back in: removing it
+    // here would, on a second Discard, delete the original put back.
+    let mut not_removed_paths = Vec::new();
+    for p in std::mem::take(&mut j.placed).into_iter().rev() {
         if let Some(vol) = p.strip_prefix("docker-volume:") {
-            let _ = exec::run("docker", ["volume", "rm", vol]).await;
+            // Best effort, and not kept for another try: Discard does not
+            // remove the containers the import set up, and a volume one of
+            // them uses cannot go. Keeping it would make every Discard fail.
+            if exec::run("docker", ["volume", "rm", vol]).await.is_err() {
+                tracing::warn!(volume = %vol, "discard: Docker volume left in place (a container uses it)");
+            }
             continue;
         }
-        let path = Path::new(p);
+        if j.replaced.contains(&p) {
+            continue;
+        }
+        let path = Path::new(&p);
         // Only what the import put there, never a top-level system folder.
         if path.components().count() < 3 {
             continue;
         }
-        let _ = if path.is_dir() && !path.is_symlink() {
+        let removed = if path.is_dir() && !path.is_symlink() {
             tokio::fs::remove_dir_all(path).await
         } else {
             tokio::fs::remove_file(path).await
         };
+        // Kept for a second Discard while it is still there.
+        if removed.is_err() && tokio::fs::symlink_metadata(path).await.is_ok() {
+            not_removed_paths.push(p);
+        }
     }
-    let _ = tokio::fs::remove_dir_all(staging(&req.name)).await;
+    // In the order they were placed, as a second Discard walks them backwards.
+    not_removed_paths.reverse();
+    if !not_removed_paths.is_empty() {
+        not_back.push(format!(
+            "{} file(s) the import put in place could not be removed: {}",
+            not_removed_paths.len(),
+            not_removed_paths.join(", ")
+        ));
+    }
+    j.placed = not_removed_paths;
+    let _ = save_journal(&j).await;
+    // What this server had where the snapshot's files went.
+    let mut left = Vec::new();
+    for p in std::mem::take(&mut j.replaced) {
+        let kept = stage.join("replaced").join(p.trim_start_matches('/'));
+        let path = PathBuf::from(&p);
+        if tokio::fs::symlink_metadata(&kept).await.is_err() {
+            // Put back by an earlier Discard.
+            continue;
+        }
+        if !matches!(tokio::task::spawn_blocking(move || put_back(&kept, &path)).await, Ok(Ok(()))) {
+            left.push(p);
+        }
+    }
+    if !left.is_empty() {
+        not_back.push(format!("{} file(s) this server had are not back: {}", left.len(), left.join(", ")));
+    }
+    j.replaced = left;
+    let _ = exec::run("systemctl", ["daemon-reload"]).await;
+    if crate::handlers::nginx::test_config().await.is_ok() {
+        let _ = exec::run("systemctl", ["reload", "nginx"]).await;
+    }
+    if !not_back.is_empty() {
+        let _ = save_journal(&j).await;
+        return Err(AgentError::Other(anyhow::anyhow!(
+            "Discard did not finish: {}. The staging with the saved copies is kept: run Discard again once that is fixed.",
+            not_back.join("; ")
+        )));
+    }
+    let _ = tokio::fs::remove_dir_all(&stage).await;
     Ok(Json(crate::ipc::OkResponse::default()))
+}
+
+/// Removes a zone the import took, with its records, in one transaction: a
+/// zone is either gone or still whole for a second Discard.
+async fn delete_zone(conn: &mut mysql_async::Conn, id: i64) -> AgentResult<()> {
+    let mut tx = conn.start_transaction(mysql_async::TxOpts::default()).await?;
+    for t in ["records", "domainmetadata", "cryptokeys", "comments"] {
+        tx.exec_drop(format!("DELETE FROM pdns.{t} WHERE domain_id = ?"), (id,)).await?;
+    }
+    tx.exec_drop("DELETE FROM pdns.domains WHERE id = ?", (id,)).await?;
+    tx.commit().await?;
+    Ok(())
+}
+
+/// What a Discard could not remove from MariaDB (kept in the journal for the
+/// next one), for its message; None when all of it went.
+fn not_removed(j: &Journal) -> Option<String> {
+    let mut parts = Vec::new();
+    if !j.created_dbs.is_empty() {
+        parts.push(format!("databases {}", j.created_dbs.join(", ")));
+    }
+    if let Some(accounts) = j.new_db_accounts.as_ref().filter(|a| !a.is_empty()) {
+        parts.push(format!("MariaDB accounts {}", accounts.join(", ")));
+    }
+    if !j.zone_ids.is_empty() {
+        let names: Vec<&str> = j.zones.iter().map(String::as_str).filter(|z| !z.is_empty()).collect();
+        parts.push(if names.is_empty() {
+            format!("{} DNS zone(s)", j.zone_ids.len())
+        } else {
+            format!("DNS zones {}", names.join(", "))
+        });
+    }
+    if !j.mail_domain_ids.is_empty() {
+        parts.push(format!("{} mail domain(s)", j.mail_domain_ids.len()));
+    }
+    if parts.is_empty() {
+        None
+    } else {
+        Some(parts.join("; "))
+    }
+}
+
+/// Puts back what this server had at `path`, kept aside at `kept` when the
+/// snapshot's copy took its place. While `kept` is there, whatever is at
+/// `path` is the snapshot's copy (or what a stopped copy of the original
+/// left), so it goes first; a top-level path such as /srv included, as the
+/// original takes its place.
+fn put_back(kept: &Path, path: &Path) -> std::io::Result<()> {
+    match std::fs::symlink_metadata(path) {
+        Ok(m) if m.is_dir() && !m.file_type().is_symlink() => std::fs::remove_dir_all(path)?,
+        Ok(_) => std::fs::remove_file(path)?,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => return Err(e),
+    }
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    move_path(kept, path)
+}
+
+/// Discard still has MariaDB work to do from this journal.
+fn mariadb_left(j: &Journal) -> bool {
+    !j.created_dbs.is_empty()
+        || j.new_db_accounts.as_ref().is_some_and(|a| !a.is_empty())
+        || !j.zone_ids.is_empty()
+        || !j.mail_domain_ids.is_empty()
+        || j.own_zone.is_some()
 }
 
 #[cfg(test)]
@@ -1699,7 +2338,8 @@ mod tests {
         std::fs::set_permissions(&from, std::fs::Permissions::from_mode(0o770)).unwrap();
         std::fs::set_permissions(&to, std::fs::Permissions::from_mode(0o755)).unwrap();
         let mut placed = Vec::new();
-        place_tree(&from, &to, &mut placed, "").unwrap();
+        let mut replaced = Vec::new();
+        place_tree(&from, &to, &mut placed, "", None, &mut replaced).unwrap();
         assert_eq!(std::fs::read(to.join("apps/shop/app.js")).unwrap(), b"new");
         assert_eq!(std::fs::read(to.join("apps/keep.txt")).unwrap(), b"here");
         assert_eq!(placed, vec![to.join("apps/shop/app.js").to_string_lossy().into_owned()]);
@@ -1741,6 +2381,198 @@ mod tests {
         assert_eq!(move_children(&staged, &live, false).unwrap(), 1);
         assert_eq!(std::fs::read(live.join("moved.db")).unwrap(), b"moved before the stop");
         assert_eq!(std::fs::read(live.join("half.db")).unwrap(), b"half, whole");
+    }
+
+    #[test]
+    fn a_replaced_file_is_kept_aside_for_discard() {
+        let tmp = tempfile::tempdir().unwrap();
+        let from = tmp.path().join("stage/fs/etc/cron.d");
+        let to = tmp.path().join("live/etc/cron.d");
+        let aside = tmp.path().join("stage/replaced");
+        std::fs::create_dir_all(&from).unwrap();
+        std::fs::create_dir_all(&to).unwrap();
+        std::fs::write(from.join("vps-panel-backup"), b"old server").unwrap();
+        std::fs::write(to.join("vps-panel-backup"), b"fresh install").unwrap();
+        let (mut placed, mut replaced) = (Vec::new(), Vec::new());
+        place_tree(&from, &to, &mut placed, "", Some(&aside), &mut replaced).unwrap();
+        let target = to.join("vps-panel-backup");
+        assert_eq!(std::fs::read(&target).unwrap(), b"old server");
+        assert_eq!(replaced, vec![target.to_string_lossy().into_owned()]);
+        let kept = aside.join(target.to_string_lossy().trim_start_matches('/'));
+        assert_eq!(std::fs::read(kept).unwrap(), b"fresh install");
+    }
+
+    #[test]
+    fn discard_drops_only_the_accounts_users_sql_made() {
+        let sql = "CREATE USER IF NOT EXISTS `shop`@`localhost` IDENTIFIED BY PASSWORD '*AB';\n\
+                   GRANT ALL PRIVILEGES ON `shop`.* TO `shop`@`localhost`;\n\
+                   CREATE USER IF NOT EXISTS 'blog'@'%';\n\
+                   CREATE USER IF NOT EXISTS `x`@`h`; DROP DATABASE mysql;\n";
+        let got = created_accounts(sql);
+        assert_eq!(
+            got,
+            vec![
+                ("`shop`@`localhost`".to_string(), "shop".to_string(), "localhost".to_string()),
+                ("'blog'@'%'".to_string(), "blog".to_string(), "%".to_string()),
+            ]
+        );
+    }
+
+    #[test]
+    fn discard_never_drops_an_account_this_server_had() {
+        let sql = "CREATE USER IF NOT EXISTS `shop`@`localhost` IDENTIFIED BY PASSWORD '*AB';\n\
+                   CREATE USER IF NOT EXISTS `app`@`localhost`;\n\
+                   CREATE USER IF NOT EXISTS `app`@`%`;\n\
+                   CREATE USER IF NOT EXISTS `root`@`localhost`;\n\
+                   CREATE USER IF NOT EXISTS `blog`@`LocalHost`;\n";
+        let here = vec![
+            ("app".to_string(), "localhost".to_string()),
+            ("root".to_string(), "localhost".to_string()),
+            ("blog".to_string(), "localhost".to_string()),
+        ];
+        // `app`@`localhost` was made on the Databases page before the import;
+        // `app`@`%` is another account; root is a service account.
+        assert_eq!(new_accounts(&created_accounts(sql), &here), vec!["`shop`@`localhost`", "`app`@`%`"]);
+        assert!(new_accounts(&created_accounts(sql), &[]).iter().all(|a| !a.contains("root")));
+    }
+
+    fn own_zone_saved(id: i64) -> SavedZone {
+        let rec = |name: &str, kind: &str, content: &str| ZoneRecord {
+            name: Some(name.into()),
+            kind: Some(kind.into()),
+            content: Some(content.into()),
+            ttl: Some(3600),
+            auth: Some(1),
+            ..Default::default()
+        };
+        SavedZone {
+            id,
+            name: "example.com".into(),
+            kind: "NATIVE".into(),
+            host: "panel.example.com".into(),
+            records: vec![
+                rec("panel.example.com", "A", "203.0.113.10"),
+                rec("PANEL.example.com", "AAAA", "2001:db8::10"),
+                rec("panel.example.com", "TXT", "\"x\""),
+                rec("www.example.com", "A", "203.0.113.20"),
+            ],
+            meta: vec![(Some("SOA-EDIT-API".into()), Some("DEFAULT".into()))],
+            keys: vec![ZoneKey { flags: 257, active: Some(1), published: Some(1), content: Some("Private-key-format: v1.2".into()) }],
+        }
+    }
+
+    #[test]
+    fn only_the_panel_hostnames_addresses_are_kept() {
+        let saved = own_zone_saved(7);
+        let got: Vec<&str> = own_host_records(&saved).iter().filter_map(|r| r.content.as_deref()).collect();
+        assert_eq!(got, vec!["203.0.113.10", "2001:db8::10"]);
+    }
+
+    #[test]
+    fn a_resume_never_takes_the_snapshots_copy_for_this_servers_zone() {
+        let saved = own_zone_saved(7);
+        // The server's own zone is the saved id; the copy an earlier attempt
+        // took has a new one, whether or not its id reached the journal.
+        assert!(is_servers_own_zone(7, &saved, &[]));
+        assert!(!is_servers_own_zone(42, &saved, &[]));
+        assert!(!is_servers_own_zone(42, &saved, &[42]));
+        // A journal from before ids were saved goes by the ids taken.
+        let old = SavedZone { id: 0, ..saved };
+        assert!(is_servers_own_zone(7, &old, &[42]));
+        assert!(!is_servers_own_zone(42, &old, &[42]));
+    }
+
+    #[test]
+    fn a_zone_taken_again_gets_its_new_id() {
+        let mut j = Journal::default();
+        record_zone(&mut j, 41, "example.com");
+        record_zone(&mut j, 50, "example.net");
+        record_zone(&mut j, 42, "Example.com");
+        assert_eq!(j.zone_ids, vec![42, 50]);
+        assert_eq!(j.zones, vec!["example.com".to_string(), "example.net".to_string()]);
+    }
+
+    #[test]
+    fn the_saved_zone_keeps_its_keys_and_an_older_journal_still_loads() {
+        let j = Journal { own_zone: Some(own_zone_saved(7)), ..Default::default() };
+        let back: Journal = serde_json::from_slice(&serde_json::to_vec(&j).unwrap()).unwrap();
+        let z = back.own_zone.unwrap();
+        assert_eq!((z.id, z.keys.len(), z.keys[0].flags), (7, 1, 257));
+        assert_eq!(z.records[0].auth, Some(1));
+
+        let old = r#"{"snapshot":"s","done":["unpack"],"own_zone":{"name":"example.com","kind":"NATIVE","host":"panel.example.com","records":[],"meta":[]}}"#;
+        let j: Journal = serde_json::from_str(old).unwrap();
+        let z = j.own_zone.unwrap();
+        assert_eq!((z.id, z.keys.len()), (0, 0));
+        assert!(j.new_db_accounts.is_none() && !j.own_host_kept && !j.discarding);
+    }
+
+    #[test]
+    fn discard_knows_when_mariadb_still_has_work() {
+        let mut j = Journal::default();
+        assert!(!mariadb_left(&j));
+        j.new_db_accounts = Some(Vec::new());
+        assert!(!mariadb_left(&j));
+        j.own_zone = Some(own_zone_saved(7));
+        assert!(mariadb_left(&j));
+        j.own_zone = None;
+        j.zone_ids.push(3);
+        assert!(mariadb_left(&j));
+    }
+
+    #[test]
+    fn discard_puts_the_original_back_over_the_snapshots_copy() {
+        let tmp = tempfile::tempdir().unwrap();
+        let aside = tmp.path().join("stage/replaced");
+        // This server's /srv was a link to a data volume; the snapshot's /srv
+        // folder took its place.
+        let data = tmp.path().join("data");
+        std::fs::create_dir_all(&data).unwrap();
+        let live = tmp.path().join("live");
+        std::fs::create_dir_all(&live).unwrap();
+        let srv = live.join("srv");
+        std::os::unix::fs::symlink(&data, &srv).unwrap();
+        let from = tmp.path().join("stage/fs/srv");
+        std::fs::create_dir_all(from.join("apps")).unwrap();
+        std::fs::write(from.join("apps/app.js"), b"old server").unwrap();
+        let (mut placed, mut replaced) = (Vec::new(), Vec::new());
+        place_tree(&from, &srv, &mut placed, "", Some(&aside), &mut replaced).unwrap();
+        let rel = srv.to_string_lossy().into_owned();
+        assert_eq!(placed, vec![rel.clone()]);
+        assert_eq!(replaced, vec![rel.clone()]);
+        assert!(!std::fs::symlink_metadata(&srv).unwrap().file_type().is_symlink());
+
+        let kept = aside.join(rel.trim_start_matches('/'));
+        put_back(&kept, &srv).unwrap();
+        assert_eq!(std::fs::read_link(&srv).unwrap(), data, "the link is back");
+        assert!(std::fs::symlink_metadata(&kept).is_err());
+
+        // A file whose snapshot copy an earlier Discard already removed.
+        let kept = aside.join("etc/cron.d/job");
+        std::fs::create_dir_all(kept.parent().unwrap()).unwrap();
+        std::fs::write(&kept, b"fresh install").unwrap();
+        let job = live.join("etc/cron.d/job");
+        put_back(&kept, &job).unwrap();
+        assert_eq!(std::fs::read(&job).unwrap(), b"fresh install");
+    }
+
+    #[test]
+    fn discard_names_what_it_could_not_remove() {
+        let mut j = Journal::default();
+        assert_eq!(not_removed(&j), None);
+        j.new_db_accounts = Some(Vec::new());
+        assert_eq!(not_removed(&j), None);
+        j.created_dbs.push("shop".into());
+        j.new_db_accounts = Some(vec!["`shop`@`localhost`".into()]);
+        record_zone(&mut j, 42, "example.com");
+        j.mail_domain_ids.push(5);
+        assert_eq!(
+            not_removed(&j).as_deref(),
+            Some("databases shop; MariaDB accounts `shop`@`localhost`; DNS zones example.com; 1 mail domain(s)")
+        );
+        // A journal whose zone names fell out of step still says how many.
+        j.zones.clear();
+        assert!(not_removed(&j).unwrap().contains("1 DNS zone(s)"));
     }
 
     #[test]

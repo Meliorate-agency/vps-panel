@@ -5,6 +5,7 @@ import { useRouter } from "next/navigation";
 import Table from "@/components/Table/Table";
 import TaskProgress from "@/components/TaskProgress/TaskProgress";
 import ConfirmDeleteButton from "@/components/ConfirmDeleteButton/ConfirmDeleteButton";
+import ConfirmDialog from "@/components/ConfirmDialog/ConfirmDialog";
 import styles from "@/components/page.module.css";
 import type { ImportPreflight, ServerSnapshot, ServerSnapshotEstimate } from "@/lib/agent";
 import type { LinkView } from "@/lib/serverSnapshots/links";
@@ -596,6 +597,7 @@ function ImportPanel({ snapshot, onClose }: { snapshot: ServerSnapshot | undefin
   const [pre, setPre] = useState<ImportPreflight | null>(null);
   const [replaces, setReplaces] = useState(false);
   const [sure, setSure] = useState(false);
+  const [discarding, setDiscarding] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [pending, start] = useTransition();
   const [taskId, setTaskId] = useState<string | null>(null);
@@ -737,13 +739,21 @@ function ImportPanel({ snapshot, onClose }: { snapshot: ServerSnapshot | undefin
               An earlier import of this snapshot stopped after:{" "}
               {pre.done_steps.map((s) => STEP_NAMES[s] ?? s).join(", ") || "nothing"}. Importing
               continues from there.{" "}
-              <button
-                className={styles.btnGhost}
-                disabled={pending}
-                onClick={() =>
+              <button className={styles.btnGhost} disabled={pending} onClick={() => setDiscarding(true)}>
+                Discard what it did
+              </button>
+              <ConfirmDialog
+                open={discarding}
+                title="Discard what the import did?"
+                confirmLabel="Discard"
+                tone="danger"
+                pending={pending}
+                onCancel={() => setDiscarding(false)}
+                onConfirm={() =>
                   start(async () => {
                     setError(null);
                     const r = await discardImportAction(snapshot.name);
+                    setDiscarding(false);
                     if (!r.ok) setError(r.error);
                     else {
                       setPre(null);
@@ -752,8 +762,17 @@ function ImportPanel({ snapshot, onClose }: { snapshot: ServerSnapshot | undefin
                   })
                 }
               >
-                Discard what it did
-              </button>
+                <p style={{ margin: "0 0 8px" }}>
+                  Everything the import added goes: its apps, sites, databases and their accounts, DNS
+                  zones, mail domains with their mailboxes, accounts and files. What this server had before
+                  is put back, its own DNS zone and panel records included, so the panel is freshly installed
+                  again and a snapshot can be imported anew.
+                </p>
+                <p className={styles.muted} style={{ margin: 0 }}>
+                  Packages the import installed (Docker, PostgreSQL and the like) stay, and so do firewall,
+                  SSH and swap settings if the import got as far as applying them.
+                </p>
+              </ConfirmDialog>
             </div>
           )}
           {pre.can_import && (

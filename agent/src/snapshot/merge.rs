@@ -72,10 +72,31 @@ fn replace_table(conn: &Connection, table: &str) -> rusqlite::Result<bool> {
 /// reads it (DNS reads `dns.ns_pair`): apps, sites, domains, redirects, app
 /// folders and comments, backup jobs, and settings without this machine's
 /// own. Signs nobody out.
+/// The panel tables part A replaces with the snapshot's.
+const PART_A_TABLES: [&str; 7] = ["apps", "domains", "sites", "redirects", "app_folders", "app_comments", "backup_jobs"];
+
+/// Discard: the tables part A replaced, and the settings, back as they were
+/// just before it (`before_db`, a copy of panel.db taken then). Without it a
+/// discarded import left its apps, sites and domains in the panel, which then
+/// no longer counted as freshly installed: no snapshot could be imported
+/// again.
+pub fn restore_panel_part_a(conn: &Connection, before_db: &Path) -> rusqlite::Result<()> {
+    with_attached(conn, before_db, |conn| {
+        for table in PART_A_TABLES {
+            replace_table(conn, table)?;
+        }
+        if table_exists(conn, "src", "settings")? && table_exists(conn, "main", "settings")? {
+            conn.execute("DELETE FROM main.settings", [])?;
+            conn.execute("INSERT INTO main.settings (key, value) SELECT key, value FROM src.settings", [])?;
+        }
+        Ok(())
+    })
+}
+
 pub fn merge_panel_part_a(conn: &Connection, snapshot_db: &Path) -> rusqlite::Result<Vec<String>> {
     with_attached(conn, snapshot_db, |conn| {
         let mut done = Vec::new();
-        for table in ["apps", "domains", "sites", "redirects", "app_folders", "app_comments", "backup_jobs"] {
+        for table in PART_A_TABLES {
             if replace_table(conn, table)? {
                 done.push(table.to_string());
             }
