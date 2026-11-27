@@ -34,7 +34,7 @@ fn symlink(_src: &std::path::Path, _dst: &std::path::Path) -> std::io::Result<()
 
 static MAIL_INITIALIZED: AtomicBool = AtomicBool::new(false);
 static MAIL_MIGRATED: AtomicBool = AtomicBool::new(false);
-const MAIL_SCHEMA: &str = include_str!("mail_schema.sql");
+pub(crate) const MAIL_SCHEMA: &str = include_str!("mail_schema.sql");
 
 fn default_true() -> bool {
     true

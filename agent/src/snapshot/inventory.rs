@@ -90,6 +90,11 @@ async fn stdout(cmd: &str, args: &[&str]) -> Option<String> {
     exec::run(cmd, args).await.ok().map(|o| o.stdout.trim().to_string()).filter(|s| !s.is_empty())
 }
 
+/// This server's platform, for comparing with a snapshot's.
+pub async fn gather_platform() -> Platform {
+    platform().await
+}
+
 async fn platform() -> Platform {
     let release = tokio::fs::read_to_string("/etc/os-release").await.unwrap_or_default();
     let field = |key: &str| {

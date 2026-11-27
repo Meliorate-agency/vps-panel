@@ -18,6 +18,8 @@ pub mod dumps;
 pub mod export;
 pub mod format;
 pub mod http_range;
+pub mod import;
 pub mod inventory;
+pub mod merge;
 pub mod plan;
 pub mod pull;

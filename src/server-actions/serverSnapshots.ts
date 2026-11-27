@@ -1,7 +1,7 @@
 "use server";
 
 import { revalidatePath } from "next/cache";
-import { agent, type ServerSnapshotEstimate } from "@/lib/agent";
+import { agent, type ImportPreflight, type ServerSnapshotEstimate } from "@/lib/agent";
 import { requireAdmin } from "@/lib/auth";
 import { writeAudit } from "@/lib/audit";
 import { agentErrorMessage } from "@/lib/redirects";
@@ -126,6 +126,60 @@ export async function pullSnapshotAction(link: string): Promise<StartResult> {
   } catch (e: unknown) {
     const msg = plain(e);
     writeAudit({ actorId: s.userId, action: "snapshots.pull", target: url.host, result: "error", message: msg });
+    return { ok: false, error: msg };
+  }
+}
+
+export type PreflightResult = { ok: true; preflight: ImportPreflight } | { ok: false; error: string };
+
+/** Opens a snapshot with its passphrase and says what it holds and whether
+ *  this panel can import it. Changes nothing. */
+export async function preflightImportAction(name: string, passphrase: string): Promise<PreflightResult> {
+  await requireAdmin();
+  if (!SNAPSHOT_NAME.test(name)) return { ok: false, error: "not a snapshot name" };
+  if (!passphrase) return { ok: false, error: "Enter the snapshot's passphrase." };
+  try {
+    return { ok: true, preflight: await agent.serverSnapshots.importPreflight(name, passphrase) };
+  } catch (e: unknown) {
+    return { ok: false, error: plain(e) };
+  }
+}
+
+/**
+ * Imports a snapshot: this server takes over everything the old one
+ * hosted, its panel logins included. The passphrase goes to the agent only.
+ */
+export async function startImportAction(name: string, passphrase: string, replacesOld: boolean): Promise<StartResult> {
+  const s = await requireAdmin();
+  if (!SNAPSHOT_NAME.test(name)) return { ok: false, error: "not a snapshot name" };
+  try {
+    const resp = await agent.serverSnapshots.import(name, passphrase, replacesOld);
+    writeAudit({
+      actorId: s.userId,
+      action: "snapshots.import",
+      target: name,
+      result: "ok",
+      message: replacesOld ? "replaces the old server" : undefined,
+    });
+    return { ok: true, taskId: resp.task_id };
+  } catch (e: unknown) {
+    const msg = plain(e);
+    writeAudit({ actorId: s.userId, action: "snapshots.import", target: name, result: "error", message: msg });
+    return { ok: false, error: msg };
+  }
+}
+
+/** Undoes an import that stopped part way (its journal says what it did). */
+export async function discardImportAction(name: string): Promise<DeleteResult> {
+  const s = await requireAdmin();
+  if (!SNAPSHOT_NAME.test(name)) return { ok: false, error: "not a snapshot name" };
+  try {
+    await agent.serverSnapshots.discardImport(name);
+    writeAudit({ actorId: s.userId, action: "snapshots.import.discard", target: name, result: "ok" });
+    return { ok: true };
+  } catch (e: unknown) {
+    const msg = plain(e);
+    writeAudit({ actorId: s.userId, action: "snapshots.import.discard", target: name, result: "error", message: msg });
     return { ok: false, error: msg };
   }
 }

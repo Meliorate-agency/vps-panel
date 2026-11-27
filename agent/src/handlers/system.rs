@@ -1761,7 +1761,7 @@ pub struct CreateSystemUserResp {
 /// Reserved Linux account names the panel refuses to (re)create. The shape
 /// of `useradd` would refuse most of these anyway with "user already exists",
 /// but we want a clearer 400 with a friendly message before we shell out.
-const RESERVED_SYSTEM_USERS: &[&str] = &[
+pub(crate) const RESERVED_SYSTEM_USERS: &[&str] = &[
     "root",
     "daemon",
     "bin",
@@ -1806,7 +1806,7 @@ const RESERVED_SYSTEM_USERS: &[&str] = &[
     "vps-panel",
 ];
 
-const ALLOWED_SHELLS: &[&str] = &[
+pub(crate) const ALLOWED_SHELLS: &[&str] = &[
     "/bin/bash",
     "/bin/sh",
     "/bin/zsh",
@@ -1817,7 +1817,7 @@ const ALLOWED_SHELLS: &[&str] = &[
     "/bin/false",
 ];
 
-fn is_safe_unix_name(name: &str) -> bool {
+pub(crate) fn is_safe_unix_name(name: &str) -> bool {
     // useradd's NAME_REGEX on Debian: ^[a-z_][a-z0-9_-]*[$]?$, max 32 chars.
     if name.is_empty() || name.len() > 32 {
         return false;

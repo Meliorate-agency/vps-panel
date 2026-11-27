@@ -6,13 +6,16 @@ import Table from "@/components/Table/Table";
 import TaskProgress from "@/components/TaskProgress/TaskProgress";
 import ConfirmDeleteButton from "@/components/ConfirmDeleteButton/ConfirmDeleteButton";
 import styles from "@/components/page.module.css";
-import type { ServerSnapshot, ServerSnapshotEstimate } from "@/lib/agent";
+import type { ImportPreflight, ServerSnapshot, ServerSnapshotEstimate } from "@/lib/agent";
 import type { LinkView } from "@/lib/serverSnapshots/links";
 import { generatePassphrase, passphraseProblem } from "@/lib/serverSnapshots/passphrase";
 import {
   createLinkAction,
   createSnapshotAction,
   deleteSnapshotAction,
+  discardImportAction,
+  preflightImportAction,
+  startImportAction,
   estimateSnapshotAction,
   pullSnapshotAction,
   revokeLinkAction,
@@ -47,7 +50,7 @@ export default function ServerSnapshots({
   snapshots: ServerSnapshot[];
   links: LinkView[];
 }) {
-  const [panel, setPanel] = useState<null | "create" | "pull" | { link: string }>(null);
+  const [panel, setPanel] = useState<null | "create" | "pull" | { link: string } | { importing: string }>(null);
   return (
     <div>
       <div style={{ display: "flex", gap: 12, alignItems: "flex-start", marginBottom: 12, flexWrap: "wrap" }}>
@@ -71,7 +74,13 @@ export default function ServerSnapshots({
       </div>
       {panel === "create" && <CreateSnapshot onClose={() => setPanel(null)} />}
       {panel === "pull" && <PullSnapshot onClose={() => setPanel(null)} />}
-      {panel !== null && typeof panel === "object" && (
+      {panel !== null && typeof panel === "object" && "importing" in panel && (
+        <ImportPanel
+          snapshot={snapshots.find((s) => s.name === panel.importing)}
+          onClose={() => setPanel(null)}
+        />
+      )}
+      {panel !== null && typeof panel === "object" && "link" in panel && (
         <LinkPanel
           snapshot={snapshots.find((s) => s.name === panel.link)}
           links={links.filter((l) => l.snapshot === panel.link)}
@@ -84,7 +93,7 @@ export default function ServerSnapshots({
           { key: "made", label: "Made" },
           { key: "size", label: "Size", width: "100px" },
           { key: "drive", label: "Drive", width: "70px" },
-          { key: "actions", label: "", width: "280px" },
+          { key: "actions", label: "", width: "360px" },
         ]}
         rowKey={(_, i) => snapshots[i]?.name ?? i}
         rows={snapshots.map((s) => ({
@@ -115,6 +124,13 @@ export default function ServerSnapshots({
                     : ""}
                 </button>
               )}
+              <button
+                className={styles.btnGhost}
+                onClick={() => setPanel({ importing: s.name })}
+                title="Make THIS server what the snapshot describes"
+              >
+                Import
+              </button>
               <a className={styles.btnGhost} href={`/api/server-snapshots/${encodeURIComponent(s.name)}/download`}>
                 Download
               </a>
@@ -533,6 +549,220 @@ function PullSnapshot({ onClose }: { onClose: () => void }) {
       {error && <div className={styles.error}>{error}</div>}
       <div style={{ marginTop: 10 }}>
         <button className={styles.btnGhost} onClick={onClose}>
+          Close
+        </button>
+      </div>
+    </div>
+  );
+}
+
+const STEP_NAMES: Record<string, string> = {
+  unpack: "unpacked",
+  packages: "packages installed",
+  accounts: "accounts made",
+  files: "files in place",
+  "panel-a": "panel records",
+  mariadb: "MariaDB",
+  "dns-mail": "DNS and mail",
+  postgres: "PostgreSQL",
+  docker: "Docker",
+  services: "services started",
+  settings: "settings",
+  "panel-b": "logins",
+};
+
+/**
+ * Import a snapshot: THIS server takes over everything the snapshot's
+ * server hosted, its panel logins included. Only on a freshly installed
+ * panel (the agent's checks refuse anything else).
+ */
+function ImportPanel({ snapshot, onClose }: { snapshot: ServerSnapshot | undefined; onClose: () => void }) {
+  const router = useRouter();
+  const [pass, setPass] = useState("");
+  const [pre, setPre] = useState<ImportPreflight | null>(null);
+  const [replaces, setReplaces] = useState(false);
+  const [sure, setSure] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [pending, start] = useTransition();
+  const [taskId, setTaskId] = useState<string | null>(null);
+  const [finished, setFinished] = useState<null | "succeeded" | "failed">(null);
+  if (!snapshot) return null;
+
+  if (taskId) {
+    return (
+      <div className={styles.section} style={{ marginBottom: 16 }}>
+        <h3 className={styles.sectionTitle}>Importing {snapshot.name}</h3>
+        <TaskProgress
+          key={taskId}
+          taskId={taskId}
+          onComplete={(s) => {
+            setFinished(s);
+            if (s === "succeeded") {
+              // The agent restarts the panel a few seconds after; the old
+              // server's logins are the ones that work from now on.
+              window.setTimeout(() => window.location.assign("/login"), 15000);
+            } else {
+              router.refresh();
+            }
+          }}
+        />
+        {finished === "succeeded" && (
+          <div className={styles.notice} style={{ marginTop: 10 }}>
+            Done. The panel restarts now; sign in with the old server&apos;s login. The steps left to
+            do by hand are at the end of the log above.
+          </div>
+        )}
+        {finished === "failed" && (
+          <div className={styles.error} style={{ marginTop: 10 }}>
+            The import stopped. Import the snapshot again to continue from where it stopped, or
+            discard what it did.
+          </div>
+        )}
+      </div>
+    );
+  }
+
+  const inv = pre?.manifest.inventory;
+  const count = (n: number, one: string, many: string) => `${n} ${n === 1 ? one : many}`;
+  return (
+    <div className={styles.section} style={{ marginBottom: 16 }}>
+      <h3 className={styles.sectionTitle}>
+        Import <span className={styles.code}>{snapshot.name}</span> onto this server
+      </h3>
+      <div style={{ fontSize: 13, marginBottom: 12 }} className={styles.muted}>
+        This server becomes the one in the snapshot: its apps, sites, databases, DNS zones (moved to
+        this server&apos;s address), mail, files, accounts and settings, and its panel logins. Only for
+        a freshly installed panel.
+      </div>
+      {!pre ? (
+        <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginBottom: 8 }}>
+          <input
+            className={styles.input}
+            type="password"
+            autoComplete="off"
+            placeholder="The snapshot's passphrase"
+            value={pass}
+            onChange={(e) => setPass(e.target.value)}
+            style={{ flex: "1 1 320px" }}
+          />
+          <button
+            className={styles.btn}
+            disabled={pending || !pass}
+            onClick={() =>
+              start(async () => {
+                setError(null);
+                const r = await preflightImportAction(snapshot.name, pass);
+                if (r.ok) setPre(r.preflight);
+                else setError(r.error);
+              })
+            }
+          >
+            {pending ? "Opening..." : "Open the snapshot"}
+          </button>
+        </div>
+      ) : (
+        <>
+          <div style={{ fontSize: 13, marginBottom: 10 }}>
+            Made {new Date(pre.manifest.created_at).toLocaleString()} on{" "}
+            <span className={styles.code}>{pre.manifest.source.panel_host}</span>
+            {pre.manifest.source.ipv4 ? ` (${pre.manifest.source.ipv4})` : ""}.
+          </div>
+          {inv && (
+            <div style={{ fontSize: 13, marginBottom: 10 }} className={styles.muted}>
+              {[
+                count(inv.apps.length, "app", "apps"),
+                count(inv.sites.length, "site", "sites"),
+                count(inv.dns_zones.length, "DNS zone", "DNS zones"),
+                count(inv.mail_domains.length, "mail domain", "mail domains"),
+                count(inv.mailboxes, "mailbox", "mailboxes"),
+                count(inv.mariadb_databases.length + inv.postgres_databases.length, "database", "databases"),
+                count(inv.containers.length, "container", "containers"),
+                count(inv.cron_jobs, "cron job", "cron jobs"),
+                count(inv.system_users.length, "account", "accounts"),
+                count(inv.panel_users, "panel login", "panel logins"),
+              ].join(", ")}
+              {pre.manifest.options.include_drive ? ", Drive" : ""}.
+            </div>
+          )}
+          <ul style={{ listStyle: "none", padding: 0, margin: "0 0 12px 0", fontSize: 13 }}>
+            {pre.checks.map((c) => (
+              <li key={c.id} style={{ marginBottom: 4 }}>
+                <span
+                  style={{
+                    color: c.level === "ok" ? "var(--ok)" : c.level === "warn" ? "var(--warn)" : "var(--danger)",
+                    fontWeight: 600,
+                    marginRight: 6,
+                  }}
+                >
+                  {c.level === "ok" ? "OK" : c.level === "warn" ? "Note" : "Stops it"}
+                </span>
+                {c.message}
+              </li>
+            ))}
+          </ul>
+          {pre.resumable && (
+            <div style={{ fontSize: 13, marginBottom: 10 }}>
+              An earlier import of this snapshot stopped after:{" "}
+              {pre.done_steps.map((s) => STEP_NAMES[s] ?? s).join(", ") || "nothing"}. Importing
+              continues from there.{" "}
+              <button
+                className={styles.btnGhost}
+                disabled={pending}
+                onClick={() =>
+                  start(async () => {
+                    setError(null);
+                    const r = await discardImportAction(snapshot.name);
+                    if (!r.ok) setError(r.error);
+                    else {
+                      setPre(null);
+                      router.refresh();
+                    }
+                  })
+                }
+              >
+                Discard what it did
+              </button>
+            </div>
+          )}
+          {pre.can_import && (
+            <>
+              <label className={styles.checkbox} style={{ marginBottom: 6 }}>
+                <input type="checkbox" checked={replaces} onChange={(e) => setReplaces(e.target.checked)} />
+                This server replaces the old one for good (it also takes the old server&apos;s place in My
+                Networks; shut the old one down)
+              </label>
+              <label className={styles.checkbox} style={{ marginBottom: 12, display: "flex" }}>
+                <input type="checkbox" checked={sure} onChange={(e) => setSure(e.target.checked)} />
+                I understand: this server&apos;s panel logins are replaced by the old server&apos;s, and
+                everyone signs in again.
+              </label>
+              <div>
+                <button
+                  className={styles.btn}
+                  disabled={pending || !sure}
+                  onClick={() =>
+                    start(async () => {
+                      setError(null);
+                      const r = await startImportAction(snapshot.name, pass, replaces);
+                      if (!r.ok) {
+                        setError(r.error);
+                        return;
+                      }
+                      setPass("");
+                      setTaskId(r.taskId);
+                    })
+                  }
+                >
+                  {pending ? "Starting..." : pre.resumable ? "Continue the import" : "Import"}
+                </button>
+              </div>
+            </>
+          )}
+        </>
+      )}
+      {error && <div className={styles.error}>{error}</div>}
+      <div style={{ marginTop: 10 }}>
+        <button className={styles.btnGhost} onClick={onClose} disabled={pending}>
           Close
         </button>
       </div>

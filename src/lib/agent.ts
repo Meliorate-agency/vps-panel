@@ -741,6 +741,24 @@ export const agent = {
      *  fragment) travels separately and never on a command line. */
     pull: (url: string, secret: string) =>
       agentRequest<TaskAccepted>({ method: "POST", path: "/server-snapshots/pull", body: { url, secret } }),
+    /** Opens the snapshot (the passphrase is checked here: scrypt takes a
+     *  second or two) and says whether this panel can take it. */
+    importPreflight: (name: string, passphrase: string) =>
+      agentRequest<ImportPreflight>({
+        method: "POST",
+        path: "/server-snapshots/import/preflight",
+        body: { name, passphrase },
+        timeoutMs: READ_MS,
+      }),
+    import: (name: string, passphrase: string, replacesOld: boolean) =>
+      agentRequest<TaskAccepted>({
+        method: "POST",
+        path: "/server-snapshots/import",
+        body: { name, passphrase, replaces_old: replacesOld },
+        timeoutMs: READ_MS,
+      }),
+    discardImport: (name: string) =>
+      agentRequest<Ok>({ method: "POST", path: "/server-snapshots/import/discard", body: { name }, timeoutMs: READ_MS }),
   },
 
   firewall: {
@@ -1372,6 +1390,41 @@ export type ServerSnapshot = {
 export type ServerSnapshotList = {
   snapshots: ServerSnapshot[];
   free_bytes: number | null;
+};
+
+export type ImportCheck = { id: string; level: "ok" | "warn" | "block"; message: string };
+
+export type ImportPreflight = {
+  manifest: {
+    created_at: string;
+    format: number;
+    panel: { commit: string; dirty: boolean };
+    source: { hostname: string; panel_host: string; ipv4: string | null; ipv6: string | null };
+    platform: { os: string; os_version: string; arch: string };
+    options: { include_drive: boolean };
+    inventory: {
+      apps: string[];
+      sites: string[];
+      certs: string[];
+      dns_zones: string[];
+      mail_domains: string[];
+      mailboxes: number;
+      mariadb_databases: string[];
+      mariadb_users: number;
+      postgres_databases: string[];
+      cron_jobs: number;
+      system_users: string[];
+      panel_users: number;
+      docker_volumes: string[];
+      containers: string[];
+      tailscale: boolean;
+    };
+    sections: { id: string; title: string; est_bytes: number }[];
+  };
+  checks: ImportCheck[];
+  can_import: boolean;
+  resumable: boolean;
+  done_steps: string[];
 };
 
 export type ServerSnapshotEstimate = {

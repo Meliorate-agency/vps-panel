@@ -107,7 +107,7 @@ pub(crate) fn format_spf(v4: Option<&str>, v6: Option<&str>) -> String {
     format!("\"{parts}\"")
 }
 
-const PDNS_SCHEMA: &str = include_str!("pdns_schema.sql");
+pub(crate) const PDNS_SCHEMA: &str = include_str!("pdns_schema.sql");
 
 /// Reads the `dns.ns_pair` setting from `panel.db`. If set as
 /// `ns1.host,ns2.host`, returns the parsed pair (lowercased, no trailing dot).
@@ -154,7 +154,7 @@ fn ns_in_zone(ns_host: &str, zone: &str) -> bool {
     ns_host == zone || ns_host.ends_with(&format!(".{zone}"))
 }
 
-async fn pdns_conn(state: &AppState) -> AgentResult<mysql_async::Conn> {
+pub(crate) async fn pdns_conn(state: &AppState) -> AgentResult<mysql_async::Conn> {
     let mut conn = state.mariadb.pool().get_conn().await?;
     match conn.query_drop(format!("USE `{PDNS_DB}`")).await {
         Ok(()) => Ok(conn),
