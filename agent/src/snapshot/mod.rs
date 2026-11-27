@@ -20,3 +20,4 @@ pub mod format;
 pub mod http_range;
 pub mod inventory;
 pub mod plan;
+pub mod pull;

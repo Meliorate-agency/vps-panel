@@ -194,6 +194,7 @@ pub fn router(state: AppState) -> Router {
         // Server snapshots (move this server to another panel)
         .route("/server-snapshots", get(server_snapshots::list).post(server_snapshots::create))
         .route("/server-snapshots/estimate", get(server_snapshots::estimate))
+        .route("/server-snapshots/pull", post(server_snapshots::pull))
         .route("/server-snapshots/{name}", delete(server_snapshots::delete))
         .route("/server-snapshots/{name}/file", get(server_snapshots::file))
         .route("/notifications/test", post(crate::notify::test))

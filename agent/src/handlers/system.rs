@@ -3,7 +3,7 @@ use crate::exec;
 use crate::fs_atomic;
 use crate::ipc::tasks::TaskHandle;
 use crate::ipc::TaskAccepted;
-use crate::nginx_template::{PanelVhostTemplate, ACME_WEBROOT, PEER_API_LOCATION};
+use crate::nginx_template::{panel_public_locations, PanelVhostTemplate, ACME_WEBROOT};
 use crate::state::AppState;
 use askama::Template;
 use axum::{
@@ -959,6 +959,7 @@ fn render_panel_vhost(
     default_server: bool,
     cert: Option<(&str, &str)>,
 ) -> AgentResult<String> {
+    let public_locations = panel_public_locations();
     PanelVhostTemplate {
         server_name,
         default_server,
@@ -966,7 +967,7 @@ fn render_panel_vhost(
         cert_path: cert.map_or("", |c| c.0),
         key_path: cert.map_or("", |c| c.1),
         acme_webroot: ACME_WEBROOT,
-        peer_location: PEER_API_LOCATION,
+        peer_location: &public_locations,
     }
     .render()
     .map_err(|e| AgentError::Other(anyhow::anyhow!("panel vhost render: {e}")))
@@ -2105,7 +2106,7 @@ mod tests {
         dpkg_status_installed, panel_vhost_serves_https, publickey_hint, render_panel_vhost,
         validate_fqdn,
     };
-    use crate::nginx_template::PEER_API_LOCATION;
+    use crate::nginx_template::{PEER_API_LOCATION, SNAPSHOT_PULL_LOCATION};
 
     #[test]
     fn a_held_package_is_installed() {
@@ -2148,8 +2149,11 @@ mod tests {
             let ssl = cert.is_some();
             assert!(body.contains(PEER_API_LOCATION), "ssl={ssl}");
             assert_eq!(body.matches("location ^~ /api/peer/").count(), 1, "ssl={ssl}");
-            // The peer location, uploads and /, in the one block that proxies.
-            assert_eq!(body.matches("proxy_pass http://127.0.0.1:10000;").count(), 3, "ssl={ssl}");
+            assert!(body.contains(SNAPSHOT_PULL_LOCATION), "ssl={ssl}");
+            assert_eq!(body.matches("location ^~ /api/snapshot-pull/").count(), 1, "ssl={ssl}");
+            // The peer and snapshot-pull locations, uploads and /, in the
+            // one block that proxies.
+            assert_eq!(body.matches("proxy_pass http://127.0.0.1:10000;").count(), 4, "ssl={ssl}");
             assert_eq!(body.matches("location = /api/files/upload {").count(), 1, "ssl={ssl}");
             assert_eq!(body.matches("client_max_body_size 5g;").count(), 1, "ssl={ssl}");
             assert_eq!(body.matches("proxy_request_buffering off;").count(), 1, "ssl={ssl}");

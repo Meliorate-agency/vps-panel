@@ -736,6 +736,11 @@ export const agent = {
       }),
     delete: (name: string) =>
       agentRequest<Ok>({ method: "DELETE", path: `/server-snapshots/${encodeURIComponent(name)}` }),
+    /** Fetches a snapshot from another server's one-time link into
+     *  incoming/. `url` is the link without its fragment; the secret (the
+     *  fragment) travels separately and never on a command line. */
+    pull: (url: string, secret: string) =>
+      agentRequest<TaskAccepted>({ method: "POST", path: "/server-snapshots/pull", body: { url, secret } }),
   },
 
   firewall: {

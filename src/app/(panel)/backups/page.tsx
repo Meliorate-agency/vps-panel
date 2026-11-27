@@ -4,6 +4,7 @@ import styles from "@/components/page.module.css";
 import { runBackupAction } from "@/server-actions/backups";
 import BackupRunner from "./BackupRunner";
 import ServerSnapshots from "./ServerSnapshots";
+import { listLinks } from "@/lib/serverSnapshots/links";
 
 export const dynamic = "force-dynamic";
 
@@ -64,7 +65,7 @@ export default async function BackupsPage() {
 
       <div className={styles.section} style={{ marginTop: 24 }}>
         <h2 className={styles.sectionTitle}>Server snapshot (move this server to another one)</h2>
-        <ServerSnapshots snapshots={serverSnapshots.snapshots} />
+        <ServerSnapshots snapshots={serverSnapshots.snapshots} links={listLinks()} />
       </div>
     </div>
   );

@@ -314,7 +314,7 @@ export function noteFailure(ip: string): void {
   count(`fail|${ip}`, FAILURE_WINDOW_MS, true);
 }
 
-function blocked(ip: string): boolean {
+export function blocked(ip: string): boolean {
   return count(`fail|${ip}`, FAILURE_WINDOW_MS, false) >= MAX_FAILURES;
 }
 

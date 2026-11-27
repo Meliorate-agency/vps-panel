@@ -35,6 +35,29 @@ server {
         proxy_read_timeout 60s;
     }
 
+    # Server snapshots: another server pulls a snapshot here with a one-time
+    # link, from any address, whatever Settings > Panel access allows. The
+    # panel checks the link's secret. Only the exact link path passes.
+    location ^~ /api/snapshot-pull/ {
+        allow all;
+        if ($request_uri !~ "^/api/snapshot-pull/[A-Za-z0-9_-]{22}$") {
+            return 404;
+        }
+        limit_except GET DELETE {
+            deny all;
+        }
+        client_max_body_size 1k;
+        proxy_pass http://127.0.0.1:10000;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_http_version 1.1;
+        proxy_buffering off;
+        proxy_read_timeout 600s;
+        proxy_send_timeout 3600s;
+    }
+
     # Drive/Files uploads. Two things differ from the rest of the panel:
     #
     #   client_max_body_size    matches the agent's 5 GiB per-file ceiling.

@@ -7,6 +7,14 @@ import { writeAudit } from "@/lib/audit";
 import { agentErrorMessage } from "@/lib/redirects";
 import { passphraseProblem } from "@/lib/serverSnapshots/passphrase";
 import { SNAPSHOT_NAME } from "@/lib/serverSnapshots/relay";
+import {
+  LINK_ID,
+  LINK_TTLS_HOURS,
+  createLink,
+  getLink,
+  revokeLink,
+  revokeLinksFor,
+} from "@/lib/serverSnapshots/links";
 
 export type EstimateResult = { ok: true; estimate: ServerSnapshotEstimate } | { ok: false; error: string };
 export type StartResult = { ok: true; taskId: string } | { ok: false; error: string };
@@ -51,11 +59,85 @@ export async function createSnapshotAction(
   }
 }
 
+export type LinkResult =
+  | { ok: true; url: string; expiresAt: number; warning: string | null }
+  | { ok: false; error: string };
+
+/**
+ * A one-time link another server pulls `name` with. The link is returned
+ * once; only a hash of its secret is kept.
+ */
+export async function createLinkAction(name: string, ttlHours: number): Promise<LinkResult> {
+  const s = await requireAdmin();
+  if (!SNAPSHOT_NAME.test(name)) return { ok: false, error: "not a snapshot name" };
+  if (!(LINK_TTLS_HOURS as readonly number[]).includes(ttlHours)) return { ok: false, error: "pick how long the link works" };
+  const list = await agent.serverSnapshots.list().catch(() => null);
+  if (!list?.snapshots.some((x) => x.name === name && x.location === "local")) {
+    return { ok: false, error: "no snapshot of that name was made on this server" };
+  }
+  const link = createLink(name, ttlHours, s.userId);
+  writeAudit({
+    actorId: s.userId,
+    action: "snapshots.link.create",
+    target: name,
+    result: "ok",
+    message: `link ${link.id}, ${ttlHours} h`,
+  });
+  revalidatePath("/backups");
+  return { ok: true, url: link.url, expiresAt: link.expiresAt, warning: link.warning };
+}
+
+export async function revokeLinkAction(id: string): Promise<DeleteResult> {
+  const s = await requireAdmin();
+  if (!LINK_ID.test(id)) return { ok: false, error: "not a link" };
+  const row = getLink(id);
+  if (!row) return { ok: false, error: "no such link" };
+  revokeLink(id);
+  writeAudit({ actorId: s.userId, action: "snapshots.link.revoke", target: row.snapshot, result: "ok", message: `link ${id}` });
+  revalidatePath("/backups");
+  return { ok: true };
+}
+
+/**
+ * On the NEW server: fetch a snapshot from the old one's link. The link is
+ * `https://<panel>/api/snapshot-pull/<id>#<secret>`; the secret (fragment)
+ * goes to the agent apart from the address and is not audited.
+ */
+export async function pullSnapshotAction(link: string): Promise<StartResult> {
+  const s = await requireAdmin();
+  let url: URL;
+  try {
+    url = new URL(link.trim());
+  } catch {
+    return { ok: false, error: "That is not a link." };
+  }
+  const secret = url.hash.replace(/^#/, "");
+  url.hash = "";
+  if (!/^https?:$/.test(url.protocol) || !/^\/api\/snapshot-pull\/[A-Za-z0-9_-]{22}$/.test(url.pathname) || url.search) {
+    return { ok: false, error: "That is not a snapshot link (it looks like https://panel.example.com/api/snapshot-pull/...#...)." };
+  }
+  if (!/^[A-Za-z0-9_-]{43}$/.test(secret)) {
+    return { ok: false, error: "The link is missing its secret (the part after #). Copy the whole link." };
+  }
+  try {
+    const resp = await agent.serverSnapshots.pull(url.toString(), secret);
+    writeAudit({ actorId: s.userId, action: "snapshots.pull", target: url.host, result: "ok" });
+    return { ok: true, taskId: resp.task_id };
+  } catch (e: unknown) {
+    const msg = plain(e);
+    writeAudit({ actorId: s.userId, action: "snapshots.pull", target: url.host, result: "error", message: msg });
+    return { ok: false, error: msg };
+  }
+}
+
 export async function deleteSnapshotAction(name: string): Promise<DeleteResult> {
   const s = await requireAdmin();
   if (!SNAPSHOT_NAME.test(name)) return { ok: false, error: "not a snapshot name" };
   try {
     await agent.serverSnapshots.delete(name);
+    // A link for a file that is gone must not work for a new file that
+    // gets the same name.
+    revokeLinksFor(name);
     writeAudit({ actorId: s.userId, action: "snapshots.delete", target: name, result: "ok" });
     revalidatePath("/backups");
     return { ok: true };

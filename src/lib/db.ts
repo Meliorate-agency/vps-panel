@@ -234,6 +234,25 @@ function applyMigrations(handle: Database.Database) {
       used_by         TEXT,
       created_at      TEXT NOT NULL DEFAULT (datetime('now'))
     );
+    -- Server snapshots: one-time links another server pulls a snapshot
+    -- with (/api/snapshot-pull/<id>). The secret is only in the link's
+    -- fragment; a hash of it is kept. The first server that uses the link
+    -- with the right secret is bound to it (client_id) and may resume.
+    CREATE TABLE IF NOT EXISTS snapshot_links (
+      id              TEXT PRIMARY KEY,
+      snapshot        TEXT NOT NULL,
+      secret_hash     TEXT NOT NULL,
+      created_by      INTEGER,
+      created_at      INTEGER NOT NULL,
+      expires_at      INTEGER NOT NULL,
+      client_id       TEXT,
+      claimed_at      INTEGER,
+      claimed_ip      TEXT,
+      bytes_served    INTEGER NOT NULL DEFAULT 0,
+      failures        INTEGER NOT NULL DEFAULT 0,
+      completed_at    INTEGER,
+      revoked_at      INTEGER
+    );
   `);
 
   migrateSitesSchema(handle);

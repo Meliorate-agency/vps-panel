@@ -482,7 +482,7 @@ pub async fn startup_cleanup() {
     }
 }
 
-async fn ensure_private_dir(path: &Path) -> AgentResult<()> {
+pub(crate) async fn ensure_private_dir(path: &Path) -> AgentResult<()> {
     crate::fs_atomic::ensure_dir(path, 0o700).await?;
     crate::fs_atomic::chmod(path, 0o700).await?;
     crate::fs_atomic::chown_blocking(path, 0, 0)?;

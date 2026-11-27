@@ -29,6 +29,10 @@ export function relaySnapshotFile(opts: {
   method: "GET" | "HEAD";
   range: string | null;
   ifRange: string | null;
+  /** Bytes as they go out (the pull link counts what it served). */
+  onBytes?: (n: number) => void;
+  /** Once the body ended or the client went away. */
+  onEnd?: () => void;
 }): Promise<Response> {
   const headers: Record<string, string> = { Authorization: `Bearer ${config.agentToken}` };
   if (opts.range) headers.Range = opts.range;
@@ -69,7 +73,31 @@ export function relaySnapshotFile(opts: {
           resolve(new Response(null, { status, headers: out }));
           return;
         }
-        resolve(new Response(relayBody(res), { status, headers: out }));
+        if (!opts.onBytes && !opts.onEnd) {
+          resolve(new Response(relayBody(res), { status, headers: out }));
+          return;
+        }
+        let ended = false;
+        const end = () => {
+          if (ended) return;
+          ended = true;
+          opts.onEnd?.();
+        };
+        // A transfer that broke off (the agent connection dropped) ends here
+        // too, so what was sent before the break is counted.
+        res.on("close", end);
+        const counted = relayBody(res, end).pipeThrough(
+          new TransformStream<Uint8Array, Uint8Array>({
+            transform(chunk, controller) {
+              opts.onBytes?.(chunk.byteLength);
+              controller.enqueue(chunk);
+            },
+            flush() {
+              end();
+            },
+          }),
+        );
+        resolve(new Response(counted, { status, headers: out }));
       },
     );
     upstream.on("error", (e) => resolve(new Response(`agent unreachable: ${e.message}`, { status: 502 })));

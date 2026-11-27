@@ -7,6 +7,7 @@ use crate::ipc::{OkResponse, TaskAccepted};
 use crate::snapshot::export::{self, Estimate, ExportReq};
 use crate::snapshot::format::{self, Sidecar};
 use crate::snapshot::http_range;
+use crate::snapshot::pull::PullReq;
 use crate::state::AppState;
 use axum::extract::{Path, Query, State};
 use axum::http::{HeaderMap, Method};
@@ -87,6 +88,12 @@ pub async fn estimate(State(state): State<AppState>, Query(q): Query<EstimateQue
 
 pub async fn create(State(state): State<AppState>, Json(req): Json<ExportReq>) -> AgentResult<Json<TaskAccepted>> {
     let task_id = export::start(state, req).await?;
+    Ok(Json(TaskAccepted { task_id }))
+}
+
+/// Fetch a snapshot from another server's one-time link into incoming/.
+pub async fn pull(State(state): State<AppState>, Json(req): Json<PullReq>) -> AgentResult<Json<TaskAccepted>> {
+    let task_id = crate::snapshot::pull::start(state, req).await?;
     Ok(Json(TaskAccepted { task_id }))
 }
 

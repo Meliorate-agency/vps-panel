@@ -517,6 +517,85 @@ patch_panel_vhost_peer_api() {
 }
 patch_panel_vhost_peer_api
 
+# Server snapshots: another server pulls a snapshot from
+# /api/snapshot-pull/<id> with a one-time link, from any address, past
+# Settings > Panel access (the panel checks the link's secret). New vhosts
+# carry the location (the agent's templates and
+# scripts/nginx/panel.conf.template); this adds it to an existing one, before
+# every `location /` that proxies to the panel. Idempotent; reverted if
+# nginx -t fails.
+patch_panel_vhost_snapshot_pull() {
+  local vhost
+  vhost="$(grep -rls '^# vps-panel-host:' /etc/nginx/sites-available/ 2>/dev/null | head -1)" || true
+  [[ -n "$vhost" ]] || return 0
+  grep -q 'location \^~ /api/snapshot-pull/' "$vhost" && return 0
+
+  local backup_dir=/var/backups/vps-panel-config
+  install -d -m 0700 "$backup_dir"
+  local backup="$backup_dir/$(basename "$vhost").bak-$(date +%Y%m%d%H%M%S)"
+  echo "adding the server snapshot pull location to $vhost"
+  cp -a "$vhost" "$backup"
+
+  awk '
+    function pull(ind) {
+      print ind "# Server snapshots: another server pulls a snapshot here with a one-time";
+      print ind "# link, from any address, whatever Settings > Panel access allows. The";
+      print ind "# panel checks the link'"'"'s secret. Only the exact link path passes.";
+      print ind "location ^~ /api/snapshot-pull/ {";
+      print ind "    allow all;";
+      print ind "    if ($request_uri !~ \"^/api/snapshot-pull/[A-Za-z0-9_-]{22}$\") {";
+      print ind "        return 404;";
+      print ind "    }";
+      print ind "    limit_except GET DELETE {";
+      print ind "        deny all;";
+      print ind "    }";
+      print ind "    client_max_body_size 1k;";
+      print ind "    proxy_pass http://127.0.0.1:10000;";
+      print ind "    proxy_set_header Host $host;";
+      print ind "    proxy_set_header X-Real-IP $remote_addr;";
+      print ind "    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;";
+      print ind "    proxy_set_header X-Forwarded-Proto $scheme;";
+      print ind "    proxy_http_version 1.1;";
+      print ind "    proxy_buffering off;";
+      print ind "    proxy_read_timeout 600s;";
+      print ind "    proxy_send_timeout 3600s;";
+      print ind "}";
+      print "";
+    }
+    holding {
+      buf = buf $0 "\n";
+      if ($0 ~ /^[[:space:]]*[}]/) {
+        if (buf ~ /proxy_pass http:\/\/127\.0\.0\.1:10000;/) {
+          match(held, /^[[:space:]]*/);
+          pull(substr(held, 1, RLENGTH));
+        }
+        print held;
+        printf "%s", buf;
+        holding = 0;
+      }
+      next;
+    }
+    /^[[:space:]]*location \/ [{]/ { held = $0; buf = ""; holding = 1; next; }
+    { print }
+    END { if (holding) { print held; printf "%s", buf; } }
+  ' "$backup" > "$vhost" || {
+    # Never the reason an update stops: the panel works without it.
+    echo "could not add the server snapshot pull location; $vhost left as it was" >&2
+    cp -a "$backup" "$vhost"
+    return 0
+  }
+
+  if nginx -t >/dev/null 2>&1; then
+    systemctl reload nginx || true
+    echo "server snapshot pull location added; nginx reloaded"
+  else
+    echo "nginx -t failed after patching $vhost - reverting" >&2
+    cp -a "$backup" "$vhost"
+    nginx -t >/dev/null 2>&1 || echo "WARNING: nginx config still invalid" >&2
+  fi
+}
+patch_panel_vhost_snapshot_pull
+
 # HSTS for the name itself only, in vhosts written before the agent's
 # templates dropped includeSubDomains. With it, a browser that had visited
 # https://example.com refused plain HTTP on every subdomain for two years,

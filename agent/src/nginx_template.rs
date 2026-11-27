@@ -31,6 +31,43 @@ pub const PEER_API_LOCATION: &str = r#"    # My Networks: the other servers in a
 
 "#;
 
+/// Server snapshots: another server pulls a snapshot with a one-time link
+/// (`/api/snapshot-pull/<id>`), from any address, past Settings > Panel
+/// access; the panel checks the link's secret. Only that exact path passes,
+/// only GET (and HEAD) and DELETE. The file is many gigabytes: nothing
+/// buffered, long timeouts. Copies: scripts/nginx/panel.conf.template and
+/// the update.sh backfill.
+pub const SNAPSHOT_PULL_LOCATION: &str = r#"    # Server snapshots: another server pulls a snapshot here with a one-time
+    # link, from any address, whatever Settings > Panel access allows. The
+    # panel checks the link's secret. Only the exact link path passes.
+    location ^~ /api/snapshot-pull/ {
+        allow all;
+        if ($request_uri !~ "^/api/snapshot-pull/[A-Za-z0-9_-]{22}$") {
+            return 404;
+        }
+        limit_except GET DELETE {
+            deny all;
+        }
+        client_max_body_size 1k;
+        proxy_pass http://127.0.0.1:10000;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_http_version 1.1;
+        proxy_buffering off;
+        proxy_read_timeout 600s;
+        proxy_send_timeout 3600s;
+    }
+
+"#;
+
+/// The locations other servers reach a panel's server blocks at, past the
+/// access list: My Networks and server snapshot pulls.
+pub fn panel_public_locations() -> String {
+    format!("{PEER_API_LOCATION}{SNAPSHOT_PULL_LOCATION}")
+}
+
 #[derive(Template)]
 #[template(path = "app_vhost.conf", escape = "none")]
 pub struct AppVhostTemplate<'a> {
@@ -54,7 +91,7 @@ pub struct PanelVhostTemplate<'a> {
     pub cert_path: &'a str,
     pub key_path: &'a str,
     pub acme_webroot: &'a str,
-    /// PEER_API_LOCATION.
+    /// PEER_API_LOCATION and SNAPSHOT_PULL_LOCATION (panel_public_locations).
     pub peer_location: &'a str,
 }
 
