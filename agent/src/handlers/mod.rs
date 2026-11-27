@@ -25,6 +25,7 @@ pub mod privacy_subject;
 pub mod quick_install;
 pub mod redirects;
 pub mod sites;
+pub mod server_snapshots;
 pub mod ssh;
 pub mod ssl;
 pub mod swap;
@@ -190,6 +191,11 @@ pub fn router(state: AppState) -> Router {
         .route("/backups", get(backups::list).post(backups::run))
         .route("/backups/run", post(backups::run))
         .route("/backups/restore", post(backups::restore))
+        // Server snapshots (move this server to another panel)
+        .route("/server-snapshots", get(server_snapshots::list).post(server_snapshots::create))
+        .route("/server-snapshots/estimate", get(server_snapshots::estimate))
+        .route("/server-snapshots/{name}", delete(server_snapshots::delete))
+        .route("/server-snapshots/{name}/file", get(server_snapshots::file))
         .route("/notifications/test", post(crate::notify::test))
         .route("/notifications/send", post(crate::notify::send_event))
         // Firewall

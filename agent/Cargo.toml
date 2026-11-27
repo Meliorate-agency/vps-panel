@@ -40,3 +40,6 @@ url.workspace = true
 regex.workspace = true
 futures.workspace = true
 tempfile.workspace = true
+tar.workspace = true
+zstd.workspace = true
+age.workspace = true

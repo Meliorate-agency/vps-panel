@@ -130,6 +130,9 @@ const PROTECTED: &[&str] = &[
     // The database dumps a backup takes (every database in plain SQL). They
     // were under /var/lib/vps-panel; the Backups root is /var/backups.
     "/var/backups/vps-panel-db-dumps",
+    // Server snapshots: every secret of the server in one file, handed out
+    // only by the audited snapshot download.
+    "/var/backups/vps-panel-snapshots",
     // Credentials and keys.
     "/etc/shadow",
     "/etc/gshadow",

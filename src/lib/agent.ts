@@ -712,6 +712,32 @@ export const agent = {
       }),
   },
 
+  /** Server snapshots: one encrypted file of the whole server, for moving
+   *  it to a freshly installed panel. The file itself goes out through
+   *  /api/server-snapshots/[name]/download. */
+  serverSnapshots: {
+    list: () =>
+      agentRequest<ServerSnapshotList>({ method: "GET", path: "/server-snapshots", timeoutMs: READ_MS }),
+    /** Walks everything a snapshot would hold (cached 5 minutes in the
+     *  agent): no timeout, a large Drive takes a while the first time. */
+    estimate: (drive: boolean) =>
+      agentRequest<ServerSnapshotEstimate>({
+        method: "GET",
+        path: "/server-snapshots/estimate",
+        query: { drive },
+      }),
+    /** The passphrase only travels in this body: never stored, logged or
+     *  audited. */
+    create: (passphrase: string, includeDrive: boolean, pauseDocker: boolean) =>
+      agentRequest<TaskAccepted>({
+        method: "POST",
+        path: "/server-snapshots",
+        body: { passphrase, include_drive: includeDrive, pause_docker: pauseDocker },
+      }),
+    delete: (name: string) =>
+      agentRequest<Ok>({ method: "DELETE", path: `/server-snapshots/${encodeURIComponent(name)}` }),
+  },
+
   firewall: {
     status: () => agentRequest<FirewallStatus>({ method: "GET", path: "/firewall/status" }),
     allow: (port: number, proto = "tcp") =>
@@ -1310,6 +1336,49 @@ export type QuickInstallRecipe = {
 
 export type Ok = { ok: boolean };
 export type TaskAccepted = { task_id: string };
+
+export type ServerSnapshotSection = {
+  id: string;
+  bytes: number;
+  files: number;
+  skipped: number;
+  changed: number;
+};
+
+export type ServerSnapshot = {
+  /** The stem: `<host>-<YYYYMMDD-HHMMSS>Z`. */
+  name: string;
+  kind: string;
+  format: number;
+  size: number;
+  sha256: string;
+  created_at: string;
+  panel_commit: string;
+  panel_dirty: boolean;
+  source_host: string;
+  include_drive: boolean;
+  sections: ServerSnapshotSection[];
+  /** "local" (made here) or "pulled". */
+  origin: string;
+  /** Which folder it is in: made here, or pulled from another server. */
+  location: "local" | "incoming";
+};
+
+export type ServerSnapshotList = {
+  snapshots: ServerSnapshot[];
+  free_bytes: number | null;
+};
+
+export type ServerSnapshotEstimate = {
+  include_drive: boolean;
+  sections: { id: string; title: string; bytes: number; files: number }[];
+  database_bytes: number;
+  total_bytes: number;
+  need_bytes: number;
+  free_bytes: number | null;
+  fits: boolean;
+  drive_bytes: number;
+};
 
 export type SysInfo = {
   uptime_secs: number;

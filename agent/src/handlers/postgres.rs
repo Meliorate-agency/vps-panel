@@ -119,11 +119,11 @@ const RESERVED_USERS: &[&str] = &[
 
 const RESERVED_DBS: &[&str] = &["postgres", "template0", "template1"];
 
-fn is_reserved_user(s: &str) -> bool {
+pub(crate) fn is_reserved_user(s: &str) -> bool {
     RESERVED_USERS.iter().any(|r| r.eq_ignore_ascii_case(s)) || s.starts_with("pg_")
 }
 
-fn is_reserved_db(s: &str) -> bool {
+pub(crate) fn is_reserved_db(s: &str) -> bool {
     RESERVED_DBS.iter().any(|r| r.eq_ignore_ascii_case(s))
 }
 

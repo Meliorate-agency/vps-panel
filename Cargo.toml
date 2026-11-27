@@ -39,6 +39,12 @@ url = "2"
 regex = "1"
 futures = "0.3"
 tempfile = "3"
+# Server snapshots: one encrypted file of the whole server
+# (agent/src/snapshot). tar + zstd + age, streamed in-process so the
+# passphrase never reaches a command line.
+tar = "0.4"
+zstd = { version = "0.13", features = ["zstdmt"] }
+age = "0.11"
 
 [profile.release]
 opt-level = 3

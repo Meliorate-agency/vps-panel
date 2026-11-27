@@ -9,6 +9,7 @@ mod ipc;
 mod nginx_template;
 mod notify;
 mod server_ip;
+mod snapshot;
 mod state;
 mod systemd_template;
 mod validate;
@@ -93,6 +94,9 @@ async fn serve() -> Result<()> {
     }
     // Settings > Privacy: log format and log retention, as stored.
     tokio::spawn(handlers::privacy::ensure_at_startup(state.clone()));
+    // A server snapshot the last agent died writing: its half file and
+    // staging go, and the containers it paused run again.
+    tokio::spawn(snapshot::export::startup_cleanup());
     // Collects /files trash entries past their 30-day retention.
     tokio::spawn(handlers::files::purge_loop());
     // Failed and stopped services, full disks, a stuck mail queue and the

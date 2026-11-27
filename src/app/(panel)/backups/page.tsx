@@ -3,11 +3,15 @@ import Table from "@/components/Table/Table";
 import styles from "@/components/page.module.css";
 import { runBackupAction } from "@/server-actions/backups";
 import BackupRunner from "./BackupRunner";
+import ServerSnapshots from "./ServerSnapshots";
 
 export const dynamic = "force-dynamic";
 
 export default async function BackupsPage() {
-  const snapshots = await agent.backups.list().catch(() => []);
+  const [snapshots, serverSnapshots] = await Promise.all([
+    agent.backups.list().catch(() => []),
+    agent.serverSnapshots.list().catch(() => ({ snapshots: [], free_bytes: null })),
+  ]);
   return (
     <div>
       <div className={styles.head}>
@@ -57,6 +61,11 @@ export default async function BackupsPage() {
         }))}
         empty="No snapshots yet. Click 'Run backup now' to create one."
       />
+
+      <div className={styles.section} style={{ marginTop: 24 }}>
+        <h2 className={styles.sectionTitle}>Server snapshot (move this server to another one)</h2>
+        <ServerSnapshots snapshots={serverSnapshots.snapshots} />
+      </div>
     </div>
   );
 }

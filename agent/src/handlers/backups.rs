@@ -176,6 +176,11 @@ pub async fn run(
     if state.tasks.any_live_with_prefix("backups.") {
         return Err(AgentError::Conflict("a backup or restore is already running".into()));
     }
+    if state.tasks.any_live_with_prefix("snapshots.") {
+        return Err(AgentError::Conflict(
+            "a server snapshot is being made, pulled or imported; wait for it to finish".into(),
+        ));
+    }
     let task = state.tasks.create("backups.run");
     let task_id = task.id.clone();
     let cfg = state.config.clone();
@@ -445,6 +450,11 @@ pub async fn restore(
     let target = validate_restore(&req.snapshot, &req.target)?;
     if state.tasks.any_live_with_prefix("backups.") {
         return Err(AgentError::Conflict("a backup or restore is already running".into()));
+    }
+    if state.tasks.any_live_with_prefix("snapshots.") {
+        return Err(AgentError::Conflict(
+            "a server snapshot is being made, pulled or imported; wait for it to finish".into(),
+        ));
     }
     // Restored files keep their original owners and modes; the root-only
     // parent keeps copies of secrets away from other local users.

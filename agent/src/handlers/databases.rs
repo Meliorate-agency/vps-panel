@@ -121,11 +121,11 @@ const RESERVED_DBS: &[&str] = &[
     "panel",
 ];
 
-fn is_reserved_user(s: &str) -> bool {
+pub(crate) fn is_reserved_user(s: &str) -> bool {
     RESERVED_USERS.iter().any(|r| r.eq_ignore_ascii_case(s))
 }
 
-fn is_reserved_db(s: &str) -> bool {
+pub(crate) fn is_reserved_db(s: &str) -> bool {
     RESERVED_DBS.iter().any(|r| r.eq_ignore_ascii_case(s))
 }
 
@@ -241,7 +241,7 @@ fn quote_ident(s: &str) -> String {
 
 /// `user`@`host` for a GRANT / REVOKE. The anonymous user has no identifier
 /// spelling.
-fn quote_account(user: &str, host: &str) -> String {
+pub(crate) fn quote_account(user: &str, host: &str) -> String {
     let user = if user.is_empty() { "''".to_string() } else { quote_ident(user) };
     format!("{user}@{}", quote_ident(host))
 }
