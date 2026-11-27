@@ -48,6 +48,7 @@ const SECTIONS: { group: string; items: NavItem[] }[] = [
       { href: "/mailboxes", label: "Mailboxes", icon: "mailboxes" },
       { href: "/databases", label: "Databases", icon: "databases" },
       { href: "/backups", label: "Backups", icon: "backups" },
+      { href: "/server-snapshots", label: "Server snapshots", icon: "serverSnapshots" },
     ],
   },
   {

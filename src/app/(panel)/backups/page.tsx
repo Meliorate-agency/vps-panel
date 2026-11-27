@@ -1,28 +1,39 @@
+import Link from "next/link";
 import { agent } from "@/lib/agent";
 import Table from "@/components/Table/Table";
 import styles from "@/components/page.module.css";
 import { runBackupAction } from "@/server-actions/backups";
 import BackupRunner from "./BackupRunner";
-import ServerSnapshots from "./ServerSnapshots";
-import { listLinks } from "@/lib/serverSnapshots/links";
 
 export const dynamic = "force-dynamic";
 
+/**
+ * Backups: restic copies of this server's files and databases, kept on
+ * this server for getting things back. Restic calls each copy a
+ * "snapshot"; the page says "backup" so it is never mistaken for a server
+ * snapshot (the move to another server, /server-snapshots).
+ */
 export default async function BackupsPage() {
-  const [snapshots, serverSnapshots] = await Promise.all([
-    agent.backups.list().catch(() => []),
-    agent.serverSnapshots.list().catch(() => ({ snapshots: [], free_bytes: null })),
-  ]);
+  const backups = await agent.backups.list().catch(() => []);
   return (
     <div>
       <div className={styles.head}>
         <div>
           <h1 className={styles.title}>Backups</h1>
-          <div className={styles.subtitle}>restic-managed encrypted snapshots.</div>
+          <div className={styles.subtitle}>
+            Encrypted copies of this server&apos;s files and databases, for getting things back.
+          </div>
         </div>
         <div className={styles.actions}>
           <BackupRunner action={runBackupAction} />
         </div>
+      </div>
+
+      <div className={styles.muted} style={{ fontSize: 13, marginBottom: 12 }}>
+        Each backup holds the apps, Drive, mailboxes, the panel&apos;s settings and a dump of every database.
+        Older ones are thinned out on their own (7 daily, 4 weekly, 6 monthly are kept). They are stored
+        on this server, so they do not help if the server itself is lost. To move the whole server to
+        another one, use <Link href="/server-snapshots">Server snapshots</Link>.
       </div>
 
       {/* Where the repository password lives (install.sh writes it; the
@@ -37,7 +48,7 @@ export default async function BackupsPage() {
           fontSize: 13,
         }}
       >
-        <strong>Keep a copy of the backup password off this server.</strong> Every snapshot is
+        <strong>Keep a copy of the backup password off this server.</strong> Every backup is
         encrypted with one password, and it is stored only here: as{" "}
         <span className={styles.code}>RESTIC_PASSWORD</span> in{" "}
         <span className={styles.code}>/etc/vps-panel/.env</span>, in{" "}
@@ -49,24 +60,19 @@ export default async function BackupsPage() {
 
       <Table
         columns={[
-          { key: "id", label: "Snapshot ID" },
+          { key: "id", label: "Backup" },
           { key: "time", label: "When" },
           { key: "paths", label: "Paths" },
           { key: "host", label: "Host", width: "150px" },
         ]}
-        rows={snapshots.map((s) => ({
+        rows={backups.map((s) => ({
           id: <span className={styles.code}>{s.id}</span>,
           time: <span className={styles.muted}>{s.time}</span>,
           paths: <span className={styles.code}>{s.paths.join(", ")}</span>,
           host: s.hostname,
         }))}
-        empty="No snapshots yet. Click 'Run backup now' to create one."
+        empty="No backups yet. Click 'Run backup now' to make one."
       />
-
-      <div className={styles.section} style={{ marginTop: 24 }}>
-        <h2 className={styles.sectionTitle}>Server snapshot (move this server to another one)</h2>
-        <ServerSnapshots snapshots={serverSnapshots.snapshots} links={listLinks()} />
-      </div>
     </div>
   );
 }

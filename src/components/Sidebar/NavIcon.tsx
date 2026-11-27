@@ -111,6 +111,16 @@ const GLYPHS = {
       <path d="M9.5 14h5" />
     </>
   ),
+  // A two-unit server with an arrow leaving it: the whole server, moved.
+  serverSnapshots: (
+    <>
+      <rect x="2.5" y="4" width="11.5" height="7" rx="1.5" />
+      <rect x="2.5" y="13" width="11.5" height="7" rx="1.5" />
+      <path d="M5.5 7.5h2M5.5 16.5h2" />
+      <path d="M16.5 12h5" />
+      <path d="M19 9.5L21.5 12L19 14.5" />
+    </>
+  ),
   terminal: (
     <>
       <rect x="2.5" y="4" width="19" height="16" rx="2" />

@@ -39,28 +39,24 @@ function when(iso: string): string {
 }
 
 /**
- * Backups > Server snapshot: makes one encrypted file of the whole server,
- * lists the files, downloads and deletes them. A freshly installed panel on
- * another server imports such a file.
+ * The Server snapshots page: makes one encrypted file of the whole server,
+ * lists the files, links, downloads and deletes them, and on a freshly
+ * installed panel imports one.
  */
 export default function ServerSnapshots({
   snapshots,
   links,
+  fresh,
 }: {
   snapshots: ServerSnapshot[];
   links: LinkView[];
+  /** This panel hosts nothing yet: Import is offered (only then can it run). */
+  fresh: boolean;
 }) {
   const [panel, setPanel] = useState<null | "create" | "pull" | { link: string } | { importing: string }>(null);
   return (
     <div>
-      <div style={{ display: "flex", gap: 12, alignItems: "flex-start", marginBottom: 12, flexWrap: "wrap" }}>
-        <div style={{ flex: "1 1 420px", fontSize: 13, color: "var(--text-dim)" }}>
-          One encrypted file with everything this server hosts: apps, sites, certificates, every
-          database, DNS zones, mailboxes, cron jobs, SSH keys, Docker volumes, accounts, settings and,
-          if you choose, Drive. A freshly installed panel on another server imports it and takes over.
-          It is encrypted with a passphrase you choose here; without it nobody can open the file,
-          you included.
-        </div>
+      <div style={{ display: "flex", gap: 12, justifyContent: "flex-end", marginBottom: 12, flexWrap: "wrap" }}>
         {panel === null && (
           <div style={{ display: "flex", gap: 8 }}>
             <button className={styles.btn} onClick={() => setPanel("create")}>
@@ -93,7 +89,7 @@ export default function ServerSnapshots({
           { key: "made", label: "Made" },
           { key: "size", label: "Size", width: "100px" },
           { key: "drive", label: "Drive", width: "70px" },
-          { key: "actions", label: "", width: "360px" },
+          { key: "actions", label: "" },
         ]}
         rowKey={(_, i) => snapshots[i]?.name ?? i}
         rows={snapshots.map((s) => ({
@@ -105,6 +101,11 @@ export default function ServerSnapshots({
                 {s.source_host || "this server"}
                 {s.panel_commit ? ` · panel ${s.panel_commit.slice(0, 7)}${s.panel_dirty ? " (local changes)" : ""}` : ""}
               </div>
+              {s.location === "incoming" && !fresh && (
+                <div className={styles.muted} style={{ fontSize: 11 }}>
+                  Import it on a freshly installed panel: this one already hosts apps or sites.
+                </div>
+              )}
             </div>
           ),
           made: <span className={styles.muted}>{when(s.created_at)}</span>,
@@ -124,13 +125,15 @@ export default function ServerSnapshots({
                     : ""}
                 </button>
               )}
-              <button
-                className={styles.btnGhost}
-                onClick={() => setPanel({ importing: s.name })}
-                title="Make THIS server what the snapshot describes"
-              >
-                Import
-              </button>
+              {fresh && (
+                <button
+                  className={styles.btnGhost}
+                  onClick={() => setPanel({ importing: s.name })}
+                  title="Make THIS server what the snapshot describes"
+                >
+                  Import
+                </button>
+              )}
               <a className={styles.btnGhost} href={`/api/server-snapshots/${encodeURIComponent(s.name)}/download`}>
                 Download
               </a>

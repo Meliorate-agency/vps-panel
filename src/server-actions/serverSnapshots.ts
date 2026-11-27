@@ -83,7 +83,7 @@ export async function createLinkAction(name: string, ttlHours: number): Promise<
     result: "ok",
     message: `link ${link.id}, ${ttlHours} h`,
   });
-  revalidatePath("/backups");
+  revalidatePath("/server-snapshots");
   return { ok: true, url: link.url, expiresAt: link.expiresAt, warning: link.warning };
 }
 
@@ -94,7 +94,7 @@ export async function revokeLinkAction(id: string): Promise<DeleteResult> {
   if (!row) return { ok: false, error: "no such link" };
   revokeLink(id);
   writeAudit({ actorId: s.userId, action: "snapshots.link.revoke", target: row.snapshot, result: "ok", message: `link ${id}` });
-  revalidatePath("/backups");
+  revalidatePath("/server-snapshots");
   return { ok: true };
 }
 
@@ -193,7 +193,7 @@ export async function deleteSnapshotAction(name: string): Promise<DeleteResult> 
     // gets the same name.
     revokeLinksFor(name);
     writeAudit({ actorId: s.userId, action: "snapshots.delete", target: name, result: "ok" });
-    revalidatePath("/backups");
+    revalidatePath("/server-snapshots");
     return { ok: true };
   } catch (e: unknown) {
     const msg = plain(e);
