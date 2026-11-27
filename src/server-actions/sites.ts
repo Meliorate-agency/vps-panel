@@ -2,7 +2,7 @@
 
 import { revalidatePath } from "next/cache";
 import { redirect } from "next/navigation";
-import { agent, AgentError, type SiteMode } from "@/lib/agent";
+import { agent, AgentError, type SiteMode, type SiteStatus } from "@/lib/agent";
 import { isSubdomainName } from "@/lib/domainName";
 import { requireAdmin } from "@/lib/auth";
 import { writeAudit } from "@/lib/audit";
@@ -42,6 +42,14 @@ function resolveRoute(
     const port = Number(rawPort ?? 0);
     if (!Number.isInteger(port) || port < 1 || port > 65535) {
       return { error: "upstream_port must be 1..65535" };
+    }
+    // Mirrors the agent's build_route, in the same words: nginx listens on
+    // 80 and 443, so such a site would proxy to itself. Refused here so that
+    // Replace stops before its delete instead of failing in the create after.
+    if (port === 80 || port === 443) {
+      return {
+        error: `upstream_port ${port} is nginx itself, so the site would proxy to itself; use the port the app listens on`,
+      };
     }
     return { mode: "port", upstreamPort: port, folderPath: null };
   }
@@ -210,7 +218,15 @@ async function doCreate(
       result: "error",
       message: msg,
     });
-    if (e instanceof AgentError && e.status === 409) {
+    // Replace / Adopt are offered only when the vhost is already on the
+    // server. The agent refuses with 409 for other reasons too (www.<d> next
+    // to <d> with Force www, say): those must show the agent's reason, and
+    // Replace would only run into the same refusal.
+    if (
+      e instanceof AgentError &&
+      e.status === 409 &&
+      e.body.includes(`site for ${domain} already exists`)
+    ) {
       return { ok: false, error: msg, conflict: "agent_only", domain };
     }
     return { ok: false, error: msg };
@@ -315,6 +331,47 @@ export async function createSiteAction(
   return siteResult;
 }
 
+/** What GET /sites/<d>/status reports about the www name besides the cert.
+ *  An agent from before the www clash refusals leaves both out, and such an
+ *  agent does not refuse the create either. */
+type SiteWwwFacts = {
+  /** The vhost file, other than the ones the delete removes, that serves www.<d>. */
+  www_served_by?: string | null;
+  /** For www.<d>: <d>, when its vhost answers www.<d> through Force www. */
+  force_www_parent?: string | null;
+};
+
+/**
+ * The reason the agent would refuse to create `domain` again after Replace
+ * has deleted it, or null. Asked with a status read, which changes nothing.
+ */
+async function wwwClashBeforeReplace(domain: string, forceWww: boolean): Promise<string | null> {
+  let facts: SiteStatus & SiteWwwFacts;
+  try {
+    facts = (await agent.sites.status(domain)) as SiteStatus & SiteWwwFacts;
+  } catch (e: unknown) {
+    // Without the answer the replace could end with the site deleted and
+    // not created again, so it does not start.
+    const msg = e instanceof Error ? e.message : String(e);
+    return `could not check ${domain} on the server before replacing it, so nothing was changed: ${msg}`;
+  }
+  if (forceWww && facts.www_served_by) {
+    return (
+      `www.${domain} is served by a vhost of its own (${facts.www_served_by}), so nginx would ` +
+      `ignore Force www on ${domain}. Nothing was replaced: remove the www.${domain} site ` +
+      `first, or replace with Force www off.`
+    );
+  }
+  if (facts.force_www_parent) {
+    const parent = facts.force_www_parent;
+    return (
+      `${parent} already serves ${domain} through Force www. Nothing was replaced: turn ` +
+      `Force www off on ${parent} first, then replace ${domain}.`
+    );
+  }
+  return null;
+}
+
 export async function replaceSiteAction(
   _prev: ActionResult | null,
   fd: FormData,
@@ -329,6 +386,21 @@ export async function replaceSiteAction(
 
   const collision = checkAppSubdomainCollision(domain);
   if (collision) return collision;
+
+  // The agent's create refuses a www clash, but only after the delete below
+  // has run, so the operator would be left with no site at all. The same
+  // conditions are asked first, and nothing is deleted while one holds.
+  const clash = await wwwClashBeforeReplace(domain, forceWwwRedirect);
+  if (clash) {
+    writeAudit({
+      actorId: s.userId,
+      action: "sites.replace",
+      target: domain,
+      result: "error",
+      message: clash,
+    });
+    return { ok: false, error: clash };
+  }
 
   // The agent's site delete also removes the name's A/AAAA records from a
   // panel-managed parent zone, and its create only writes them again while

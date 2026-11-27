@@ -82,6 +82,16 @@ pub struct SiteStatus {
     /// ride on `<d>`'s cert. The UI shows "via <parent>" and sends renewals
     /// to the parent.
     pub covered_by: Option<String>,
+    /// The sites-enabled file, other than the ones a delete of `domain`
+    /// removes, whose vhost serves `www.<domain>`. While there is one, a
+    /// create of `domain` with Force www is refused. The panel's Replace
+    /// asks this before it deletes the site, because the refusal would only
+    /// come after the delete and leave the site gone.
+    pub www_served_by: Option<String>,
+    /// For `www.<d>`: `<d>` when its site vhost already answers this name
+    /// through Force www, which refuses a create of `www.<d>` (asked by the
+    /// panel's Replace for the same reason).
+    pub force_www_parent: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -385,6 +395,104 @@ async fn spawn_ssl_task(state: &AppState, domain: String, route: RouteSpec) -> S
     task_id
 }
 
+/// Does this vhost have a server block whose server_name lists `name`
+/// exactly? A wildcard is not counted: nginx prefers an exact name over it,
+/// so the two do not clash.
+fn vhost_serves_name(vhost: &str, name: &str) -> bool {
+    vhost.lines().any(|line| {
+        let Some(rest) = line.trim_start().strip_prefix("server_name") else {
+            return false;
+        };
+        if !rest.starts_with([' ', '\t']) {
+            return false;
+        }
+        let names = rest.split(';').next().unwrap_or("");
+        names.split_whitespace().any(|n| n.eq_ignore_ascii_case(name))
+    })
+}
+
+/// For `www.<d>`, the `<d>` whose Force www vhost may already answer it.
+fn www_parent(domain: &str) -> Option<&str> {
+    domain
+        .strip_prefix("www.")
+        .filter(|parent| is_safe_subdomain(parent))
+}
+
+/// Two vhosts with the same server_name only make `nginx -t` warn and pass,
+/// and nginx then serves whichever loads first: the other one is ignored
+/// without a word while the panel lists it as created. A `www.<d>` site
+/// next to `<d>` with Force www (its vhost has a block for www.<d>) is that
+/// clash, so it is refused here with what to change instead. The vhost on
+/// disk is asked rather than the panel.db row: it is what nginx loads, and a
+/// site made through the MCP tool has no row.
+///
+/// This half is for creating `www.<d>` while `<d>` already answers it.
+async fn refuse_www_site_under_force_www(domain: &str) -> AgentResult<()> {
+    if let Some(parent) = force_www_parent_serving(domain).await {
+        return Err(AgentError::Conflict(format!(
+            "{parent} already serves {domain} through Force www; \
+             turn Force www off on {parent} first, then add {domain} as its own site"
+        )));
+    }
+    Ok(())
+}
+
+/// For `www.<d>`: `<d>` when its site vhost already answers `www.<d>`
+/// through Force www.
+async fn force_www_parent_serving(domain: &str) -> Option<&str> {
+    let parent = www_parent(domain)?;
+    let parent_vhost = format!("/etc/nginx/sites-enabled/site-{parent}");
+    tokio::fs::read_to_string(&parent_vhost)
+        .await
+        .is_ok_and(|vhost| vhost_serves_name(&vhost, domain))
+        .then_some(parent)
+}
+
+/// The other half: Force www on `<d>` while another vhost answers `www.<d>`.
+async fn refuse_force_www_over_www_site(domain: &str) -> AgentResult<()> {
+    let www = format!("www.{domain}");
+    let own = format!("site-{domain}");
+    if let Some(file) = other_vhost_serving(&www, &[own.as_str()]).await {
+        return Err(AgentError::Conflict(format!(
+            "{www} is served by a vhost of its own ({file}), so nginx would ignore \
+             Force www on {domain}; remove the {www} site first, or leave Force www off"
+        )));
+    }
+    Ok(())
+}
+
+/// The files in sites-enabled that a delete of `domain` removes: the
+/// panel's `site-<d>` and an external vhost named `<d>`.
+fn files_removed_by_delete(domain: &str) -> [String; 2] {
+    [format!("site-{domain}"), domain.to_string()]
+}
+
+/// Is this sites-enabled file one to look into for a clash? Dot files are
+/// left out because nginx's include glob does not match them.
+fn is_other_vhost_file(file: &str, own_files: &[&str]) -> bool {
+    !file.starts_with('.') && !own_files.contains(&file)
+}
+
+/// The file in sites-enabled, other than `own_files`, whose vhost has a
+/// server block for `name`. Every file there is loaded by nginx, so a
+/// backup copy or an app vhost clashes as much as a site does.
+async fn other_vhost_serving(name: &str, own_files: &[&str]) -> Option<String> {
+    let mut rd = tokio::fs::read_dir("/etc/nginx/sites-enabled").await.ok()?;
+    while let Ok(Some(entry)) = rd.next_entry().await {
+        let file = entry.file_name().to_string_lossy().into_owned();
+        if !is_other_vhost_file(&file, own_files) {
+            continue;
+        }
+        let Ok(vhost) = tokio::fs::read_to_string(entry.path()).await else {
+            continue;
+        };
+        if vhost_serves_name(&vhost, name) {
+            return Some(file);
+        }
+    }
+    None
+}
+
 pub async fn create(
     State(state): State<AppState>,
     Json(req): Json<CreateSite>,
@@ -414,6 +522,10 @@ pub async fn create(
             "site for {} already exists",
             req.domain
         )));
+    }
+    refuse_www_site_under_force_www(&req.domain).await?;
+    if route.force_www_redirect {
+        refuse_force_www_over_www_site(&req.domain).await?;
     }
 
     if let Some(ref f) = route.folder {
@@ -508,6 +620,11 @@ pub async fn update(
     let (vhost_path, _vhost_link) = vhost_paths(&domain);
     if !vhost_path.exists() {
         return Err(AgentError::NotFound);
+    }
+    // Only the Force www half: an update keeps the site's own server_name,
+    // so an update of a www.<d> site adds no clash of its own.
+    if route.force_www_redirect {
+        refuse_force_www_over_www_site(&domain).await?;
     }
     let serves_https = tokio::fs::read_to_string(&vhost_path)
         .await
@@ -693,6 +810,13 @@ pub async fn status(Path(domain): Path<String>) -> AgentResult<Json<SiteStatus>>
     if !is_safe_subdomain(&domain) {
         return Err(AgentError::Invalid("invalid domain".into()));
     }
+    let [site_file, external_file] = files_removed_by_delete(&domain);
+    let www_served_by = other_vhost_serving(
+        &format!("www.{domain}"),
+        &[site_file.as_str(), external_file.as_str()],
+    )
+    .await;
+    let force_www_parent = force_www_parent_serving(&domain).await.map(str::to_string);
     let (cert_path, covered_by) = match existing_cert_paths(&domain) {
         Some((cert_path, _)) => (cert_path, None),
         None => {
@@ -705,6 +829,8 @@ pub async fn status(Path(domain): Path<String>) -> AgentResult<Json<SiteStatus>>
                     cert_not_after: None,
                     days_remaining: None,
                     covered_by: None,
+                    www_served_by,
+                    force_www_parent,
                 }));
             };
             (parent_cert, Some(parent))
@@ -720,6 +846,8 @@ pub async fn status(Path(domain): Path<String>) -> AgentResult<Json<SiteStatus>>
         cert_not_after: not_after,
         days_remaining: days,
         covered_by,
+        www_served_by,
+        force_www_parent,
     }))
 }
 
@@ -740,7 +868,81 @@ async fn covering_parent_cert(domain: &str) -> Option<(String, String)> {
 
 #[cfg(test)]
 mod tests {
-    use super::{build_route, https_after_update, ssl_required_names, vhost_serves_https};
+    use super::{
+        build_route, files_removed_by_delete, https_after_update, is_other_vhost_file,
+        ssl_required_names, vhost_serves_https, vhost_serves_name, www_parent,
+    };
+    use crate::nginx_template::{SiteVhostTemplate, ACME_WEBROOT};
+    use askama::Template;
+
+    fn site_vhost(force_www_redirect: bool, ssl_enabled: bool) -> String {
+        SiteVhostTemplate {
+            domain: "example.com",
+            mode: "port",
+            upstream_port: Some(3000),
+            folder_path: None,
+            force_www_redirect,
+            ssl_enabled,
+            www_in_cert: ssl_enabled,
+            cert_path: "/c/fullchain.pem",
+            key_path: "/c/privkey.pem",
+            acme_webroot: ACME_WEBROOT,
+        }
+        .render()
+        .unwrap()
+    }
+
+    #[test]
+    fn a_force_www_vhost_is_seen_to_answer_the_www_name() {
+        // The block for www.<d> is there on 80 whether or not the site has
+        // HTTPS, so either way a separate www.<d> site would clash with it.
+        for ssl in [false, true] {
+            assert!(vhost_serves_name(&site_vhost(true, ssl), "www.example.com"), "{ssl}");
+            assert!(!vhost_serves_name(&site_vhost(false, ssl), "www.example.com"), "{ssl}");
+            assert!(vhost_serves_name(&site_vhost(false, ssl), "example.com"), "{ssl}");
+        }
+    }
+
+    #[test]
+    fn server_name_lines_are_matched_by_exact_name() {
+        let external = "server {\n\tserver_name  example.com WWW.example.com; # old\n}\n";
+        assert!(vhost_serves_name(external, "www.example.com"));
+        assert!(vhost_serves_name(external, "example.com"));
+        // A wildcard loses to an exact name in nginx, so it is no clash.
+        assert!(!vhost_serves_name("server_name *.example.com;\n", "www.example.com"));
+        assert!(!vhost_serves_name("# server_name www.example.com;\n", "www.example.com"));
+        assert!(!vhost_serves_name("server_names_hash_bucket_size 128;\n", "128"));
+        assert!(!vhost_serves_name("server_name www.example.com.au;\n", "www.example.com"));
+    }
+
+    #[test]
+    fn only_a_www_name_has_a_parent_to_check() {
+        assert_eq!(www_parent("www.example.com"), Some("example.com"));
+        assert_eq!(www_parent("www.app.example.com"), Some("app.example.com"));
+        assert_eq!(www_parent("example.com"), None);
+        assert_eq!(www_parent("app.example.com"), None);
+        // A bare TLD is no site of the panel's.
+        assert_eq!(www_parent("www.com"), None);
+    }
+
+    #[test]
+    fn the_replace_check_leaves_out_the_files_the_delete_removes() {
+        // Replace deletes both of these before the create, so a www.<d>
+        // block in either is gone by then and must not refuse the replace.
+        let [site_file, external_file] = files_removed_by_delete("example.com");
+        assert_eq!(site_file, "site-example.com");
+        assert_eq!(external_file, "example.com");
+        let own = [site_file.as_str(), external_file.as_str()];
+        assert!(!is_other_vhost_file("site-example.com", &own));
+        assert!(!is_other_vhost_file("example.com", &own));
+        assert!(is_other_vhost_file("site-www.example.com", &own));
+        assert!(is_other_vhost_file("www.example.com", &own));
+        assert!(is_other_vhost_file("example.com.bak", &own));
+        // nginx's include glob skips dot files, so they serve nothing.
+        assert!(!is_other_vhost_file(".example.com.swp", &own));
+        // A create only leaves out its own site file.
+        assert!(is_other_vhost_file("example.com", &["site-example.com"]));
+    }
 
     #[test]
     fn a_site_cannot_proxy_to_nginx_itself() {
