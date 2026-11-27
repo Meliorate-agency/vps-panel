@@ -1803,7 +1803,13 @@ pub(crate) const RESERVED_SYSTEM_USERS: &[&str] = &[
     "dovecot",
     "dovenull",
     "postfix",
+    "_rspamd",
     "vps-panel",
+    // Made by install.sh. vmail (uid 5000, in the human range) owns every
+    // mailbox under /var/vmail, and apps every app under /srv/apps: deleting
+    // either one with its home wiped them all.
+    "vmail",
+    "apps",
 ];
 
 pub(crate) const ALLOWED_SHELLS: &[&str] = &[
