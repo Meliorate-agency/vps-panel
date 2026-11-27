@@ -70,6 +70,7 @@ pub async fn gather(state: &AppState) -> Gathered {
     inventory.docker_volumes = kept.iter().map(|s| s.to_string()).collect();
     inventory.containers = docker.containers.iter().map(|c| c.name.clone()).collect();
     inventory.tailscale = tailscale.get("installed").and_then(Value::as_bool).unwrap_or(false);
+    inventory.foreign_services = foreign_services().await;
 
     let system_files = vec![
         ("system/platform.json".to_string(), pretty(&platform)),
@@ -287,6 +288,45 @@ async fn docker() -> Docker {
     }
 }
 
+/// Services in /etc/systemd/system that neither a package nor the panel
+/// made (an operator's own daemon, like a node or a bot run from
+/// /usr/local/bin). The snapshot cannot know their program, settings and
+/// data, so the import lists them to be moved by hand.
+async fn foreign_services() -> Vec<String> {
+    let mut out = Vec::new();
+    let Ok(mut rd) = tokio::fs::read_dir("/etc/systemd/system").await else { return out };
+    while let Ok(Some(e)) = rd.next_entry().await {
+        let name = e.file_name().to_string_lossy().into_owned();
+        if !is_foreign_unit_name(&name) {
+            continue;
+        }
+        // A regular file (links are enablement), and enabled.
+        if !tokio::fs::symlink_metadata(e.path()).await.is_ok_and(|m| m.is_file()) {
+            continue;
+        }
+        if exec::run("systemctl", ["is-enabled", "--quiet", name.as_str()]).await.is_err() {
+            continue;
+        }
+        let path = e.path().to_string_lossy().into_owned();
+        if exec::run("dpkg", ["-S", path.as_str()]).await.is_ok() {
+            continue;
+        }
+        out.push(name);
+    }
+    out.sort();
+    out
+}
+
+fn is_foreign_unit_name(name: &str) -> bool {
+    name.ends_with(".service")
+        && !name.starts_with("vps-app-")
+        && !name.starts_with("vps-panel")
+        // Made by Ubuntu's own tooling or cloud images, not an operator.
+        && !["snap.", "cloud-", "dbus-", "display-manager", "sshd", "syslog", "systemd-"]
+            .iter()
+            .any(|p| name.starts_with(p))
+}
+
 /// Docker names a volume nobody named with 64 hex digits.
 fn is_anonymous_volume(name: &str) -> bool {
     name.len() == 64 && name.bytes().all(|b| b.is_ascii_hexdigit())
@@ -382,6 +422,17 @@ async fn inventory(state: &AppState) -> Inventory {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn hand_made_services_are_told_from_the_panels_and_the_systems() {
+        assert!(is_foreign_unit_name("uninet-node.service"));
+        assert!(is_foreign_unit_name("mybot.service"));
+        assert!(!is_foreign_unit_name("vps-app-shop.service"));
+        assert!(!is_foreign_unit_name("vps-panel-agent.service"));
+        assert!(!is_foreign_unit_name("snap.lxd.daemon.service"));
+        assert!(!is_foreign_unit_name("multi-user.target"));
+        assert!(!is_foreign_unit_name("sshd.service"));
+    }
 
     #[test]
     fn anonymous_volumes_are_told_apart() {

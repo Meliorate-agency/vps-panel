@@ -120,6 +120,10 @@ pub struct Inventory {
     pub docker_volumes: Vec<String>,
     pub containers: Vec<String>,
     pub tailscale: bool,
+    /// Services set up by hand (a unit in /etc/systemd/system no package
+    /// and no panel feature made): their program, settings and data are
+    /// unknown to the panel, so they are not moved; the import names them.
+    pub foreign_services: Vec<String>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, Default)]

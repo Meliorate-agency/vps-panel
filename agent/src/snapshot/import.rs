@@ -232,6 +232,16 @@ async fn checks(state: &AppState, m: &Manifest, resuming: bool, file_size: u64) 
     if m.inventory.tailscale {
         push("tailscale", "warn", "Tailscale is installed, but this server has to log in to it once (Apps > Tailscale).".into());
     }
+    if !m.inventory.foreign_services.is_empty() {
+        push(
+            "services",
+            "warn",
+            format!(
+                "Not moved: {}. These services were set up by hand on the old server (not by the panel or a package), so their program, settings and data have to be moved by hand.",
+                m.inventory.foreign_services.join(", ")
+            ),
+        );
+    }
     out
 }
 
@@ -423,6 +433,12 @@ fn summary(m: &Manifest, j: &Journal, task: &TaskHandle) {
     task.log("4. Mail and app data written on the old server after the snapshot was made is not here: stop the old server's apps and mail first, or make a new snapshot.");
     task.log("5. SSH host keys are this server's own: clients that knew the old server warn once (ssh-keygen -R <name>).");
     task.log("6. Delete the snapshot file on both servers when you are done: it holds every password and key.");
+    if !m.inventory.foreign_services.is_empty() {
+        task.log(format!(
+            "7. Services set up by hand on the old server were not moved: {} (their program, settings, data and system user).",
+            m.inventory.foreign_services.join(", ")
+        ));
+    }
     for n in &j.notes {
         task.log(format!("note: {n}"));
     }
@@ -1068,6 +1084,11 @@ async fn step_dns_mail(state: &AppState, m: &Manifest, stage: &Path, j: &mut Jou
     for zone in &j.zones {
         let _ = exec::run("pdnsutil", ["rectify-zone", zone.as_str()]).await;
     }
+    // PowerDNS learns of zones written straight into its database only when
+    // its zone list refreshes (every 5 minutes): until then it answered
+    // REFUSED for them, and its packet cache kept that answer. Rediscover
+    // first, then empty the cache.
+    let _ = exec::run("pdns_control", ["rediscover"]).await;
     let _ = exec::run("pdns_control", ["purge"]).await;
     Ok(())
 }
