@@ -359,6 +359,13 @@ export default function FileBrowser({
   const uploadFiles = useCallback(
     async (files: File[]) => {
       if (files.length === 0) return;
+      // One batch at a time (the button is disabled meanwhile; a drop is
+      // not): a second one ran next to the first, took over the Cancel
+      // button, and left the first one with no way to stop it.
+      if (uploadAbort.current) {
+        setNotice("An upload is running: drop these files again when it is done.");
+        return;
+      }
       setError(null);
       setNotice(null);
       const controller = new AbortController();

@@ -151,6 +151,12 @@ export default function TerminalConsole({
   const blockId = useRef(0);
   const sessionCommands = useRef<string[]>([]);
 
+  // Leaving the page stops the running command: the stream would otherwise
+  // keep it alive until its timeout (up to 30 minutes), with no Stop button
+  // to reach it when the page is opened again. The agent kills the command's
+  // process group when the connection closes.
+  useEffect(() => () => abortRef.current?.abort(), []);
+
   // The saved history pane is per folder — swapping folders swaps the list.
   useEffect(() => {
     let cancelled = false;
