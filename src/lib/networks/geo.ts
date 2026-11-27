@@ -1,7 +1,7 @@
 import "server-only";
-import { lookup } from "node:dns/promises";
 import { isIP } from "node:net";
 import { serverGeoEnabled } from "../privacy";
+import { peerHosts } from "./dns";
 
 /** Where a server is, from the IP its address resolves to. */
 export type ServerLocation = {
@@ -72,15 +72,14 @@ async function locate(host: string): Promise<ServerLocation | null> {
   return (await fromIpinfo(ip)) ?? (await fromGeojs(ip));
 }
 
+/** IPv4 first. Through the heartbeat's resolver: a member whose DNS hangs holds one lookup, not two. */
 async function resolve(host: string): Promise<string | null> {
-  for (const family of [4, 6] as const) {
-    try {
-      return (await lookup(host, { family })).address;
-    } catch {
-      // try the other family
-    }
+  try {
+    const addresses = await peerHosts().resolve(host, AbortSignal.timeout(TIMEOUT_MS));
+    return (addresses.find((a) => a.family === 4) ?? addresses[0]).address;
+  } catch {
+    return null;
   }
-  return null;
 }
 
 /** Addresses no public geolocation knows: loopback, LAN, CGNAT (Tailscale). */

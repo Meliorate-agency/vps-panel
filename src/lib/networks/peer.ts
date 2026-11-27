@@ -1,5 +1,6 @@
 import "server-only";
 import type { NextRequest } from "next/server";
+import { DnsError, peerHosts } from "./dns";
 import { nodeIdentity } from "./identity";
 import {
   HEADER_KEY,
@@ -48,9 +49,11 @@ export async function peerRequest<T extends Record<string, unknown> = Record<str
   const nonce = randomToken(16);
   const sig = id.sign(requestMessage({ method: "POST", path: opts.path, to: opts.to, ts, nonce, bodyHash: sha256(body) }));
   const started = performance.now();
+  const signal = AbortSignal.timeout(opts.timeoutMs);
   let res: Response;
   let raw: Buffer;
   try {
+    await resolvesFirst(opts.url, signal);
     res = await fetch(opts.url + opts.path, {
       method: "POST",
       headers: {
@@ -64,7 +67,7 @@ export async function peerRequest<T extends Record<string, unknown> = Record<str
       body,
       redirect: "manual",
       cache: "no-store",
-      signal: AbortSignal.timeout(opts.timeoutMs),
+      signal,
     });
     raw = await readCapped(res);
   } catch (e) {
@@ -92,14 +95,16 @@ export async function peerRequest<T extends Record<string, unknown> = Record<str
 /** Ask the server at `url` for its key, signed over a fresh challenge. */
 export async function fetchIdentity(url: string, timeoutMs = 8_000): Promise<{ key: string }> {
   const challenge = randomToken(24);
+  const signal = AbortSignal.timeout(timeoutMs);
   let res: Response;
   let raw: Buffer;
   try {
+    await resolvesFirst(url, signal);
     res = await fetch(`${url}/api/peer/identity?c=${challenge}`, {
       headers: { "user-agent": USER_AGENT },
       redirect: "manual",
       cache: "no-store",
-      signal: AbortSignal.timeout(timeoutMs),
+      signal,
     });
     raw = await readCapped(res);
   } catch (e) {
@@ -112,6 +117,22 @@ export async function fetchIdentity(url: string, timeoutMs = 8_000): Promise<{ k
     throw new PeerError("its answer is not a vps-panel server identity", res.status, null);
   }
   return { key: json.key };
+}
+
+/**
+ * Look the server's name up through the shared resolver (dns.ts) before
+ * fetch does: a name whose DNS hangs then costs one lookup in all, instead
+ * of one more stuck lookup per ping. fetch resolves the name again, which
+ * is quick for a name that has just answered (systemd-resolved caches it).
+ */
+async function resolvesFirst(url: string, signal: AbortSignal): Promise<void> {
+  let host: string;
+  try {
+    host = new URL(url).hostname;
+  } catch {
+    return; // fetch reports the bad address
+  }
+  await peerHosts().resolve(host, signal);
 }
 
 async function readCapped(res: Response): Promise<Buffer> {
@@ -165,6 +186,7 @@ function describeStatus(res: Response, json: Record<string, unknown> | null): st
 }
 
 function describeFetchError(e: unknown): string {
+  if (e instanceof DnsError) return e.message;
   const err = e as { name?: string; message?: string; cause?: { code?: string; message?: string } };
   if (err?.name === "TimeoutError" || err?.name === "AbortError") return "no answer in time";
   const code = err?.cause?.code ?? "";
