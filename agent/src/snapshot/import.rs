@@ -443,6 +443,14 @@ async fn step_unpack(file: &Path, passphrase: &str, stage: &Path, j: &mut Journa
         .map_err(|e| AgentError::Other(anyhow::anyhow!("unpack: {e}")))??;
     j.uid_names = users;
     j.gid_names = groups;
+    let roots: Vec<String> = manifest_roots(stage);
+    let stage3 = stage.to_path_buf();
+    let fixed = tokio::task::spawn_blocking(move || normalize_implicit_dirs(&stage3.join("fs"), &roots))
+        .await
+        .unwrap_or(0);
+    if fixed > 0 {
+        task.log(format!("{fixed} parent folder(s) without an entry of their own set to 0755 root"));
+    }
     for w in warnings.iter().take(20) {
         task.log(format!("  {w}"));
     }
@@ -451,6 +459,46 @@ async fn step_unpack(file: &Path, passphrase: &str, stage: &Path, j: &mut Journa
 }
 
 type Unpacked = (BTreeMap<u32, String>, BTreeMap<u32, String>, Vec<String>);
+
+/// The paths the snapshot's sections start at (from the staged manifest).
+fn manifest_roots(stage: &Path) -> Vec<String> {
+    let m: Manifest = std::fs::read(stage.join(format::MANIFEST))
+        .ok()
+        .and_then(|b| serde_json::from_slice(&b).ok())
+        .unwrap_or_default();
+    m.sections.into_iter().flat_map(|s| s.paths).collect()
+}
+
+/// The folders above each section root (/etc above /etc/nginx, /var/lib
+/// above /var/lib/rspamd/dkim) have no entry in the archive: the unpack
+/// made them with the agent's umask (0770, root's). They become 0755
+/// root:root, what such a folder is on a fresh server, in case one is
+/// created here. Folders inside a root keep the mode they had. Returns
+/// how many were set.
+fn normalize_implicit_dirs(fs_root: &Path, roots: &[String]) -> usize {
+    use std::os::unix::fs::PermissionsExt;
+    let within_root = |p: &Path| roots.iter().any(|r| p.starts_with(r));
+    let mut seen = std::collections::HashSet::new();
+    let mut fixed = 0;
+    for r in roots {
+        let mut a = Path::new(r).parent();
+        while let Some(anc) = a {
+            if anc == Path::new("/") || within_root(anc) {
+                break;
+            }
+            if seen.insert(anc.to_path_buf()) {
+                let staged = fs_root.join(anc.strip_prefix("/").unwrap_or(anc));
+                if std::fs::symlink_metadata(&staged).is_ok_and(|m| m.is_dir()) {
+                    let _ = std::fs::set_permissions(&staged, std::fs::Permissions::from_mode(0o755));
+                    let _ = std::os::unix::fs::chown(&staged, Some(0), Some(0));
+                    fixed += 1;
+                }
+            }
+            a = anc.parent();
+        }
+    }
+    fixed
+}
 
 fn unpack(file: &Path, passphrase: &str, stage: &Path) -> AgentResult<Unpacked> {
     let f = std::fs::File::open(file)?;
@@ -684,16 +732,16 @@ fn place_tree(from: &Path, to: &Path, placed: &mut Vec<String>, own_panel_host: 
             placed.push(rel);
         }
         Some(t) if from_meta.is_dir() && t.is_dir() && !t.file_type().is_symlink() => {
+            // A folder this server has already keeps its own mode and owner.
+            // Copying the staged folder's onto it turned /etc, /var and /root
+            // into 0770 root:root (the archive has no entry for a section's
+            // parent folders; the unpack made them with the agent's umask):
+            // no other user could read /etc/passwd, and MariaDB's socket
+            // logins, nginx's workers and the rest stopped working.
             for e in std::fs::read_dir(from)? {
                 let e = e?;
                 place_tree(&e.path(), &to.join(e.file_name()), placed, own_panel_host)?;
             }
-            // The folder's own mode and owner from the snapshot.
-            {
-                use std::os::unix::fs::PermissionsExt;
-                let _ = std::fs::set_permissions(to, std::fs::Permissions::from_mode(from_meta.mode() & 0o7777));
-            }
-            let _ = std::os::unix::fs::chown(to, Some(from_meta.uid()), Some(from_meta.gid()));
         }
         Some(t) => {
             // A file (or a folder of another kind) here already: the
@@ -1532,10 +1580,41 @@ mod tests {
         std::fs::create_dir_all(to.join("apps/shop")).unwrap();
         std::fs::write(to.join("apps/shop/app.js"), b"old").unwrap();
         std::fs::write(to.join("apps/keep.txt"), b"here").unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        // The staged parent made by the unpack (0770), the folder here 0755.
+        std::fs::set_permissions(&from, std::fs::Permissions::from_mode(0o770)).unwrap();
+        std::fs::set_permissions(&to, std::fs::Permissions::from_mode(0o755)).unwrap();
         let mut placed = Vec::new();
         place_tree(&from, &to, &mut placed, "").unwrap();
         assert_eq!(std::fs::read(to.join("apps/shop/app.js")).unwrap(), b"new");
         assert_eq!(std::fs::read(to.join("apps/keep.txt")).unwrap(), b"here");
         assert_eq!(placed, vec![to.join("apps/shop/app.js").to_string_lossy().into_owned()]);
+        assert_eq!(
+            std::fs::metadata(&to).unwrap().mode() & 0o777,
+            0o755,
+            "a folder that is here already keeps its mode"
+        );
+    }
+
+    #[test]
+    fn parent_folders_without_an_entry_become_0755() {
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = tempfile::tempdir().unwrap();
+        let fs_root = tmp.path().join("fs");
+        for d in ["etc/nginx/sites-available", "var/lib/rspamd/dkim", "etc/systemd/system"] {
+            std::fs::create_dir_all(fs_root.join(d)).unwrap();
+        }
+        for d in ["etc", "etc/nginx", "etc/systemd", "var", "var/lib", "var/lib/rspamd", "var/lib/rspamd/dkim"] {
+            std::fs::set_permissions(fs_root.join(d), std::fs::Permissions::from_mode(0o770)).unwrap();
+        }
+        let roots = vec!["/etc/nginx".to_string(), "/var/lib/rspamd/dkim".to_string(), "/etc/systemd/system".to_string()];
+        normalize_implicit_dirs(&fs_root, &roots);
+        let mode = |d: &str| std::fs::metadata(fs_root.join(d)).unwrap().mode() & 0o777;
+        for implicit in ["etc", "etc/systemd", "var", "var/lib", "var/lib/rspamd"] {
+            assert_eq!(mode(implicit), 0o755, "{implicit}");
+        }
+        // Roots and what is inside them are archive entries: untouched.
+        assert_eq!(mode("etc/nginx"), 0o770);
+        assert_eq!(mode("var/lib/rspamd/dkim"), 0o770);
     }
 }
