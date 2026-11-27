@@ -62,6 +62,9 @@ const ERROR_CODES = {
   INTERNAL_ERROR: -32603,
 } as const;
 
+/** The most JSON-RPC requests one batch may hold (see POST). */
+const MAX_BATCH = 20;
+
 function ok(id: JsonRpcId, result: unknown): JsonRpcSuccess {
   return { jsonrpc: "2.0", id, result };
 }
@@ -293,6 +296,15 @@ export async function POST(req: NextRequest) {
   // uses them but we handle the shape for compatibility — dispatch each,
   // drop nulls (notifications), return what's left as a single array.
   if (Array.isArray(payload)) {
+    // The rate limit counts HTTP requests, so a batch of thousands of tool
+    // calls passed as one of the 120 a minute and kept the agent busy for
+    // hours. Real clients send a handful at most.
+    if (payload.length > MAX_BATCH) {
+      return Response.json(
+        err(null, ERROR_CODES.INVALID_REQUEST, `a batch may hold at most ${MAX_BATCH} requests`),
+        { status: 400 },
+      );
+    }
     const out: (JsonRpcSuccess | JsonRpcError)[] = [];
     for (const msg of payload) {
       const r = await dispatch(msg as JsonRpcRequest, auth);

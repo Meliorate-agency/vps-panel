@@ -206,6 +206,20 @@ export function upsertMember(networkId: string, m: { key: string; name: string; 
     .run(networkId, m.key, m.name, m.url, Date.now());
 }
 
+/**
+ * A member's new name and address, only while it is still a member: true when
+ * it was. The join route checks membership before it waits on the member's
+ * identity, and a member removed during that wait was written back by the
+ * upsert (and pushed to everyone in the next roster).
+ */
+export function readdressMember(networkId: string, m: { key: string; name: string; url: string }): boolean {
+  return (
+    db()
+      .prepare(`UPDATE network_members SET name = ?, url = ? WHERE network_id = ? AND public_key = ?`)
+      .run(m.name, m.url, networkId, m.key).changes > 0
+  );
+}
+
 export function removeMember(networkId: string, key: string): boolean {
   return (
     db().prepare(`DELETE FROM network_members WHERE network_id = ? AND public_key = ?`).run(networkId, key)

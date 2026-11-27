@@ -20,6 +20,7 @@ import {
   listMembers,
   publishRoster,
   upsertMember,
+  readdressMember,
 } from "@/lib/networks/store";
 import { membersExcept, pushRoster } from "@/lib/networks/sync";
 
@@ -83,10 +84,17 @@ export async function POST(req: NextRequest) {
     return peerError(400, `the network's owner could not reach ${url}: ${e instanceof Error ? e.message : e}`);
   }
 
-  if (!existing && !claimInvite(String(body.invite), key)) {
-    return peerError(403, "this join code was just used, or it expired; ask for a new one");
+  // Checked again after the wait above: a member removed meanwhile stays out.
+  if (existing) {
+    if (!readdressMember(net.id, { key, name, url })) {
+      return peerError(403, "this server is no longer in that network");
+    }
+  } else {
+    if (!claimInvite(String(body.invite), key)) {
+      return peerError(403, "this join code was just used, or it expired; ask for a new one");
+    }
+    upsertMember(net.id, { key, name, url });
   }
-  upsertMember(net.id, { key, name, url });
   const roster = publishRoster(net.id);
   writeAudit({
     actorId: null,

@@ -153,12 +153,17 @@ async function readdress(net: NetworkRow, me: string, name: string): Promise<voi
 function checkAlerts(startedAt: number, me: string, self: string): void {
   const now = Date.now();
   for (const net of listNetworks()) {
-    for (const m of listMembers(net.id)) {
+    const members = listMembers(net.id);
+    // When this server joined: the roster gives each member the time IT
+    // joined, days ago for the old ones, so a server that had just joined
+    // reported them offline before its first ping had a chance.
+    const myJoin = members.find((x) => x.public_key === me)?.joined_at ?? 0;
+    for (const m of members) {
       if (m.public_key === me) continue;
       const seen = lastSeen(m);
       // Nobody had a chance to ping in the first minute after a restart
       // or after joining.
-      const down = now - Math.max(seen ?? 0, m.joined_at, startedAt) >= OFFLINE_MS;
+      const down = now - Math.max(seen ?? 0, m.joined_at, myJoin, startedAt) >= OFFLINE_MS;
       const name = m.live_name || m.name;
       if (down && m.alerted_at === null) {
         setAlerted(net.id, m.public_key, now);
