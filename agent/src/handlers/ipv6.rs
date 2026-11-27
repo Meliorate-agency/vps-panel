@@ -845,12 +845,16 @@ pub async fn put_zone(
         "IPv6 switched for the zone"
     );
     drop(guard);
-    if view.has_mail {
+    // Postfix is settled again after every switch, not only for a mail
+    // domain: the zone may hold the name Postfix introduces itself with, and
+    // without its AAAA mail has to go back to IPv4 (mail_ip::gather_addrs).
+    {
         let state = state.clone();
         let on = body.enabled;
+        let has_mail = view.has_mail;
         tokio::spawn(async move {
             crate::handlers::mail_ip::ensure_at_startup(state.clone()).await;
-            if on {
+            if on && has_mail {
                 // The SPF record's TTL is an hour: public resolvers show
                 // the new one by then.
                 tokio::time::sleep(Duration::from_secs(3700)).await;

@@ -325,6 +325,19 @@ impl Postfix {
         }
     }
 
+    /// IPv6 is used by the forced domains only (Ipv6Use::ForcedOnly): the
+    /// stock services are limited to IPv4, but the address is pinned and the
+    /// table sends some domain through the IPv6-first service. The address.
+    fn forced_only(&self) -> Option<&str> {
+        let routed = applied_entries(&self.sender_maps)
+            .values()
+            .any(|r| *r == Route::Ipv6);
+        match (self.sending(), &self.bind6) {
+            (Sending::Ipv4Only, Some(addr)) if routed && allows_ipv6(&self.inet_protocols) => Some(addr),
+            _ => None,
+        }
+    }
+
     /// `any` (no fixed order) has no place in the API; it reads as the
     /// panel's default and a note says what Postfix is really set to.
     fn default_protocol(&self) -> Protocol {
@@ -686,6 +699,13 @@ enum Ipv6Use {
     Off,
     /// As first choice or as fallback, from this address only.
     From(String),
+    /// From this address, but only for the domains set to IPv6 with "Use
+    /// IPv6 anyway", through their entries in the per-domain table; the
+    /// stock services stay limited to IPv4. What a forced choice gets while
+    /// the IPv6 check has not passed: nothing vouches for the address, so no
+    /// other domain may fall back to it (a receiver refuses mail from an
+    /// address without a matching PTR).
+    ForcedOnly(String),
     /// Left as it is. For a server that has no IPv4 address and no IPv6
     /// address fit to pin: limited to IPv4 it could not send any mail.
     Untouched,
@@ -800,7 +820,7 @@ fn plan(now: &Postfix, want: &Desired) -> Plan {
     }
 
     let entries = match want.ipv6 {
-        Ipv6Use::From(_) => want.entries.clone(),
+        Ipv6Use::From(_) | Ipv6Use::ForcedOnly(_) => want.entries.clone(),
         _ => BTreeMap::new(),
     };
     let maps = sender_maps_value(&now.sender_maps, &entries);
@@ -811,7 +831,7 @@ fn plan(now: &Postfix, want: &Desired) -> Plan {
         .filter(|s| s.command == "smtp");
 
     match &want.ipv6 {
-        Ipv6Use::From(addr) => {
+        Ipv6Use::From(addr) | Ipv6Use::ForcedOnly(addr) => {
             if now.bind6.as_deref() != Some(addr.as_str()) {
                 p.early.push(format!("smtp_bind_address6 = {addr}"));
             }
@@ -846,13 +866,22 @@ fn plan(now: &Postfix, want: &Desired) -> Plan {
                 }
             }
             // Only now, with the table in place: it is what keeps a domain
-            // whose SPF record lacks the IPv6 address on IPv4.
+            // whose SPF record lacks the IPv6 address on IPv4. With IPv6 for
+            // the forced domains only, the stock services stay (or go back
+            // to) IPv4 only instead.
+            let open = matches!(want.ipv6, Ipv6Use::From(_));
             for s in smtp_clients {
-                if s.setting("inet_protocols") == Some("ipv4") {
+                let limited = s.setting("inet_protocols") == Some("ipv4");
+                if open && limited {
                     p.open.push(vec![
                         "-P".to_string(),
                         "-X".to_string(),
                         format!("{}/unix/inet_protocols", s.name),
+                    ]);
+                } else if !open && !limited {
+                    p.master.push(vec![
+                        "-P".to_string(),
+                        format!("{}/unix/inet_protocols=ipv4", s.name),
                     ]);
                 }
             }
@@ -1031,7 +1060,7 @@ async fn converge(now: &Postfix, want: &Desired) -> AgentResult<bool> {
     }
     // Before anything is written: does this Postfix read the table the way
     // it is meant? A wrong answer here would misroute or defer mail.
-    if matches!(want.ipv6, Ipv6Use::From(_)) {
+    if matches!(want.ipv6, Ipv6Use::From(_) | Ipv6Use::ForcedOnly(_)) {
         if let (Some(table), Some((domain, route))) =
             (build_table(&want.entries), want.entries.iter().next())
         {
@@ -1081,7 +1110,8 @@ async fn converge(now: &Postfix, want: &Desired) -> AgentResult<bool> {
 /// domains with IPv6 on, and nothing says receivers accept mail from it.
 /// When the lookup gives nothing (resolver trouble, or the AAAA was taken
 /// away) the address Postfix is pinned to stays for as long as it is still
-/// on an interface: a failed lookup at boot must not switch IPv6 off.
+/// on an interface: a failed lookup at boot must not switch IPv6 off, not
+/// even for the domains that alone send over IPv6 (`Postfix::forced_only`).
 /// Whether Postfix then sends from the address is the live check's to say.
 fn mail_ipv6(postfix: Option<&Postfix>, facts: &Ipv6Facts) -> Option<String> {
     if postfix.is_some_and(|p| !allows_ipv6(&p.inet_protocols)) {
@@ -1093,8 +1123,12 @@ fn mail_ipv6(postfix: Option<&Postfix>, facts: &Ipv6Facts) -> Option<String> {
     if facts.published.is_some() {
         return facts.usable();
     }
-    match postfix.map(Postfix::sending) {
-        Some(Sending::Pinned(addr)) if facts.on_interfaces.contains(&addr) => Some(addr),
+    let pinned = postfix.and_then(|p| match p.sending() {
+        Sending::Pinned(addr) => Some(addr),
+        _ => p.forced_only().map(str::to_string),
+    });
+    match pinned {
+        Some(addr) if facts.on_interfaces.contains(&addr) => Some(addr),
         _ => None,
     }
 }
@@ -1377,6 +1411,22 @@ async fn gather_addrs(state: &AppState, postfix: Option<&Postfix>) -> MailAddrs 
         Ok(off) => addrs.ipv6_off = off.into_iter().collect(),
         Err(e) => tracing::warn!(error = %e, "could not read which zones have IPv6 off"),
     }
+    // The name Postfix introduces itself with is in a zone here whose IPv6
+    // was switched off: that name has no AAAA any more, so the address's PTR
+    // no longer resolves back and receivers refuse mail sent over IPv6. Mail
+    // goes back to IPv4. A pinned or chosen address used to keep IPv6 on
+    // regardless. Only the stored choice counts: a zone that merely counts
+    // as off (no AAAA at its apex) may still give the HELO name its AAAA.
+    if addrs.ipv6.is_some() && addrs.has_ipv4 {
+        if let Some(zone) = mail_check::helo_zone_switched_off(state, &addrs.helo).await {
+            addrs.ipv6_missing = Some(format!(
+                "IPv6 is off for {zone} under Domains, and the mail host name {} is in that zone: it has no AAAA record, so mail goes out over IPv4. Switch IPv6 on for {zone} to send over IPv6 again.",
+                addrs.helo
+            ));
+            addrs.ipv6 = None;
+            addrs.sends_ipv6 = false;
+        }
+    }
     addrs
 }
 
@@ -1425,6 +1475,28 @@ async fn holds(
     held_domains(domains, &spf, kept, &applied_holds(&postfix.sender_maps), added, off)
 }
 
+/// The domains set to IPv6 with "Use IPv6 anyway", by `domains` as they
+/// will be. Without them (the database cannot be read), a Postfix that
+/// sends over IPv6 for the forced domains only keeps doing so for the
+/// domains its table sends that way: otherwise it would read as limited to
+/// IPv4 and they would lose IPv6, though the routing is meant to stay as it
+/// is.
+fn forced_domains(postfix: &Postfix, domains: Option<&[DomainPref]>) -> Vec<String> {
+    match domains {
+        Some(domains) => domains
+            .iter()
+            .filter(|d| d.forced_ipv6())
+            .map(|d| d.name.clone())
+            .collect(),
+        None if postfix.forced_only().is_some() => applied_entries(&postfix.sender_maps)
+            .into_iter()
+            .filter(|(_, route)| *route == Route::Ipv6)
+            .map(|(name, _)| name)
+            .collect(),
+        None => Vec::new(),
+    }
+}
+
 /// Work out what Postfix should be set to and bring it there. `default` is
 /// a new server-wide choice, `domains` every domain's choice as it will be
 /// (None when the database cannot be read: the table then stays as it is),
@@ -1450,22 +1522,59 @@ async fn settle(
         };
     let candidate = addrs.ipv6.is_some();
     let kept = addrs.sends_ipv6;
+    // A domain set to IPv6 with "Use IPv6 anyway": its choice stands, for
+    // that domain only.
+    let forced = forced_domains(postfix, domains);
     let ready = match known_ready {
         Some(ready) => ready,
-        None if needs_check(candidate, kept, wants_ipv6, trigger) => {
-            mail_check::ipv6_check(state, addrs, dig).await.ready
+        // Without the mail domains the check cannot vouch for anyone (its
+        // SPF part only warns then): what IPv6 is used for stays as it is.
+        None if domains.is_none() => false,
+        // While IPv6 is not open for everyone (`kept`), a forced domain makes
+        // the check run: it decides whether the other domains may use the
+        // address too. The forced domains' own SPF records do not count
+        // against that: they are why the choice was forced. Once it is open,
+        // the usual rules apply: a domain whose SPF stops allowing the
+        // address is held to IPv4 by the table, it does not close IPv6 for
+        // every other domain.
+        None if needs_check(candidate, kept, wants_ipv6, trigger)
+            || (candidate && !kept && !forced.is_empty()) =>
+        {
+            mail_check::ipv6_check_excusing(state, addrs, dig, &forced).await.ready
         }
         None => false,
     };
+    let on = use_ipv6(candidate, kept, wants_ipv6, trigger, ready) || (candidate && !forced.is_empty());
+    // Forcing one domain used to open IPv6 as the fallback of every domain,
+    // from an address that had failed the check. Unless the check passed
+    // (now, or earlier: `kept`) or IPv6 is the server-wide choice, only the
+    // forced domains get it.
+    //
+    // IPv6 as the server-wide default does not open it for everyone by
+    // itself: only when the operator saves that default with "Use IPv6
+    // anyway" right now. A stored default kept the exemption at every start
+    // and opened IPv6 for every domain from an address that failed the
+    // check (after a renumbering, say), because some domain was forced.
+    let server_wide_forced =
+        default == Some(Protocol::Ipv6) && matches!(trigger, Trigger::Save { force: true });
+    let forced_only = on
+        && !ready
+        && !kept
+        && !forced.is_empty()
+        && addrs.has_ipv4
+        && !server_wide_forced;
     let ipv6 = match &addrs.ipv6 {
-        Some(addr) if use_ipv6(candidate, kept, wants_ipv6, trigger, ready) => {
-            Ipv6Use::From(addr.clone())
-        }
+        Some(addr) if on && forced_only => Ipv6Use::ForcedOnly(addr.clone()),
+        Some(addr) if on => Ipv6Use::From(addr.clone()),
         _ if !addrs.has_ipv4 => Ipv6Use::Untouched,
         _ => Ipv6Use::Off,
     };
     let entries = match (domains, &ipv6) {
         (None, _) => applied,
+        (Some(domains), Ipv6Use::ForcedOnly(_)) => {
+            let only: Vec<DomainPref> = domains.iter().filter(|d| d.forced_ipv6()).cloned().collect();
+            routes(&only, &BTreeSet::new())
+        }
         // A server without IPv4 has nothing to hold a domain to.
         (Some(domains), Ipv6Use::From(addr)) if addrs.has_ipv4 => {
             let off: BTreeSet<String> = addrs.ipv6_off.iter().cloned().collect();
@@ -1640,6 +1749,18 @@ fn notes(postfix: &Postfix, addrs: &MailAddrs, domains: &[DomainPref]) -> Vec<St
                 ));
             }
         }
+        (Some(a), Sending::Ipv4Only) if postfix.forced_only() == Some(a.as_str()) => {
+            let mut forced: Vec<String> = domains
+                .iter()
+                .filter(|d| d.forced_ipv6())
+                .map(|d| d.name.clone())
+                .collect();
+            forced.sort();
+            notes.push(format!(
+                "Only {} sends over IPv6 ({a}), as set with \"Use IPv6 anyway\". Every other domain uses IPv4 only until the IPv6 check passes: run the check, fix what it reports, then save this setting again.",
+                mail_check::join_names(&forced)
+            ));
+        }
         (Some(a), Sending::Ipv4Only) => {
             notes.push(format!(
                 "Outgoing mail uses IPv4 only. IPv6 ({a}) is switched on once its check passes: run the check, fix what it reports, then save this setting again."
@@ -1694,6 +1815,10 @@ fn build_settings(postfix: &Postfix, addrs: &MailAddrs, prefs: &[DomainPref]) ->
             name: d.name.clone(),
             preference: d.preference,
             effective: match sending {
+                Sending::Ipv4Only if postfix.forced_only().is_some() => match applied.get(&d.name) {
+                    Some(Route::Ipv6) => Protocol::Ipv6,
+                    _ => Protocol::Ipv4,
+                },
                 Sending::Ipv4Only => Protocol::Ipv4,
                 _ => applied
                     .get(&d.name)
@@ -1709,7 +1834,7 @@ fn build_settings(postfix: &Postfix, addrs: &MailAddrs, prefs: &[DomainPref]) ->
         server_ipv6: addrs.ipv6.clone(),
         domains,
         notes: notes(postfix, addrs, prefs),
-        ipv6_active: sending != Sending::Ipv4Only,
+        ipv6_active: sending != Sending::Ipv4Only || postfix.forced_only().is_some(),
     }
 }
 
@@ -3542,5 +3667,72 @@ submission inet  n       -       y       -       -       smtpd -o syslog_name=po
         assert_eq!(end.bind4(), Bind4::ByHand("192.0.2.1".into()));
         assert!(end.service("smtp-ipv4only").is_some());
         exec::run("postfix", ["check"]).await.unwrap();
+    }
+
+    #[test]
+    fn a_forced_domain_gets_ipv6_for_itself_only() {
+        // IPv4 only now; one domain set to IPv6 with "Use IPv6 anyway"
+        // while the check does not pass.
+        let now = after(&legacy(), &plan(&legacy(), &off()));
+        let forced_only = want(None, Ipv6Use::ForcedOnly(V6.into()), entries(&[("shop.example", Route::Ipv6)]));
+        let steps = plan(&now, &forced_only);
+        assert!(steps.open.is_empty(), "the stock services stay limited to IPv4");
+        let done = after(&now, &steps);
+        assert_eq!(done.sending(), Sending::Ipv4Only);
+        assert_eq!(done.forced_only(), Some(V6));
+        assert_eq!(done.bind6.as_deref(), Some(V6));
+        assert!(done.service("smtp-ipv6").is_some_and(|s| service_sends(s, Route::Ipv6)));
+        assert!(plan(&done, &forced_only).is_empty(), "settled in one run");
+
+        // A server that sent over IPv6 for every domain (the old way a
+        // forced choice was applied): the stock services close again.
+        let full = sending_v6("ipv4", "");
+        assert_eq!(full.forced_only(), None);
+        let closed = after(&full, &plan(&full, &forced_only));
+        assert_eq!(closed.sending(), Sending::Ipv4Only);
+        assert_eq!(closed.forced_only(), Some(V6));
+
+        // The check passes later: everyone may use IPv6.
+        let open = want(None, Ipv6Use::From(V6.into()), entries(&[("shop.example", Route::Ipv6)]));
+        let opened = after(&closed, &plan(&closed, &open));
+        assert_eq!(opened.sending(), Sending::Pinned(V6.into()));
+        assert_eq!(opened.forced_only(), None);
+    }
+
+    /// Postfix sending over IPv6 for shop.example only.
+    fn forced_only_postfix() -> Postfix {
+        let now = after(&legacy(), &plan(&legacy(), &off()));
+        let forced_only = want(None, Ipv6Use::ForcedOnly(V6.into()), entries(&[("shop.example", Route::Ipv6)]));
+        after(&now, &plan(&now, &forced_only))
+    }
+
+    #[test]
+    fn a_failed_lookup_keeps_the_address_the_forced_domains_send_from() {
+        let p = forced_only_postfix();
+        assert_eq!(p.forced_only(), Some(V6));
+        assert_eq!(mail_ipv6(Some(&p), &facts(None, &[V6])).as_deref(), Some(V6));
+        // Gone from the interfaces: nothing to keep.
+        assert_eq!(mail_ipv6(Some(&p), &facts(None, &[])), None);
+        // A lookup that answers still decides.
+        assert_eq!(mail_ipv6(Some(&p), &facts(Some("2606:4700::1"), &[V6])), None);
+        // Limited to IPv4 for every domain: nothing pinned to keep.
+        let limited = after(&legacy(), &plan(&legacy(), &off()));
+        assert_eq!(limited.forced_only(), None);
+        assert_eq!(mail_ipv6(Some(&limited), &facts(None, &[V6])), None);
+    }
+
+    #[test]
+    fn without_the_database_the_forced_domains_come_from_the_table() {
+        let p = forced_only_postfix();
+        assert_eq!(forced_domains(&p, None), vec!["shop.example".to_string()]);
+        // The database decides when it can be read.
+        let prefs = vec![pref("example.com", Preference::Ipv6), forced("other.example")];
+        assert_eq!(forced_domains(&p, Some(prefs.as_slice())), vec!["other.example".to_string()]);
+        // A Postfix that sends over IPv6 for every domain: no domain is
+        // made out to be forced from its table.
+        let full = sending_v6("ipv4", "");
+        assert!(forced_domains(&full, None).is_empty());
+        let limited = after(&legacy(), &plan(&legacy(), &off()));
+        assert!(forced_domains(&limited, None).is_empty());
     }
 }

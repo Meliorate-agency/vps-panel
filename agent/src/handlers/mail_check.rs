@@ -10,6 +10,7 @@
 
 use crate::error::{AgentError, AgentResult};
 use crate::exec;
+use crate::handlers::dns::ZoneIpv6;
 use crate::handlers::mail::mail_conn;
 use crate::handlers::mail_ip::{self, Bind4, Ipv4Source, MailAddrs};
 use crate::state::AppState;
@@ -20,7 +21,7 @@ use axum::{
 use futures::StreamExt;
 use mysql_async::prelude::*;
 use serde::Serialize;
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::future::Future;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use std::pin::Pin;
@@ -747,13 +748,15 @@ fn ipv6_address_item(addrs: &MailAddrs) -> MailCheckItem {
             ),
         ),
         // Kept because Postfix is pinned to it, though the lookup found no
-        // AAAA (mail_ip::mail_ipv6).
+        // AAAA (mail_ip::mail_ipv6). Not sending over IPv6 for every domain,
+        // it does for the ones set to IPv6 with "Use IPv6 anyway".
         (Some(a), _) if addrs.facts.published.is_none() => item(
             ID,
             LABEL,
             Status::Warn,
             format!(
-                "{a} is on this server and Postfix sends over IPv6 from it, but this server found no AAAA record for the panel hostname {} just now.",
+                "{a} is on this server and Postfix sends {} over IPv6 from it, but this server found no AAAA record for the panel hostname {} just now.",
+                if addrs.sends_ipv6 { "mail" } else { "the mail of the domains set to IPv6 with \"Use IPv6 anyway\"" },
                 addrs.facts.host
             ),
         ),
@@ -950,13 +953,17 @@ pub(crate) async fn reverse_dns_items(r: &dyn Resolver, addr: &str, helo: &str) 
 /// with its outcome; a domain missing from it was not reached in time.
 /// `held` are the domains Postfix keeps off this address meanwhile
 /// (`mail_ip::held_domains`), `off` the zones on this panel with IPv6
-/// switched off, whose mail domains it keeps off it too.
+/// switched off, whose mail domains it keeps off it too. `forced` are the
+/// domains set to IPv6 with "Use IPv6 anyway": their mail leaves from the
+/// address whatever their record says, so the record is their owner's
+/// concern and no reason to keep every other domain off it.
 fn spf_sweep_item(
     domains: &[String],
     results: &[(String, Spf)],
     addr: &str,
     held: &[String],
     off: &[String],
+    forced: &[String],
 ) -> MailCheckItem {
     const ID: &str = "spf";
     const LABEL: &str = "SPF covers the address";
@@ -974,12 +981,33 @@ fn spf_sweep_item(
     }
     if !refused.is_empty() {
         let those = if refused.len() == 1 { "that domain" } else { "those domains" };
-        // Held to IPv4, their mail never leaves from this address: not a
-        // reason to keep every other domain off it.
-        if refused.iter().all(|d| held.contains(d) || off.contains(d)) {
+        // Held to IPv4, their mail never leaves from this address; forced,
+        // it leaves from it whatever the record says. Neither is a reason
+        // to keep every other domain off it.
+        if refused
+            .iter()
+            .all(|d| forced.contains(d) || held.contains(d) || off.contains(d))
+        {
+            // A forced choice is never held, not even in a zone with IPv6
+            // off, so it is told apart first.
+            let (anyway, rest): (Vec<String>, Vec<String>) =
+                refused.iter().cloned().partition(|d| forced.contains(d));
             let (switched_off, spf_held): (Vec<String>, Vec<String>) =
-                refused.iter().cloned().partition(|d| off.contains(d));
+                rest.into_iter().partition(|d| off.contains(d));
             let mut said: Vec<String> = Vec::new();
+            if !anyway.is_empty() {
+                let (that, its) = if anyway.len() == 1 {
+                    ("that domain is", "its")
+                } else {
+                    ("those domains are", "their")
+                };
+                said.push(format!(
+                    "The SPF record of {} does not allow mail from {addr}, but {that} set to IPv6 with \"Use IPv6 anyway\", so Postfix sends {its} mail from it all the same and receivers may refuse it. \
+                     Run the DNS check of {} for the record to publish.",
+                    join_names(&anyway),
+                    if anyway.len() == 1 { "that domain" } else { "those domains" },
+                ));
+            }
             if !spf_held.is_empty() {
                 let those = if spf_held.len() == 1 { "that domain" } else { "those domains" };
                 said.push(format!(
@@ -1064,11 +1092,13 @@ pub(crate) async fn spf_sweep(r: &dyn Resolver, domains: &[String], ip: IpAddr) 
 }
 
 /// What the IPv6 checks know besides the address: the domains Postfix holds
-/// to IPv4 (`spf_sweep_item`) and the zone of the HELO name on this panel.
+/// to IPv4, the ones set to IPv6 with force (`spf_sweep_item`) and the zone
+/// of the HELO name on this panel.
 #[derive(Default)]
 pub(crate) struct FamilyCtx<'a> {
     pub held: &'a [String],
     pub off: &'a [String],
+    pub forced: &'a [String],
     pub helo_zone: Option<&'a HeloZone>,
 }
 
@@ -1098,7 +1128,7 @@ async fn family_check(
         checks.push(match (domains, addr.parse::<IpAddr>()) {
             (Ok(domains), Ok(ip)) => {
                 let results = spf_sweep(r, domains, ip).await;
-                spf_sweep_item(domains, &results, addr, ctx.held, ctx.off)
+                spf_sweep_item(domains, &results, addr, ctx.held, ctx.off, ctx.forced)
             }
             (Err(why), _) => item(
                 "spf",
@@ -1145,19 +1175,66 @@ async fn mail_domain_names(state: &AppState) -> Result<Vec<String>, String> {
         .map_err(|e| e.to_string())
 }
 
-/// The zone on this panel the HELO name is a name in, and whether it has
-/// IPv6 on. Never creates the pdns database (this runs at agent start).
-pub(crate) async fn helo_zone(state: &AppState, helo: &str) -> Option<HeloZone> {
-    let own_v6 = crate::handlers::dns::own_ipv6s_quick(&state.panel_db).await;
-    let zones = crate::handlers::dns::zone_ipv6_states(state, &own_v6).await.ok()?;
-    let mut name = helo.trim_end_matches('.').to_ascii_lowercase();
+/// The mail domains set to IPv6 with "Use IPv6 anyway". Empty when the
+/// database cannot be read: then nobody is excused (`spf_sweep_item`).
+async fn forced_domain_names(state: &AppState) -> Vec<String> {
+    let Ok(mut conn) = mail_conn(state).await else {
+        return Vec::new();
+    };
+    let rows: Vec<(String, String, u8)> = match conn
+        .query("SELECT name, ip_preference, ip_forced FROM virtual_domains ORDER BY name")
+        .await
+    {
+        Ok(rows) => rows,
+        Err(_) => return Vec::new(),
+    };
+    rows.into_iter()
+        .filter(|(_, pref, forced)| {
+            *forced != 0 && mail_ip::Preference::from_db(pref) == mail_ip::Preference::Ipv6
+        })
+        .map(|(name, _, _)| name)
+        .collect()
+}
+
+/// The zone among `zones` that `name` is a name in: the deepest one, as
+/// PowerDNS answers from it.
+fn zone_of<'a, T>(zones: &'a BTreeMap<String, T>, name: &str) -> Option<(String, &'a T)> {
+    let mut name = name.trim_end_matches('.').to_ascii_lowercase();
     loop {
         if let Some(z) = zones.get(&name) {
-            return Some((name, z.enabled));
+            return Some((name, z));
         }
         let (_, parent) = name.split_once('.')?;
         name = parent.to_string();
     }
+}
+
+/// The HELO name's zone when IPv6 was switched off for it under Domains.
+/// Only a stored choice counts: a zone from before the choice existed
+/// counts as off when its apex has no AAAA for this server, though the
+/// HELO name may still have its own, and the live check judges that.
+fn switched_off_zone(zones: &BTreeMap<String, ZoneIpv6>, helo: &str) -> Option<String> {
+    zone_of(zones, helo)
+        .filter(|(_, z)| z.stored == Some(false))
+        .map(|(name, _)| name)
+}
+
+async fn zone_states(state: &AppState) -> Option<BTreeMap<String, ZoneIpv6>> {
+    let own_v6 = crate::handlers::dns::own_ipv6s_quick(&state.panel_db).await;
+    crate::handlers::dns::zone_ipv6_states(state, &own_v6).await.ok()
+}
+
+/// The zone on this panel the HELO name is a name in, and whether it has
+/// IPv6 on. Never creates the pdns database (this runs at agent start).
+pub(crate) async fn helo_zone(state: &AppState, helo: &str) -> Option<HeloZone> {
+    let zones = zone_states(state).await?;
+    zone_of(&zones, helo).map(|(name, z)| (name, z.enabled))
+}
+
+/// The zone on this panel the HELO name is in, when IPv6 was switched off
+/// for it under Domains (`switched_off_zone`).
+pub(crate) async fn helo_zone_switched_off(state: &AppState, helo: &str) -> Option<String> {
+    switched_off_zone(&zone_states(state).await?, helo)
 }
 
 /// The zones with IPv6 off whose mail domains Postfix holds to IPv4: only
@@ -1171,14 +1248,30 @@ fn off_held(addrs: &MailAddrs) -> &[String] {
 }
 
 /// Is IPv6 fit to send from? The settings endpoints ask this before they
-/// let IPv6 be chosen, and the agent before it switches IPv6 on by itself.
-/// `dig` keeps the answers for the caller's own lookups afterwards.
+/// let IPv6 be chosen. `dig` keeps the answers for the caller's own lookups
+/// afterwards. The domains set to IPv6 with force are read from the
+/// database and do not count against it (`ipv6_check_excusing`).
 pub(crate) async fn ipv6_check(state: &AppState, addrs: &MailAddrs, dig: &Dig) -> MailIpFamilyCheck {
+    let forced = forced_domain_names(state).await;
+    ipv6_check_excusing(state, addrs, dig, &forced).await
+}
+
+/// `ipv6_check` with the domains set to IPv6 with force given by the
+/// caller: the agent asks it before it opens IPv6 to every domain, with the
+/// choices as they are about to be stored. Their own SPF records do not
+/// keep the other domains off the address.
+pub(crate) async fn ipv6_check_excusing(
+    state: &AppState,
+    addrs: &MailAddrs,
+    dig: &Dig,
+    forced: &[String],
+) -> MailIpFamilyCheck {
     let domains = mail_domain_names(state).await;
     let helo_zone = helo_zone(state, &addrs.helo).await;
     let ctx = FamilyCtx {
         held: &addrs.held,
         off: off_held(addrs),
+        forced,
         helo_zone: helo_zone.as_ref(),
     };
     bounded_family_check(
@@ -1200,9 +1293,11 @@ pub async fn ip_check(State(state): State<AppState>) -> AgentResult<Json<MailIpC
     let v4_item = ipv4_address_item(&addrs);
     let dig = Dig::default();
     let helo_zone = helo_zone(&state, &addrs.helo).await;
+    let forced = forced_domain_names(&state).await;
     let v6_ctx = FamilyCtx {
         held: &addrs.held,
         off: off_held(&addrs),
+        forced: &forced,
         helo_zone: helo_zone.as_ref(),
     };
     let v4_ctx = FamilyCtx::default();
@@ -2437,14 +2532,14 @@ mod tests {
         ];
         // Both are held: a warning that names them.
         let held = vec!["new.example".to_string(), "old.example".to_string()];
-        let it = spf_sweep_item(&domains, &results, V6, &held, &[]);
+        let it = spf_sweep_item(&domains, &results, V6, &held, &[], &[]);
         assert_eq!(it.status, Status::Warn);
         assert!(it.detail.contains("old.example, new.example"), "{}", it.detail);
         assert!(it.detail.contains("Postfix sends mail from those domains over IPv4 only"), "{}", it.detail);
         // One of them is not: its mail can leave from the address.
-        let it = spf_sweep_item(&domains, &results, V6, &held[1..], &[]);
+        let it = spf_sweep_item(&domains, &results, V6, &held[1..], &[], &[]);
         assert_eq!(it.status, Status::Fail);
-        assert_eq!(spf_sweep_item(&domains, &results, V6, &[], &[]).status, Status::Fail);
+        assert_eq!(spf_sweep_item(&domains, &results, V6, &[], &[], &[]).status, Status::Fail);
     }
 
     #[tokio::test]
@@ -2523,12 +2618,61 @@ mod tests {
             ("off.example".to_string(), Spf::Fail),
             ("old.example".to_string(), Spf::Fail),
         ];
-        let it = spf_sweep_item(&domains, &results, V6, &["old.example".to_string()], &["off.example".to_string()]);
+        let it = spf_sweep_item(&domains, &results, V6, &["old.example".to_string()], &["off.example".to_string()], &[]);
         assert_eq!(it.status, Status::Warn);
         assert!(it.detail.contains("The SPF record of old.example does not allow mail from 2001:db8:1::1"), "{}", it.detail);
         assert!(it.detail.contains("IPv6 is off for off.example under Domains, so its SPF record does not allow"), "{}", it.detail);
         // Not held and not off: it blocks, as before.
-        assert_eq!(spf_sweep_item(&domains, &results, V6, &[], &["off.example".to_string()]).status, Status::Fail);
+        assert_eq!(spf_sweep_item(&domains, &results, V6, &[], &["off.example".to_string()], &[]).status, Status::Fail);
+    }
+
+    #[test]
+    fn a_domain_set_to_ipv6_anyway_does_not_keep_ipv6_from_being_ready() {
+        let domains = vec!["example.com".to_string(), "forced.example".to_string(), "old.example".to_string()];
+        let results = vec![
+            ("example.com".to_string(), Spf::Pass),
+            ("forced.example".to_string(), Spf::Fail),
+            ("old.example".to_string(), Spf::SoftFail),
+        ];
+        let forced = vec!["forced.example".to_string()];
+        let held = vec!["old.example".to_string()];
+        let it = spf_sweep_item(&domains, &results, V6, &held, &[], &forced);
+        assert_eq!(it.status, Status::Warn);
+        assert!(
+            it.detail.contains("The SPF record of forced.example does not allow mail from 2001:db8:1::1, but that domain is set to IPv6 with \"Use IPv6 anyway\""),
+            "{}",
+            it.detail
+        );
+        assert!(it.detail.contains("The SPF record of old.example does not allow mail from 2001:db8:1::1. Until it does"), "{}", it.detail);
+        // Forced in a zone with IPv6 off: never held, so not said to be.
+        let it = spf_sweep_item(&domains, &results, V6, &held, &forced, &forced);
+        assert_eq!(it.status, Status::Warn);
+        assert!(it.detail.contains("set to IPv6 with \"Use IPv6 anyway\""), "{}", it.detail);
+        assert!(!it.detail.contains("IPv6 is off for forced.example"), "{}", it.detail);
+        // Not excused, it blocks as before; nor does the excuse cover a
+        // domain that is neither held nor forced.
+        assert_eq!(spf_sweep_item(&domains, &results, V6, &held, &[], &[]).status, Status::Fail);
+        assert_eq!(spf_sweep_item(&domains, &results, V6, &[], &[], &forced).status, Status::Fail);
+    }
+
+    #[test]
+    fn only_a_zone_switched_off_takes_the_helo_name_off_ipv6() {
+        let z = |enabled, stored| ZoneIpv6 { enabled, stored, own_aaaa: false };
+        let mut zones = BTreeMap::new();
+        // From before the choice existed, without an AAAA at the apex: it
+        // counts as off, but the HELO name may have an AAAA of its own.
+        zones.insert("example.com".to_string(), z(false, None));
+        assert_eq!(switched_off_zone(&zones, "panel.example.com"), None);
+        // Switched off under Domains.
+        zones.insert("example.com".to_string(), z(false, Some(false)));
+        assert_eq!(switched_off_zone(&zones, "Panel.Example.com.").as_deref(), Some("example.com"));
+        // The deepest zone answers for the name.
+        zones.insert("mail.example.com".to_string(), z(true, Some(true)));
+        assert_eq!(zone_of(&zones, "panel.mail.example.com").map(|(name, _)| name).as_deref(), Some("mail.example.com"));
+        assert_eq!(switched_off_zone(&zones, "panel.mail.example.com"), None);
+        assert_eq!(switched_off_zone(&zones, "mail.example.com"), None);
+        // A name in no zone here.
+        assert_eq!(switched_off_zone(&zones, "panel.example.org"), None);
     }
 
     #[test]
