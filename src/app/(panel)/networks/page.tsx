@@ -25,6 +25,7 @@ import InviteButton from "./InviteButton";
 import NetworkSetup from "./NetworkSetup";
 import NodeNameForm from "./NodeNameForm";
 import local from "./networks.module.css";
+import { requireSession } from "@/lib/auth";
 
 export const dynamic = "force-dynamic";
 
@@ -207,6 +208,9 @@ function NetworkCard({
 }
 
 export default async function NetworksPage() {
+  // Checked here, not only in the (panel) layout: a client-side navigation
+  // renders the page without re-running the layout.
+  await requireSession();
   const id = nodeIdentity();
   const own = ownUrl();
   const now = Date.now();

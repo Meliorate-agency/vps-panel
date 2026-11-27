@@ -28,7 +28,9 @@ export async function proxy(req: NextRequest) {
   // a form their callers understand (a redirect() the client follows, a 401).
   // A redirect from here would break both. Neither answers with a document,
   // so they pass through as they are, under the policy next.config.ts sets.
-  if (req.headers.has("next-action") || pathname.startsWith("/api/")) {
+  // Only a POST is an action call: Next renders a GET that carries the
+  // header as an ordinary page, so it must not skip the session check.
+  if ((req.method === "POST" && req.headers.has("next-action")) || pathname.startsWith("/api/")) {
     return NextResponse.next();
   }
 

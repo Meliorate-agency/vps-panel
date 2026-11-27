@@ -7,6 +7,7 @@ import styles from "@/components/page.module.css";
 import local from "./page.module.css";
 import ConnectionInfo from "./ConnectionInfo";
 import ToolPreview from "./ToolPreview";
+import { requireSession } from "@/lib/auth";
 
 export const metadata = { title: "MCP" };
 export const dynamic = "force-dynamic";
@@ -20,6 +21,9 @@ export const dynamic = "force-dynamic";
 type PreviewTool = Omit<Tool, "call">;
 
 export default async function AiAgentPage() {
+  // Checked here, not only in the (panel) layout: a client-side navigation
+  // renders the page without re-running the layout.
+  await requireSession();
   // The token is stored only as a hash, so the config snippet carries a
   // placeholder for it.
   const resolved = getMcpTokenInfo();

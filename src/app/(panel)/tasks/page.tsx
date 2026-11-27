@@ -9,6 +9,7 @@ import {
 import Table from "@/components/Table/Table";
 import StatusBadge from "@/components/StatusBadge/StatusBadge";
 import styles from "@/components/page.module.css";
+import { requireSession } from "@/lib/auth";
 
 export const dynamic = "force-dynamic";
 
@@ -33,6 +34,9 @@ export default async function TasksPage({
 }: {
   searchParams: Promise<{ day?: string }>;
 }) {
+  // Checked here, not only in the (panel) layout: a client-side navigation
+  // renders the page without re-running the layout.
+  await requireSession();
   const sp = await searchParams;
   const tz = getPanelTimezone();
   const today = todayForTasks();

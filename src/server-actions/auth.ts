@@ -7,6 +7,7 @@ import {
   getSession,
   issueSession,
   revokeSession,
+  revokeSessionFamily,
   setAuthCookies,
   syncAdminFromEnv,
 } from "@/lib/auth";
@@ -82,10 +83,11 @@ export async function loginAction(_prev: ActionResult | null, fd: FormData): Pro
 export async function logoutAction(): Promise<void> {
   const s = await getSession();
   if (s) {
-    revokeSession(s.jti);
-    // The refresh token too: it could otherwise still be traded for a new
-    // session after signing out.
-    if (s.refreshJti) revokeSession(s.refreshJti);
+    // Every token of this sign-in: the refresh token, which could otherwise
+    // still be traded for a new session, and the access tokens earlier
+    // refreshes replaced.
+    await revokeSessionFamily(s.jti);
+    if (s.refreshJti) await revokeSessionFamily(s.refreshJti);
     writeAudit({ actorId: s.userId, action: "logout", result: "ok" });
   }
   await clearAuthCookies();

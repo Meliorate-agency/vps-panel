@@ -24,12 +24,16 @@ import EditMailboxRow from "./EditMailboxRow";
 import MailboxActions, { type WebmailOff } from "./MailboxActions";
 import MailboxTable, { type MailboxRow } from "./MailboxTable";
 import local from "./mailboxes.module.css";
+import { requireSession } from "@/lib/auth";
 
 export const dynamic = "force-dynamic";
 
 type MailboxListShape = { server: string; mailboxes: { id: number; email: string; quota_mb: number }[] };
 
 export default async function MailboxesPage() {
+  // Checked here, not only in the (panel) layout: a client-side navigation
+  // renders the page without re-running the layout.
+  await requireSession();
   const knownDomains = mailboxDomains();
 
   const [mailboxResp, sysinfo, recipes, aliases, mailDomains, mailIp] = await Promise.all([

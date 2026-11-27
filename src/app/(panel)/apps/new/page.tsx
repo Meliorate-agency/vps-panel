@@ -11,6 +11,7 @@ import { quickInstallAction } from "@/server-actions/quickInstall";
 import { agent } from "@/lib/agent";
 import { freeSlotsFor } from "@/lib/appSlots";
 import styles from "@/components/page.module.css";
+import { requireSession } from "@/lib/auth";
 
 export const metadata = { title: "Deploy app" };
 
@@ -26,6 +27,9 @@ export default async function NewAppPage({
 }: {
   searchParams: Promise<{ method?: string }>;
 }) {
+  // Checked here, not only in the (panel) layout: a client-side navigation
+  // renders the page without re-running the layout.
+  await requireSession();
   const sp = await searchParams;
   // method=github → ask for a repo URL; the agent will git-clone + npm
   // install into source_dir before starting the unit. No method param =

@@ -36,6 +36,7 @@ import { domainIpv6Action, setDomainIpv6Action } from "@/server-actions/ipv6";
 import DomainDeleteButton from "../DomainDeleteButton";
 import SiteDeleteButton from "../SiteDeleteButton";
 import SslIssuingBadge from "../SslIssuingBadge";
+import { requireSession } from "@/lib/auth";
 
 export const dynamic = "force-dynamic";
 
@@ -57,6 +58,9 @@ export default async function DomainDetailPage({
 }: {
   params: Promise<{ domain: string }>;
 }) {
+  // Checked here, not only in the (panel) layout: a client-side navigation
+  // renders the page without re-running the layout.
+  await requireSession();
   const { domain } = await params;
 
   const site = db()

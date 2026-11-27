@@ -3,7 +3,7 @@ import { agent, type GitStatusResp } from "@/lib/agent";
 import StatusBadge from "@/components/StatusBadge/StatusBadge";
 import Table from "@/components/Table/Table";
 import styles from "@/components/page.module.css";
-import { getSession } from "@/lib/auth";
+import { getSession, requireSession } from "@/lib/auth";
 import {
   startAppAction,
   stopAppAction,
@@ -42,6 +42,9 @@ export default async function AppDetailPage({
 }: {
   params: Promise<{ name: string }>;
 }) {
+  // Checked here, not only in the (panel) layout: a client-side navigation
+  // renders the page without re-running the layout.
+  await requireSession();
   const { name } = await params;
   let app;
   try {

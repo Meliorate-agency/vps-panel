@@ -6,10 +6,14 @@ import styles from "@/components/page.module.css";
 import grid from "./grid.module.css";
 import FolderBreakdown from "./FolderBreakdown";
 import { fetchLoadOne, fetchMemUsedPct } from "./samples";
+import { requireSession } from "@/lib/auth";
 
 export const dynamic = "force-dynamic";
 
 export default async function DashboardPage() {
+  // Checked here, not only in the (panel) layout: a client-side navigation
+  // renders the page without re-running the layout.
+  await requireSession();
   const [info, apps, certs, address] = await Promise.all([
     agent.sysinfo().catch(() => null),
     // null = the agent did not answer, which must not read as "0 apps" or

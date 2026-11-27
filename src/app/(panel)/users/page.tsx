@@ -1,5 +1,5 @@
 import { agent } from "@/lib/agent";
-import { getSession } from "@/lib/auth";
+import { getSession, requireSession } from "@/lib/auth";
 import Table from "@/components/Table/Table";
 import StatusBadge from "@/components/StatusBadge/StatusBadge";
 import styles from "@/components/page.module.css";
@@ -26,6 +26,9 @@ import users from "./users.module.css";
 export const dynamic = "force-dynamic";
 
 export default async function UsersPage() {
+  // Checked here, not only in the (panel) layout: a client-side navigation
+  // renders the page without re-running the layout.
+  await requireSession();
   // Read live sshd state so the notice below reflects what's actually
   // configured right now — not a stale "install.sh disabled SSH password"
   // assumption that becomes wrong as soon as the operator flips the

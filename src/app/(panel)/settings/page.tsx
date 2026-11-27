@@ -1,6 +1,6 @@
 import Link from "next/link";
 import { changePasswordAction, changeAdminEmailAction } from "@/server-actions/auth";
-import { getSession } from "@/lib/auth";
+import { getSession, requireSession } from "@/lib/auth";
 import {
   setPanelTimezoneAction,
   setSettingAction,
@@ -71,6 +71,9 @@ import Ipv6Section, { loadIpv6Status } from "./Ipv6Section";
 export const dynamic = "force-dynamic";
 
 export default async function SettingsPage() {
+  // Checked here, not only in the (panel) layout: a client-side navigation
+  // renders the page without re-running the layout.
+  await requireSession();
   const session = await getSession();
   const ipAllowlist = await getSetting("panel.ip_allowlist", "");
   const panelAccess = await getSetting(PANEL_ACCESS_KEY, "");

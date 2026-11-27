@@ -50,6 +50,7 @@ import PgDbEditButton from "./PgDbEditButton";
 import PgVectorButton from "./PgVectorButton";
 import ChangePasswordButton from "./ChangePasswordButton";
 import ConfirmDeleteButton from "@/components/ConfirmDeleteButton/ConfirmDeleteButton";
+import { requireSession } from "@/lib/auth";
 
 export const dynamic = "force-dynamic";
 
@@ -62,6 +63,9 @@ const DB_GUI_SLUGS = [
 ] as const;
 
 export default async function DatabasesPage() {
+  // Checked here, not only in the (panel) layout: a client-side navigation
+  // renders the page without re-running the layout.
+  await requireSession();
   const [users, dbs, recipes, addr] = await Promise.all([
     agent.databases.listUsers().catch(() => []),
     agent.databases.listDatabases().catch(() => []),

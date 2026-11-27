@@ -4,6 +4,7 @@ import { db } from "@/lib/db";
 import styles from "@/components/page.module.css";
 import { listLinks } from "@/lib/serverSnapshots/links";
 import ServerSnapshots from "./ServerSnapshots";
+import { requireSession } from "@/lib/auth";
 
 export const dynamic = "force-dynamic";
 
@@ -24,6 +25,9 @@ function panelIsFresh(): boolean {
 }
 
 export default async function ServerSnapshotsPage() {
+  // Checked here, not only in the (panel) layout: a client-side navigation
+  // renders the page without re-running the layout.
+  await requireSession();
   const list = await agent.serverSnapshots.list().catch(() => ({ snapshots: [], free_bytes: null }));
   const fresh = panelIsFresh();
   return (

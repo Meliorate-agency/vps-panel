@@ -100,12 +100,15 @@ export async function issueSession(
     .setExpirationTime(now + refreshSeconds)
     .sign(secret());
 
+  // A new sign-in starts a token family: refreshes carry it on, signing out
+  // revokes all of it (revokeSessionFamily).
+  const family = randomUUID();
   db()
-    .prepare(`INSERT INTO sessions (jti, user_id, expires_at, revoked) VALUES (?, ?, ?, 0)`)
-    .run(accessJti, userId, sqliteTimestamp(accessSeconds));
+    .prepare(`INSERT INTO sessions (jti, user_id, expires_at, revoked, family) VALUES (?, ?, ?, 0, ?)`)
+    .run(accessJti, userId, sqliteTimestamp(accessSeconds), family);
   db()
-    .prepare(`INSERT INTO sessions (jti, user_id, expires_at, revoked) VALUES (?, ?, ?, 0)`)
-    .run(refreshJti, userId, sqliteTimestamp(refreshSeconds));
+    .prepare(`INSERT INTO sessions (jti, user_id, expires_at, revoked, family) VALUES (?, ?, ?, 0, ?)`)
+    .run(refreshJti, userId, sqliteTimestamp(refreshSeconds), family);
 
   return { access, refresh, accessSeconds, refreshSeconds };
 }
@@ -195,6 +198,21 @@ export async function requireAdmin(): Promise<Session> {
 
 export async function revokeSession(jti: string) {
   db().prepare(`UPDATE sessions SET revoked = 1 WHERE jti = ?`).run(jti);
+}
+
+/**
+ * Revokes every token of the sign-in that `jti` belongs to: the access
+ * tokens earlier refreshes replaced stay valid until they expire otherwise
+ * (up to 30 days with Remember me), so signing out has to reach them too.
+ */
+export async function revokeSessionFamily(jti: string) {
+  const row = db().prepare(`SELECT family FROM sessions WHERE jti = ?`).get(jti) as
+    | { family: string | null }
+    | undefined;
+  if (row?.family) {
+    db().prepare(`UPDATE sessions SET revoked = 1 WHERE family = ?`).run(row.family);
+  }
+  await revokeSession(jti);
 }
 
 export async function syncAdminFromEnv(): Promise<void> {

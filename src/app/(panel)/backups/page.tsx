@@ -4,6 +4,7 @@ import Table from "@/components/Table/Table";
 import styles from "@/components/page.module.css";
 import { runBackupAction } from "@/server-actions/backups";
 import BackupRunner from "./BackupRunner";
+import { requireSession } from "@/lib/auth";
 
 export const dynamic = "force-dynamic";
 
@@ -14,6 +15,9 @@ export const dynamic = "force-dynamic";
  * snapshot (the move to another server, /server-snapshots).
  */
 export default async function BackupsPage() {
+  // Checked here, not only in the (panel) layout: a client-side navigation
+  // renders the page without re-running the layout.
+  await requireSession();
   const backups = await agent.backups.list().catch(() => []);
   return (
     <div>

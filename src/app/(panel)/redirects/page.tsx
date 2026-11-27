@@ -12,10 +12,14 @@ import {
 import RedirectForm from "./RedirectForm";
 import EditRedirectRow from "./EditRedirectRow";
 import local from "./redirects.module.css";
+import { requireSession } from "@/lib/auth";
 
 export const dynamic = "force-dynamic";
 
 export default async function RedirectsPage() {
+  // Checked here, not only in the (panel) layout: a client-side navigation
+  // renders the page without re-running the layout.
+  await requireSession();
   // Only vhosts the panel wrote can carry redirect rules: the Sites tab's
   // `site-<domain>` files and app vhosts with the `# vps-app:` marker. The
   // panel host and hand-written vhosts are left alone (the agent enforces

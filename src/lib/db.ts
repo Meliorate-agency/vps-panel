@@ -259,6 +259,17 @@ function applyMigrations(handle: Database.Database) {
   migrateAppsSchema(handle);
   migrateUsersSchema(handle);
   migrateNotificationsSchema(handle);
+  migrateSessionsSchema(handle);
+}
+
+function migrateSessionsSchema(handle: Database.Database) {
+  const cols = handle.prepare("PRAGMA table_info(sessions)").all() as ColumnInfo[];
+  if (cols.length === 0) return;
+  if (!cols.some((c) => c.name === "family")) {
+    // One id per sign-in, carried by every token a refresh issues from it,
+    // so signing out revokes the whole chain and not only the newest pair.
+    handle.exec("ALTER TABLE sessions ADD COLUMN family TEXT");
+  }
 }
 
 function migrateNotificationsSchema(handle: Database.Database) {

@@ -19,6 +19,7 @@ import GenerateKeypairForm from "./GenerateKeypairForm";
 import AddPublicKeyForm, { type SshUserOption } from "./AddPublicKeyForm";
 import KeyActionsMenu from "./KeyActionsMenu";
 import SshFileButton from "./SshFileButton";
+import { requireSession } from "@/lib/auth";
 
 export const dynamic = "force-dynamic";
 
@@ -38,6 +39,9 @@ const ROOT_FALLBACK: SystemUserRow = {
 };
 
 export default async function SshKeysPage() {
+  // Checked here, not only in the (panel) layout: a client-side navigation
+  // renders the page without re-running the layout.
+  await requireSession();
   // Every Linux account the agent surfaces (root + UID >= 33, minus the
   // service blocklist), so a key can be assigned to any of them — not just
   // the old hardcoded apps/root pair.

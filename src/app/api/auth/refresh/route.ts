@@ -32,8 +32,8 @@ export async function POST(req: NextRequest) {
   const oldJti = payload.jti as string;
   const userId = Number(payload.sub);
   const session = db()
-    .prepare(`SELECT revoked FROM sessions WHERE jti = ?`)
-    .get(oldJti) as { revoked: number } | undefined;
+    .prepare(`SELECT revoked, family FROM sessions WHERE jti = ?`)
+    .get(oldJti) as { revoked: number; family: string | null } | undefined;
   if (!session || session.revoked) {
     return new NextResponse("session revoked", { status: 401 });
   }
@@ -87,16 +87,28 @@ export async function POST(req: NextRequest) {
     .setExpirationTime(now + refreshSeconds)
     .sign(secret);
 
+  // The new pair belongs to the same sign-in, so signing out reaches it
+  // (rows from before families existed start one here).
+  const family = session.family ?? randomUUID();
+  // A refresh token is good for one exchange. Claiming it only if it is still
+  // unrevoked, in the same transaction as the inserts, means two refreshes
+  // sent at once with the same cookie cannot both mint a new chain: the
+  // second gets 401 (the keep-alive ignores it; the first one's cookies are
+  // already in the browser).
   const tx = db().transaction(() => {
-    db().prepare(`UPDATE sessions SET revoked = 1 WHERE jti = ?`).run(oldJti);
+    const claimed = db()
+      .prepare(`UPDATE sessions SET revoked = 1 WHERE jti = ? AND revoked = 0`)
+      .run(oldJti);
+    if (claimed.changes !== 1) return false;
     db()
-      .prepare(`INSERT INTO sessions (jti, user_id, expires_at, revoked) VALUES (?, ?, ?, 0)`)
-      .run(newAccessJti, userId, sqliteTimestamp(accessSeconds));
+      .prepare(`INSERT INTO sessions (jti, user_id, expires_at, revoked, family) VALUES (?, ?, ?, 0, ?)`)
+      .run(newAccessJti, userId, sqliteTimestamp(accessSeconds), family);
     db()
-      .prepare(`INSERT INTO sessions (jti, user_id, expires_at, revoked) VALUES (?, ?, ?, 0)`)
-      .run(newRefreshJti, userId, sqliteTimestamp(refreshSeconds));
+      .prepare(`INSERT INTO sessions (jti, user_id, expires_at, revoked, family) VALUES (?, ?, ?, 0, ?)`)
+      .run(newRefreshJti, userId, sqliteTimestamp(refreshSeconds), family);
+    return true;
   });
-  tx();
+  if (!tx()) return new NextResponse("session revoked", { status: 401 });
 
   const res = NextResponse.json({ ok: true });
   res.cookies.set(COOKIE_NAME, access, {

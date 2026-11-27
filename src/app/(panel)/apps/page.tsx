@@ -34,7 +34,7 @@ import {
   toggleAppFolderCollapsedAction,
 } from "@/server-actions/appFolders";
 import { getServerAddress } from "@/lib/serverAddress";
-import { getSession } from "@/lib/auth";
+import { getSession, requireSession } from "@/lib/auth";
 import { tailscaleCard } from "@/lib/tailscale";
 import styles from "@/components/page.module.css";
 import DeployMethodButton from "./DeployMethodButton";
@@ -195,6 +195,9 @@ function buildAppRow(
 }
 
 export default async function AppsPage() {
+  // Checked here, not only in the (panel) layout: a client-side navigation
+  // renders the page without re-running the layout.
+  await requireSession();
   // Read both preferences first (local SQLite, sub-ms): the apps-wide
   // toggle gates the per-app git fetches below; the n8n-specific one gates
   // the quick-install registry probe. They're deliberately independent so

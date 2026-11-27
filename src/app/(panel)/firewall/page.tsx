@@ -21,10 +21,14 @@ import ConfirmSubmitButton from "@/components/ConfirmSubmitButton/ConfirmSubmitB
 import PortForm from "./PortForm";
 import JailsTable from "./JailsTable";
 import Fail2banPolicyForm from "./Fail2banPolicyForm";
+import { requireSession } from "@/lib/auth";
 
 export const dynamic = "force-dynamic";
 
 export default async function FirewallPage() {
+  // Checked here, not only in the (panel) layout: a client-side navigation
+  // renders the page without re-running the layout.
+  await requireSession();
   const [status, jails, fail2banPolicy] = await Promise.all([
     agent.firewall.status().catch(() => null),
     agent.firewall.jails().catch(() => []),

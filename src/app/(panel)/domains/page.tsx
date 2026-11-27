@@ -24,6 +24,7 @@ import DomainDeleteButton from "./DomainDeleteButton";
 import SiteDeleteButton from "./SiteDeleteButton";
 import SslIssuingBadge from "./SslIssuingBadge";
 import SslTaskButton from "./SslTaskButton";
+import { requireSession } from "@/lib/auth";
 
 export const dynamic = "force-dynamic";
 
@@ -45,6 +46,9 @@ export default async function DomainsPage({
 }: {
   searchParams: Promise<{ prefill?: string; port?: string; error?: string }>;
 }) {
+  // Checked here, not only in the (panel) layout: a client-side navigation
+  // renders the page without re-running the layout.
+  await requireSession();
   const sp = await searchParams;
   const prefillRaw = (sp.prefill ?? "").trim().toLowerCase();
   const prefillDomain = FQDN_RE_PREFILL.test(prefillRaw) ? prefillRaw : undefined;
