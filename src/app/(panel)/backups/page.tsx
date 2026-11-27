@@ -34,7 +34,8 @@ export default async function BackupsPage() {
       </div>
 
       <div className={styles.muted} style={{ fontSize: 13, marginBottom: 12 }}>
-        Each backup holds the apps, Drive, mailboxes, the panel&apos;s settings and a dump of every database.
+        Each backup holds the apps, the static website folders, Drive, mailboxes and their DKIM keys, the
+        panel&apos;s settings and a dump of every database.
         Older ones are thinned out on their own (7 daily, 4 weekly, 6 monthly are kept). They are stored
         on this server, so they do not help if the server itself is lost. To move the whole server to
         another one, use <Link href="/server-snapshots">Server snapshots</Link>.

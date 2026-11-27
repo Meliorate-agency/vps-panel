@@ -58,13 +58,37 @@ const DEFAULT_PATHS: &[&str] = &[
 /// default set only when it exists. Copied live, like /srv/apps.
 const DOCKER_VOLUMES: &str = "/var/lib/docker/volumes";
 
-/// What a backup without an explicit path list covers. The dump folder is
-/// made by the dumps, which run first; like Docker's volumes it is only named
-/// when it is there.
+/// The static websites (folder-mode sites, `/var/www/<domain>`). The operator
+/// uploads these by hand, so nothing else on the box can rebuild them. The
+/// ACME webroot under it holds only throwaway challenge files and is left
+/// out (BACKUP_EXCLUDES), as the server snapshot does.
+const WEBSITES: &str = "/var/www";
+
+/// The DKIM private keys of the mail domains. Their public halves are
+/// published in DNS, so a lost key means new DNS records at every domain and
+/// unsigned mail until they spread. They are secrets, like the panel's .env
+/// and the mailboxes already in every backup: the repository is encrypted
+/// and a restore lands in the root-only RESTORE_ROOT, with the files keeping
+/// their owner (_rspamd) and mode.
+const DKIM_KEYS: &str = "/var/lib/rspamd/dkim";
+
+/// Backup roots that not every box has: restic fails a backup on a missing
+/// path, so these join the default set only when they exist. The dump folder
+/// is made by the dumps, which run first; there is no DKIM folder until mail
+/// is set up.
+const OPTIONAL_PATHS: &[&str] = &[DUMP_ROOT, DOCKER_VOLUMES, WEBSITES, DKIM_KEYS];
+
+/// What a backup without an explicit path list covers.
 fn default_backup_paths() -> Vec<String> {
+    default_backup_paths_where(|p| std::path::Path::new(p).is_dir())
+}
+
+/// default_backup_paths with the "is this folder there" question passed in,
+/// so the choice can be tested without those folders.
+fn default_backup_paths_where(is_dir: impl Fn(&str) -> bool) -> Vec<String> {
     let mut paths: Vec<String> = DEFAULT_PATHS.iter().map(|s| s.to_string()).collect();
-    for optional in [DUMP_ROOT, DOCKER_VOLUMES] {
-        if std::path::Path::new(optional).is_dir() {
+    for &optional in OPTIONAL_PATHS {
+        if is_dir(optional) {
             paths.push(optional.to_string());
         }
     }
@@ -86,7 +110,7 @@ fn validate_backup_path(p: &str) -> AgentResult<()> {
     }
     let allowed = DEFAULT_PATHS
         .iter()
-        .chain([&DUMP_ROOT, &DOCKER_VOLUMES])
+        .chain(OPTIONAL_PATHS)
         .any(|root| p == *root || p.starts_with(&format!("{root}/")));
     if !allowed {
         return Err(AgentError::Invalid(format!(
@@ -315,6 +339,9 @@ const BACKUP_EXCLUDES: &[&str] = &[
     "node_modules",
     "**/.next/cache",
     "/var/lib/vps-panel/build-snapshots",
+    // Only the challenge files of certificate orders, gone once the order is
+    // done; nginx serves it, so it is no website.
+    crate::nginx_template::ACME_WEBROOT,
 ];
 
 /// Where database dumps are written before restic picks them up; a backup
@@ -611,10 +638,46 @@ fn repo_env_from_cfg(cfg: &crate::config::Config) -> Vec<(&'static str, String)>
 #[cfg(test)]
 mod tests {
     use super::{
-        adopt_old_dump_root, ensure_repo_at, repo_is_missing, restored_dump_dirs, validate_backup_path,
-        validate_restore, StatusThrottle, DUMP_ROOT, OLD_DUMP_ROOT, RESTORE_ROOT, RETENTION, STATUS_EVERY,
+        adopt_old_dump_root, default_backup_paths_where, ensure_repo_at, repo_is_missing, restored_dump_dirs,
+        validate_backup_path, validate_restore, StatusThrottle, BACKUP_EXCLUDES, DKIM_KEYS, DUMP_ROOT,
+        OLD_DUMP_ROOT, RESTORE_ROOT, RETENTION, STATUS_EVERY, WEBSITES,
     };
     use crate::error::AgentError;
+
+    #[test]
+    fn static_websites_and_dkim_keys_are_backed_up_when_the_box_has_them() {
+        assert_eq!(WEBSITES, "/var/www");
+        assert_eq!(DKIM_KEYS, "/var/lib/rspamd/dkim");
+        // A box without mail has no DKIM folder: restic would fail on it.
+        let without_mail = default_backup_paths_where(|p| p != DKIM_KEYS);
+        assert!(without_mail.iter().any(|p| p == WEBSITES));
+        assert!(!without_mail.iter().any(|p| p == DKIM_KEYS));
+        let with_mail = default_backup_paths_where(|_| true);
+        assert!(with_mail.iter().any(|p| p == WEBSITES));
+        assert!(with_mail.iter().any(|p| p == DKIM_KEYS));
+        // The always-there roots do not depend on the check.
+        let bare = default_backup_paths_where(|_| false);
+        assert!(bare.iter().any(|p| p == "/var/vmail"));
+        assert!(!bare.iter().any(|p| p == WEBSITES || p == DUMP_ROOT));
+
+        // An explicit run may name them, or a site or key inside them.
+        for ok in [
+            "/var/www",
+            "/var/www/example.com",
+            "/var/lib/rspamd/dkim",
+            "/var/lib/rspamd/dkim/example.com.default.key",
+        ] {
+            assert!(validate_backup_path(ok).is_ok(), "{ok} should be allowed");
+        }
+        // But not the rest of rspamd's state, or a look-alike of either root.
+        for bad in ["/var/lib/rspamd", "/var/lib/rspamd/bayes.sqlite", "/var/wwwx", "/var/lib/rspamd/dkim-old"] {
+            assert!(validate_backup_path(bad).is_err(), "{bad} should be refused");
+        }
+
+        // The ACME webroot under /var/www holds only challenge files.
+        assert!(BACKUP_EXCLUDES.contains(&"/var/www/vps-panel-acme"));
+        assert!(BACKUP_EXCLUDES.contains(&crate::nginx_template::ACME_WEBROOT));
+    }
 
     #[test]
     fn restores_only_into_a_new_folder_under_the_restore_root() {
