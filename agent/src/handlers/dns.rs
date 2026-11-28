@@ -373,6 +373,7 @@ pub(crate) async fn create_zone_inner(
     // Stored either way, so the zone keeps it whatever its records say later.
     store_ipv6(&mut tx, id, ipv6).await?;
     tx.commit().await?;
+    zones_changed(&name).await;
 
     Ok(ZoneRow {
         id,
@@ -925,7 +926,18 @@ pub async fn delete_zone(
     )
     .await?;
     conn.exec_drop("DELETE FROM domains WHERE name = ?", (&zone,)).await?;
+    zones_changed(&zone).await;
     Ok(Json(OkResponse::default()))
+}
+
+/// PowerDNS learns of a zone added to or removed from its database only when
+/// its zone list refreshes (every 5 minutes). Until then a new zone answered
+/// REFUSED, and its packet cache kept that answer: a certificate ordered right
+/// after Add domain failed its validation, and the zone looked broken. Best
+/// effort: the records are in the database either way.
+async fn zones_changed(zone: &str) {
+    let _ = exec::run("pdns_control", ["rediscover"]).await;
+    let _ = exec::run("pdns_control", ["purge", &format!("{zone}$")]).await;
 }
 
 pub async fn sign_zone(Path(zone): Path<String>) -> AgentResult<Json<OkResponse>> {
